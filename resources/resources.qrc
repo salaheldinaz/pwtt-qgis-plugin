@@ -1,0 +1,7 @@
+<RCC>
+  <qresource prefix="/pwtt">
+    <file>icon_main.svg</file>
+    <file>icon_draw_aoi.svg</file>
+    <file>icon_run.svg</file>
+  </qresource>
+</RCC>
