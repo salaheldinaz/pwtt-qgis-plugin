@@ -1,83 +1,106 @@
 # PWTT QGIS Plugin — Battle Damage Detection
 
-A QGIS plugin that implements the **Pixel-Wise T-Test (PWTT)** algorithm for
-building damage detection from Sentinel-1 SAR imagery.  Three interchangeable
-processing backends let you choose between cloud and local execution.
+QGIS plugin implementing the **Pixel-Wise T-Test (PWTT)** algorithm for building damage detection from Sentinel-1 SAR imagery. Choose among three processing backends: openEO (recommended), Google Earth Engine, or full-local processing.
 
-## Backends
+## Requirements
 
-| Backend | Processing | Auth | Extra packages |
-|---------|-----------|------|----------------|
-| **openEO / CDSE** (recommended) | Server-side on Copernicus Data Space | OIDC (browser) or client credentials | `openeo` |
-| **Google Earth Engine** | Server-side on GEE | `ee.Authenticate()` + project name | `earthengine-api` |
-| **Local** | Downloads S1 GRD scenes, processes with scipy/numpy | CDSE username/password | numpy, scipy, rasterio (bundled with QGIS) |
+- **QGIS** 3.22 or later
+- **Python packages** (depending on backend and features):
+  - openEO backend: `openeo`
+  - GEE backend: `earthengine-api` (GEE logic is bundled; no repo `code/` folder needed)
+  - Local backend: `numpy`, `scipy`, `rasterio`, `requests`
+  - Building footprints (optional): `geopandas`, `rasterstats`
+
+Use the same Python that QGIS uses (e.g. from QGIS’s Python environment or OS package manager).
 
 ## Installation
 
-1. Copy (or symlink) the `pwtt_qgis/` folder into your QGIS plugins directory:
+### Option A: Install from ZIP (recommended)
+
+1. Build a release (from the project root):
+   ```bash
+   ./scripts/build-release.sh
+   ```
+   This creates `releases/pwtt_qgis-<version>.zip`.
+
+2. In QGIS: **Plugins → Manage and Install Plugins → Install from ZIP** → select the ZIP file.
+
+3. Enable the plugin in the list and install any backend-specific packages (see Requirements).
+
+### Option B: Install from folder
+
+1. Copy the `pwtt_qgis/` folder into your QGIS plugins directory:
    - **Linux/macOS:** `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/`
    - **Windows:** `%APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\`
-2. Restart QGIS.
-3. Go to **Plugins → Manage and Install Plugins**, find "PWTT - Battle Damage
-   Detection", and enable it.
-4. Install backend-specific Python packages as needed:
-   ```
-   pip install openeo          # for openEO backend
-   pip install earthengine-api # for GEE backend
-   pip install geopandas rasterstats   # for building footprints (optional)
-   ```
+2. Restart QGIS, then **Plugins → Manage and Install Plugins** → enable **PWTT - Battle Damage Detection**.
+3. Install backend-specific packages as needed (see Requirements).
+
+## Backends
+
+| Backend | Where it runs | Auth | Packages |
+|--------|----------------|------|----------|
+| **openEO** (recommended) | Copernicus Data Space (cloud) | OIDC browser or client ID/secret | `openeo` |
+| **Google Earth Engine** | GEE (cloud) | `ee.Authenticate()` + optional project name | `earthengine-api` |
+| **Local** | Your machine | CDSE username/password | `numpy`, `scipy`, `rasterio`, `requests` |
+
+- **openEO:** No data download; result GeoTIFF is downloaded when the batch job finishes.
+- **GEE:** Uses bundled PWTT logic; download is streamed to disk. Very large AOIs may require GEE Export to Drive instead of getDownloadURL.
+- **Local:** Downloads Sentinel-1 GRD products from CDSE into a `.pwtt_cache` folder next to the output directory; processes with scipy/rasterio. Disk and RAM usage depend on AOI size and number of scenes.
 
 ## Usage
 
-1. Click the **PWTT** toolbar button (or **Plugins → PWTT → PWTT - Battle
-   Damage Detection**).
-2. Select a **processing backend** from the dropdown.
-3. Enter credentials for the chosen backend.
-4. Click **Draw rectangle on map** and drag a rectangle over the area of
-   interest on the QGIS canvas.
-5. Set the **war start date**, **inference start date**, and pre/post
-   intervals.
-6. Optionally check **Include building footprints (OSM)** to compute per-building
-   damage scores (fetched from OpenStreetMap via Overpass).
+1. Open the tool: **PWTT** toolbar button or **Plugins → PWTT → PWTT - Battle Damage Detection**.
+2. Select a **processing backend** and enter its credentials.
+3. Click **Draw rectangle on map** and drag a rectangle on the map for the area of interest (AOI). The rectangle must have non-zero area.
+4. Set **War start date** and **Inference start date** (inference start must be on or after war start).
+5. Set **Pre-war interval** and **Post-war interval** (months).
+6. Optionally check **Include building footprints (OSM)** to compute per-building mean damage scores (buildings from OpenStreetMap via Overpass).
 7. Choose an **output directory**.
-8. Click **Run**.  Processing runs in the background; the progress bar and log
-   show status.
-9. On completion, the damage raster (and optional footprints vector) are
-   automatically loaded into the QGIS project.
+8. Click **Run**. Progress is shown in the bar and log. Results are added to the project when finished.
 
-## Output
+## Output files
 
 - **pwtt_result.tif** — Two-band GeoTIFF:
   - Band 1: `T_statistic` — continuous damage score (higher = more likely damaged)
-  - Band 2: `damage` — binary mask (1 where T_statistic > 3)
-- **pwtt_footprints.gpkg** (optional) — GeoPackage with building polygons and
-  a `T_statistic` column containing the mean damage score per building.
+  - Band 2: `damage` — binary mask (1 where T_statistic > 3)  
+  For the local backend, nodata is set to -9999 where applicable.
+
+- **pwtt_footprints.gpkg** (optional) — GeoPackage with building polygons and a `T_statistic` column (mean damage score per building). Created only if **Include building footprints (OSM)** is checked.
 
 ## Parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| War start date | 2022-02-22 | Date the conflict began |
-| Inference start date | 2024-07-01 | Start of the post-event assessment window |
-| Pre-war interval | 12 months | Reference period before war_start |
-| Post-war interval | 2 months | Assessment window after inference_start |
+| War start date | 2022-02-22 | Start of the conflict (start of pre/post split). |
+| Inference start date | 2024-07-01 | Start of the post-event window; must be ≥ war start. |
+| Pre-war interval | 12 months | Length of the pre-event reference period before war start. |
+| Post-war interval | 2 months | Length of the post-event assessment window after inference start. |
 
-## How It Works
+## How it works
 
-The PWTT compares Sentinel-1 SAR backscatter amplitude before and after a
-conflict using a pixel-wise pooled t-test.  A large t-statistic indicates a
-statistically significant change in backscatter — typically caused by building
-destruction.  The algorithm applies:
+PWTT compares Sentinel-1 SAR backscatter (VV/VH) before and after a conflict using a pixel-wise pooled t-test. A high t-statistic indicates statistically significant backscatter change, often due to building damage. The pipeline:
 
-1. Lee speckle filter on raw GRD imagery
-2. Log transform
-3. Per-orbit pixel-wise t-test (pre vs post)
-4. Max across orbits and VV/VH polarisations
-5. Focal median smoothing + multi-scale circular kernel averaging
-6. Urban mask (Dynamic World / WorldCover built-up fraction > 0.1)
-7. Damage threshold at T > 3
+1. Lee speckle filter on GRD imagery  
+2. Log transform  
+3. Pixel-wise t-test (pre vs post), per orbit  
+4. Max across orbits and VV/VH  
+5. Focal median smoothing and multi-scale circular kernel averaging  
+6. Urban mask (e.g. built-up fraction > 0.1)  
+7. Damage threshold at T > 3  
 
-For full details see the [PWTT paper (arXiv:2405.06323)](https://arxiv.org/pdf/2405.06323).
+Details: [PWTT paper (arXiv:2405.06323)](https://arxiv.org/pdf/2405.06323).
+
+## Building a release
+
+From the project root:
+
+```bash
+./scripts/build-release.sh              # build ZIP from current version in metadata.txt
+./scripts/build-release.sh --bump       # bump version from last commit, then build
+./scripts/build-release.sh --bump minor # bump minor version, then build
+```
+
+Version is read from `pwtt_qgis/metadata.txt`. Output: `releases/pwtt_qgis-<version>.zip`.
 
 ## License
 
