@@ -1,15 +1,22 @@
 # PWTT QGIS Plugin — Battle Damage Detection
 
-QGIS plugin implementing the **Pixel-Wise T-Test (PWTT)** algorithm for building damage detection from Sentinel-1 SAR imagery. Choose among three processing backends: openEO (recommended), Google Earth Engine, or full-local processing.
+QGIS plugin implementing the **Pixel-Wise T-Test (PWTT)** algorithm for building damage detection from Sentinel-1 SAR imagery. Choose among three processing backends: [openEO](https://openeo.org/) (recommended), [Google Earth Engine](https://earthengine.google.com/), or full-local processing.
+
+## Links
+
+- Project repo: [PWTT](https://github.com/oballinger/PWTT)
+- Issue tracker: [GitHub Issues](https://github.com/oballinger/PWTT/issues)
+- QGIS plugin docs: [QGIS Python Plugins](https://docs.qgis.org/latest/en/docs/pyqgis_developer_cookbook/plugins/)
+- QGIS plugin manager docs: [Manage and Install Plugins](https://docs.qgis.org/latest/en/docs/user_manual/plugins/plugins.html)
 
 ## Requirements
 
-- **QGIS** 3.22 or later
+- **[QGIS](https://qgis.org/)** 3.22 or later
 - **Python packages** (depending on backend and features):
-  - openEO backend: `openeo`
-  - GEE backend: `earthengine-api` (GEE logic is bundled; no repo `code/` folder needed)
-  - Local backend: `numpy`, `scipy`, `rasterio`, `requests`
-  - Building footprints (optional): `geopandas`, `rasterstats`
+  - openEO backend: [openeo](https://pypi.org/project/openeo/)
+  - GEE backend: [earthengine-api](https://pypi.org/project/earthengine-api/) (GEE logic is bundled; no repo `code/` folder needed)
+  - Local backend: [numpy](https://pypi.org/project/numpy/), [scipy](https://pypi.org/project/scipy/), [rasterio](https://pypi.org/project/rasterio/), [requests](https://pypi.org/project/requests/)
+  - Building footprints (optional): [geopandas](https://pypi.org/project/geopandas/), [rasterstats](https://pypi.org/project/rasterstats/)
 
 Use the same Python that QGIS uses (e.g. from QGIS’s Python environment or OS package manager).
 
@@ -39,13 +46,13 @@ Use the same Python that QGIS uses (e.g. from QGIS’s Python environment or OS 
 
 | Backend | Where it runs | Auth | Packages |
 |--------|----------------|------|----------|
-| **openEO** (recommended) | Copernicus Data Space (cloud) | OIDC browser or client ID/secret | `openeo` |
-| **Google Earth Engine** | GEE (cloud) | `ee.Authenticate()` + optional project name | `earthengine-api` |
+| **openEO** (recommended) | [Copernicus Data Space](https://dataspace.copernicus.eu/) (cloud) | OIDC browser or client ID/secret | `openeo` |
+| **Google Earth Engine** | [GEE](https://earthengine.google.com/) (cloud) | `ee.Authenticate()` + optional project name | `earthengine-api` |
 | **Local** | Your machine | CDSE username/password | `numpy`, `scipy`, `rasterio`, `requests` |
 
 - **openEO:** No data download; result GeoTIFF is downloaded when the batch job finishes.
 - **GEE:** Uses bundled PWTT logic; download is streamed to disk. Very large AOIs may require GEE Export to Drive instead of getDownloadURL.
-- **Local:** Downloads Sentinel-1 GRD products from CDSE into a `.pwtt_cache` folder next to the output directory; processes with scipy/rasterio. Disk and RAM usage depend on AOI size and number of scenes.
+- **Local:** Downloads [Sentinel-1 GRD](https://sentinels.copernicus.eu/web/sentinel/missions/sentinel-1) products from CDSE into a `.pwtt_cache` folder next to the output directory; processes with scipy/rasterio. Disk and RAM usage depend on AOI size and number of scenes.
 
 ## Usage
 
@@ -54,7 +61,7 @@ Use the same Python that QGIS uses (e.g. from QGIS’s Python environment or OS 
 3. Click **Draw rectangle on map** and drag a rectangle on the map for the area of interest (AOI). The rectangle must have non-zero area.
 4. Set **War start date** and **Inference start date** (inference start must be on or after war start).
 5. Set **Pre-war interval** and **Post-war interval** (months).
-6. Optionally check **Include building footprints (OSM)** to compute per-building mean damage scores (buildings from OpenStreetMap via Overpass).
+6. Optionally check **Include building footprints (OSM)** to compute per-building mean damage scores (buildings from [OpenStreetMap](https://www.openstreetmap.org/) via [Overpass API](https://overpass-api.de/)).
 7. Choose an **output directory**.
 8. Click **Run**. Progress is shown in the bar and log. Results are added to the project when finished.
 

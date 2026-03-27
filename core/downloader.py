@@ -3,15 +3,14 @@
 
 import json
 import os
-import re
 import zipfile
-import tempfile
 import requests
 from typing import List, Tuple, Optional
 from urllib.parse import quote
 
 
 CATALOGUE_URL = "https://catalogue.dataspace.copernicus.eu/odata/v1"
+DOWNLOAD_URL = "https://download.dataspace.copernicus.eu/odata/v1"
 AUTH_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
 
 
@@ -33,8 +32,12 @@ def get_token(username: str, password: str) -> str:
 
 
 def _wkt_to_odata_geom(wkt: str) -> str:
-    """Convert WKT to OData geography literal for Intersects."""
-    return "SRID=4326;" + wkt.replace(" ", "%20")
+    """Convert WKT to OData geography literal for Intersects.
+    QGIS outputs 'Polygon ((...))' but CDSE OData requires 'POLYGON((...))' (uppercase, no space before parens)."""
+    import re
+    normalized = wkt.strip()
+    normalized = re.sub(r'(?i)(polygon|multipolygon|point|linestring)\s*\(', lambda m: m.group(1).upper() + '(', normalized)
+    return "SRID=4326;" + normalized
 
 
 def search_s1_grd(
@@ -50,9 +53,9 @@ def search_s1_grd(
     end_odata = end_date.replace(" ", "T") + "T23:59:59.999Z" if "T" not in end_date else end_date
     filt = (
         f"Collection/Name eq 'SENTINEL-1' "
-        f"and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' and att/OData.CSC.StringAttribute/Value eq 'GRD') "
+        f"and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' and att/OData.CSC.StringAttribute/Value eq 'IW_GRDH_1S') "
         f"and OData.CSC.Intersects(area=geography'{geom}') "
-        f"and ContentDate/Start ge {start_odata} and ContentDate/Start le {end_odata}"
+        f"and ContentDate/Start gt {start_odata} and ContentDate/Start lt {end_odata}"
     )
     url = f"{CATALOGUE_URL}/Products?$filter={quote(filt)}&$top={max_results}"
     r = requests.get(url, headers={"Authorization": f"Bearer {access_token}"}, timeout=60)
@@ -75,7 +78,7 @@ def download_product(access_token: str, product_id: str, product_name: str, out_
         extract_dir = os.path.join(out_dir, safe_name)
         if os.path.isdir(extract_dir):
             return extract_dir
-    url = f"{CATALOGUE_URL}/Products('{product_id}')/$value"
+    url = f"{DOWNLOAD_URL}/Products('{product_id}')/$value"
     r = session.get(url, allow_redirects=False, timeout=30)
     while r.status_code in (301, 302, 303, 307):
         url = r.headers["Location"]

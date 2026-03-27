@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """QgsTask that runs a PWTT backend and loads results into the project."""
 
+import traceback
 from qgis.core import QgsTask, QgsRasterLayer, QgsVectorLayer, QgsProject
 import os
 
 
 class PWTTRunTask(QgsTask):
     """Background task: run backend.run(), then add raster (and optional footprints) to project."""
+
+    status_message_changed = None  # will be wired as a signal-like list of callbacks
 
     def __init__(self, backend, aoi_wkt, war_start, inference_start, pre_interval, post_interval, output_dir, include_footprints=False):
         super().__init__("PWTT processing", QgsTask.CanCancel)
@@ -20,7 +23,22 @@ class PWTTRunTask(QgsTask):
         self.include_footprints = include_footprints
         self.output_tif = None
         self.footprints_gpkg = None
-        self._progress_callback = None
+        self.exception = None
+        self.error_detail = ""
+        self._status_msg = ""
+        self._msg_callbacks = []
+
+    def on_status_message(self, callback):
+        """Register a callback(str) to receive progress messages from the worker thread."""
+        self._msg_callbacks.append(callback)
+
+    def _emit_msg(self, msg: str):
+        self._status_msg = msg
+        for cb in self._msg_callbacks:
+            try:
+                cb(msg)
+            except Exception:
+                pass
 
     def run(self):
         from .utils import ensure_output_dir
@@ -30,6 +48,7 @@ class PWTTRunTask(QgsTask):
 
         def progress(percent, msg):
             self.setProgress(percent)
+            self._emit_msg(msg)
             if self.isCanceled():
                 raise Exception("Canceled")
 
@@ -47,6 +66,7 @@ class PWTTRunTask(QgsTask):
             )
         except Exception as e:
             self.exception = e
+            self.error_detail = traceback.format_exc()
             return False
         self.output_tif = result_path
         if self.include_footprints and footprints_path:
@@ -62,6 +82,7 @@ class PWTTRunTask(QgsTask):
                     self.footprints_gpkg = footprints_path
             except Exception as e:
                 self.exception = e
+                self.error_detail = traceback.format_exc()
                 return False
         return True
 
@@ -74,6 +95,10 @@ class PWTTRunTask(QgsTask):
                 vl = QgsVectorLayer(self.footprints_gpkg, "PWTT footprints", "ogr")
                 if vl.isValid():
                     QgsProject.instance().addMapLayer(vl)
-        if not success and getattr(self, "exception", None):
+        if not success and self.exception:
             from qgis.core import QgsMessageLog, Qgis
-            QgsMessageLog.logMessage(str(self.exception), "PWTT", level=Qgis.Critical)
+            QgsMessageLog.logMessage(
+                f"{self.exception}\n{self.error_detail}",
+                "PWTT",
+                level=Qgis.Critical,
+            )

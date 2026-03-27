@@ -298,7 +298,7 @@ class PWTTMainDialog(QDialog):
         os.makedirs(out_dir, exist_ok=True)
         from ..core.pwtt_task import PWTTRunTask
         from qgis.core import QgsApplication
-        task = PWTTRunTask(
+        self._task = PWTTRunTask(
             backend=backend,
             aoi_wkt=self.aoi_wkt,
             war_start=self.war_start.date().toString("yyyy-MM-dd"),
@@ -308,11 +308,12 @@ class PWTTMainDialog(QDialog):
             output_dir=out_dir,
             include_footprints=self.include_footprints.isChecked(),
         )
-        task.taskCompleted.connect(self._on_task_completed)
-        task.taskTerminated.connect(self._on_task_terminated)
-        if hasattr(task, "progressChanged"):
-            task.progressChanged.connect(self.progress_bar.setValue)
-        QgsApplication.taskManager().addTask(task)
+        self._task.taskCompleted.connect(self._on_task_completed)
+        self._task.taskTerminated.connect(self._on_task_terminated)
+        if hasattr(self._task, "progressChanged"):
+            self._task.progressChanged.connect(self.progress_bar.setValue)
+        self._task.on_status_message(self._on_status_message)
+        QgsApplication.taskManager().addTask(self._task)
         self.run_btn.setEnabled(False)
         self.progress_bar.setValue(0)
         self.log_text.clear()
@@ -333,11 +334,27 @@ class PWTTMainDialog(QDialog):
             }
         return {}
 
+    def _on_status_message(self, msg: str):
+        """Receives progress messages from the background task thread."""
+        self.log_text.append(msg)
+
     def _on_task_completed(self):
         self.run_btn.setEnabled(True)
         self.progress_bar.setValue(100)
         self.log_text.append("Done.")
+        self._task = None
 
     def _on_task_terminated(self):
         self.run_btn.setEnabled(True)
-        self.log_text.append("Task failed or was cancelled.")
+        task = self._task
+        self._task = None
+        if task and task.exception:
+            err = str(task.exception)
+            self.log_text.append(f"<b>Task failed:</b> {err}")
+            if task.error_detail:
+                self.log_text.append(f"<pre>{task.error_detail}</pre>")
+            QMessageBox.critical(self, "PWTT — Error", err)
+        elif task and task.isCanceled():
+            self.log_text.append("Task was cancelled by user.")
+        else:
+            self.log_text.append("Task terminated unexpectedly (no error details available).")
