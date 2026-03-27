@@ -107,10 +107,10 @@ class LocalBackend(PWTTBackend):
 
         if progress_callback:
             progress_callback(5, "Searching pre-war products…")
-        pre_products = search_s1_grd(self._token, aoi_wkt, pre_start, war_start, max_results=10)
+        pre_products = search_s1_grd(self._token, aoi_wkt, pre_start, war_start, max_results=20)
         if progress_callback:
             progress_callback(10, "Searching post-war products…")
-        post_products = search_s1_grd(self._token, aoi_wkt, inference_start, post_end, max_results=10)
+        post_products = search_s1_grd(self._token, aoi_wkt, inference_start, post_end, max_results=20)
         if not pre_products or not post_products:
             raise RuntimeError("No Sentinel-1 GRD products found for the given AOI and dates.")
 
@@ -120,11 +120,19 @@ class LocalBackend(PWTTBackend):
         post_arrays = []
 
         def load_products(products, arrays_list, label):
-            for i, prod in enumerate(products[:max_per_period]):
+            loaded = 0
+            for i, prod in enumerate(products):
+                if loaded >= max_per_period:
+                    break
                 if progress_callback:
-                    progress_callback(0, f"{label} {i+1}/{min(len(products), max_per_period)}…")
+                    progress_callback(0, f"{label} {loaded+1}/{max_per_period}…")
                 pid, name = prod["Id"], prod["Name"]
-                safe_dir = download_product(self._token, pid, name, cache_dir)
+                # Try download; skip offline products that aren't immediately available
+                safe_dir = download_product(self._token, pid, name, cache_dir, wait_for_offline=False)
+                if safe_dir is None:
+                    if progress_callback:
+                        progress_callback(0, f"{label}: {name} is offline, skipping…")
+                    continue
                 vv_path, vh_path = find_vv_vh_in_safe(safe_dir)
                 if not vv_path or not vh_path:
                     continue
@@ -136,6 +144,7 @@ class LocalBackend(PWTTBackend):
                 with rasterio.open(vh_path) as src:
                     vh = src.read(1)
                 arrays_list.append((vv.astype(np.float32), vh.astype(np.float32), profile, transform, crs))
+                loaded += 1
 
         if progress_callback:
             progress_callback(12, "Downloading pre-war scenes…")
@@ -145,7 +154,11 @@ class LocalBackend(PWTTBackend):
         load_products(post_products, post_arrays, "Post")
 
         if not pre_arrays or not post_arrays:
-            raise RuntimeError("Could not load VV/VH data from any product.")
+            raise RuntimeError(
+                "Could not load VV/VH data from any product. "
+                "All available products may be in offline/cold storage. "
+                "Try a more recent date range or try again later."
+            )
 
         # Use first pre image as reference grid; reproject others into it
         ref_vv, ref_vh, ref_profile, ref_transform, ref_crs = pre_arrays[0]
