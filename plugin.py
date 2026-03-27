@@ -58,7 +58,7 @@ class PWTTPlugin:
         from .ui.main_dialog import PWTTLogDock, PWTTControlsDock
         mw = self.iface.mainWindow()
 
-        self.log_dock = PWTTLogDock(mw)
+        self.log_dock = PWTTLogDock(mw, self.plugin_dir)
         mw.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
         self.log_dock.hide()
 

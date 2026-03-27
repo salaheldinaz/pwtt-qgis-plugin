@@ -23,9 +23,16 @@ from qgis.PyQt.QtWidgets import (
     QFrame,
 )
 from qgis.PyQt.QtCore import QDate, Qt, pyqtSignal
-from qgis.PyQt.QtGui import QIcon
-from qgis.core import QgsSettings
-from qgis.gui import QgsFileWidget
+from qgis.PyQt.QtGui import QColor, QIcon
+from qgis.core import (
+    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
+    QgsGeometry,
+    QgsProject,
+    QgsSettings,
+    QgsWkbTypes,
+)
+from qgis.gui import QgsFileWidget, QgsRubberBand
 
 
 BACKENDS = [
@@ -33,6 +40,27 @@ BACKENDS = [
     ("gee", "Google Earth Engine"),
     ("local", "Local Processing"),
 ]
+
+
+def _read_plugin_version(plugin_dir):
+    """Single source of truth: pwtt_qgis/metadata.txt version= line."""
+    if not plugin_dir:
+        return None
+    meta = os.path.join(plugin_dir, "metadata.txt")
+    try:
+        with open(meta, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("version="):
+                    return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return None
+
+
+def _dock_title(base, plugin_dir):
+    v = _read_plugin_version(plugin_dir)
+    return f"{base} ({v})" if v else base
 
 
 def _get_backend_class(backend_id):
@@ -54,8 +82,8 @@ def _get_backend_class(backend_id):
 class PWTTLogDock(QDockWidget):
     """Dockable run-log panel: progress bar + scrollable log."""
 
-    def __init__(self, parent=None):
-        super().__init__("PWTT — Run Log", parent)
+    def __init__(self, parent=None, plugin_dir=None):
+        super().__init__(_dock_title("PWTT — Run Log", plugin_dir), parent)
         self.setObjectName("PWTTLogDock")
         self.setAllowedAreas(Qt.AllDockWidgetAreas)
 
@@ -84,7 +112,7 @@ class PWTTControlsDock(QDockWidget):
     _status_signal = pyqtSignal(str)
 
     def __init__(self, iface, plugin_dir, log_dock, parent=None):
-        super().__init__("PWTT — Damage Detection", parent)
+        super().__init__(_dock_title("PWTT — Damage Detection", plugin_dir), parent)
         self.setObjectName("PWTTControlsDock")
         self.setAllowedAreas(Qt.AllDockWidgetAreas)
         self.iface = iface
@@ -96,10 +124,19 @@ class PWTTControlsDock(QDockWidget):
         self._previous_map_tool = None
         self._task = None
 
+        self._rubber_band = None
         self._status_signal.connect(self.log_dock.log_text.append)
         self._build_ui()
         self._load_settings()
         self._on_backend_changed(self.backend_combo.currentIndex())
+
+    @staticmethod
+    def _hint(text: str) -> QLabel:
+        """Small grey italic one-liner placed at the top of a group box."""
+        lbl = QLabel(text)
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet("color: gray; font-style: italic; font-size: 0.85em;")
+        return lbl
 
     def _build_ui(self):
         scroll = QScrollArea()
@@ -114,6 +151,7 @@ class PWTTControlsDock(QDockWidget):
         # Backend selection
         backend_group = QGroupBox("Processing backend")
         bl = QVBoxLayout(backend_group)
+        bl.addWidget(self._hint("Choose which service runs the SAR analysis."))
         self.backend_combo = QComboBox()
         for bid, name in BACKENDS:
             self.backend_combo.addItem(name, bid)
@@ -128,6 +166,7 @@ class PWTTControlsDock(QDockWidget):
         # Credentials stacked by backend
         cred_group = QGroupBox("Credentials")
         cred_layout = QVBoxLayout(cred_group)
+        cred_layout.addWidget(self._hint("Login details for the selected backend."))
         self.cred_stacked = QStackedWidget()
 
         oe_page = QWidget()
@@ -166,9 +205,14 @@ class PWTTControlsDock(QDockWidget):
         # AOI
         aoi_group = QGroupBox("Area of interest")
         aoi_layout = QVBoxLayout(aoi_group)
+        aoi_layout.addWidget(self._hint("Draw a rectangle on the map to define the analysis area."))
         self.draw_aoi_btn = QPushButton(QIcon(":/pwtt/icon_draw_aoi.svg"), "Draw rectangle on map")
         self.draw_aoi_btn.clicked.connect(self._activate_aoi_tool)
         aoi_layout.addWidget(self.draw_aoi_btn)
+        self.clear_aoi_btn = QPushButton("Clear AOI")
+        self.clear_aoi_btn.clicked.connect(self._clear_aoi)
+        self.clear_aoi_btn.setEnabled(False)
+        aoi_layout.addWidget(self.clear_aoi_btn)
         self.aoi_label = QLabel("No area drawn. Click the button, then draw a rectangle on the map.")
         self.aoi_label.setWordWrap(True)
         aoi_layout.addWidget(self.aoi_label)
@@ -177,30 +221,55 @@ class PWTTControlsDock(QDockWidget):
         # Parameters
         params_group = QGroupBox("Parameters")
         params_layout = QFormLayout(params_group)
+        params_layout.setVerticalSpacing(2)
+
         self.war_start = QDateEdit()
         self.war_start.setCalendarPopup(True)
         self.war_start.setDate(QDate(2022, 2, 22))
         params_layout.addRow("War start date:", self.war_start)
+        params_layout.addRow(self._hint(
+            "When hostilities began. Imagery before this date becomes the undamaged baseline."
+        ))
+
         self.inference_start = QDateEdit()
         self.inference_start.setCalendarPopup(True)
         self.inference_start.setDate(QDate(2024, 7, 1))
         params_layout.addRow("Inference start date:", self.inference_start)
+        params_layout.addRow(self._hint(
+            "Start of the window to assess damage in. Must be on or after war start. "
+            "Move this forward to assess damage at a later point in the conflict."
+        ))
+
         self.pre_interval = QSpinBox()
         self.pre_interval.setRange(1, 60)
         self.pre_interval.setValue(12)
         params_layout.addRow("Pre-war interval (months):", self.pre_interval)
+        params_layout.addRow(self._hint(
+            "How many months before war start to collect baseline imagery. "
+            "12 months gives a stable reference; use fewer if pre-war data is scarce."
+        ))
+
         self.post_interval = QSpinBox()
         self.post_interval.setRange(1, 24)
         self.post_interval.setValue(2)
         params_layout.addRow("Post-war interval (months):", self.post_interval)
+        params_layout.addRow(self._hint(
+            "How many months of post-war imagery to collect from inference start. "
+            "1–2 months is typical; longer windows capture more passes but may mix damage events."
+        ))
+
         self.include_footprints = QCheckBox("Include building footprints (OSM)")
         self.include_footprints.setChecked(False)
         params_layout.addRow(self.include_footprints)
+        params_layout.addRow(self._hint(
+            "Overlay OpenStreetMap building footprints on the result to assess per-building damage."
+        ))
         layout.addWidget(params_group)
 
         # Output
         out_group = QGroupBox("Output")
         out_layout = QVBoxLayout(out_group)
+        out_layout.addWidget(self._hint("Folder where the result GeoTIFF will be saved."))
         self.output_dir = QgsFileWidget()
         self.output_dir.setStorageMode(QgsFileWidget.GetDirectory)
         out_layout.addWidget(self.output_dir)
@@ -233,6 +302,7 @@ class PWTTControlsDock(QDockWidget):
                 self.dep_label.setStyleSheet("color: orange; font-size: 0.9em;")
 
     def _activate_aoi_tool(self):
+        self._clear_rubber_band()
         canvas = self.iface.mapCanvas()
         if self.map_tool is None:
             from .aoi_tool import PWTTMapToolExtent
@@ -255,8 +325,38 @@ class PWTTControlsDock(QDockWidget):
             f"AOI: {rect.xMinimum():.4f}, {rect.yMinimum():.4f} — "
             f"{rect.xMaximum():.4f}, {rect.yMaximum():.4f} (WGS84)"
         )
+        self.clear_aoi_btn.setEnabled(True)
         self.iface.mapCanvas().setMapTool(self._previous_map_tool)
+        self._draw_rubber_band(rect)
         self._status_signal.emit("AOI set.")
+
+    def _draw_rubber_band(self, rect_4326):
+        """Draw a persistent rectangle on the canvas for the current AOI (in EPSG:4326)."""
+        canvas = self.iface.mapCanvas()
+        self._clear_rubber_band()
+        geom = QgsGeometry.fromRect(rect_4326)
+        canvas_crs = canvas.mapSettings().destinationCrs()
+        src_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+        if canvas_crs != src_crs:
+            transform = QgsCoordinateTransform(src_crs, canvas_crs, QgsProject.instance())
+            geom.transform(transform)
+        self._rubber_band = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
+        self._rubber_band.setColor(QColor(255, 100, 0, 50))
+        self._rubber_band.setStrokeColor(QColor(255, 100, 0, 220))
+        self._rubber_band.setWidth(2)
+        self._rubber_band.setToGeometry(geom, None)
+
+    def _clear_rubber_band(self):
+        if self._rubber_band is not None:
+            self._rubber_band.reset(QgsWkbTypes.PolygonGeometry)
+            self._rubber_band = None
+
+    def _clear_aoi(self):
+        self._clear_rubber_band()
+        self.aoi_wkt = None
+        self.aoi_rect = None
+        self.aoi_label.setText("No area drawn. Click the button, then draw a rectangle on the map.")
+        self.clear_aoi_btn.setEnabled(False)
 
     def _load_settings(self):
         s = QgsSettings()
@@ -283,6 +383,7 @@ class PWTTControlsDock(QDockWidget):
         s.endGroup()
 
     def closeEvent(self, event):
+        self._clear_rubber_band()
         canvas = self.iface.mapCanvas()
         if self.map_tool and canvas.mapTool() == self.map_tool and self._previous_map_tool:
             try:
