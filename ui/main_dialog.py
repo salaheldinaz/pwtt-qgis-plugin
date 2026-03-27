@@ -1,13 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Main Qt dialog: backend picker, credentials, AOI tool, parameters, progress."""
+"""PWTT dock panels: controls and run log."""
 
 import os
-from datetime import datetime
-from qgis.PyQt import QtWidgets, QtCore
 from qgis.PyQt.QtWidgets import (
-    QDialog,
+    QDockWidget,
     QVBoxLayout,
-    QHBoxLayout,
     QLabel,
     QComboBox,
     QStackedWidget,
@@ -22,14 +19,15 @@ from qgis.PyQt.QtWidgets import (
     QGroupBox,
     QFormLayout,
     QMessageBox,
+    QScrollArea,
+    QFrame,
 )
-from qgis.PyQt.QtCore import QDate, Qt
+from qgis.PyQt.QtCore import QDate, Qt, pyqtSignal
 from qgis.PyQt.QtGui import QIcon
-from qgis.core import QgsSettings, QgsProject
+from qgis.core import QgsSettings
 from qgis.gui import QgsFileWidget
 
 
-# Backend registry: (id, display_name)
 BACKENDS = [
     ("openeo", "openEO (recommended)"),
     ("gee", "Google Earth Engine"),
@@ -38,7 +36,6 @@ BACKENDS = [
 
 
 def _get_backend_class(backend_id):
-    """Lazy import backend class. Returns None if not implemented or import error."""
     try:
         if backend_id == "openeo":
             from ..core.openeo_backend import OpenEOBackend
@@ -54,23 +51,65 @@ def _get_backend_class(backend_id):
     return None
 
 
-class PWTTMainDialog(QDialog):
-    def __init__(self, iface, plugin_dir, parent=None):
-        super().__init__(parent)
+class PWTTLogDock(QDockWidget):
+    """Dockable run-log panel: progress bar + scrollable log."""
+
+    def __init__(self, parent=None):
+        super().__init__("PWTT — Run Log", parent)
+        self.setObjectName("PWTTLogDock")
+        self.setAllowedAreas(Qt.AllDockWidgetAreas)
+
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        layout.addWidget(self.progress_bar)
+
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        layout.addWidget(self.log_text)
+
+        self.setWidget(w)
+
+
+class PWTTControlsDock(QDockWidget):
+    """Dockable controls panel: backend, credentials, AOI, parameters, output, run."""
+
+    # Emitted from background thread via _on_status_message; connected to log dock on main thread
+    _status_signal = pyqtSignal(str)
+
+    def __init__(self, iface, plugin_dir, log_dock, parent=None):
+        super().__init__("PWTT — Damage Detection", parent)
+        self.setObjectName("PWTTControlsDock")
+        self.setAllowedAreas(Qt.AllDockWidgetAreas)
         self.iface = iface
         self.plugin_dir = plugin_dir
+        self.log_dock = log_dock
         self.aoi_wkt = None
         self.aoi_rect = None
         self.map_tool = None
         self._previous_map_tool = None
-        self.setWindowTitle("PWTT - Battle Damage Detection")
-        self.setMinimumWidth(480)
+        self._task = None
+
+        self._status_signal.connect(self.log_dock.log_text.append)
         self._build_ui()
         self._load_settings()
         self._on_backend_changed(self.backend_combo.currentIndex())
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setSpacing(6)
+        layout.setContentsMargins(6, 6, 6, 6)
 
         # Backend selection
         backend_group = QGroupBox("Processing backend")
@@ -91,7 +130,6 @@ class PWTTMainDialog(QDialog):
         cred_layout = QVBoxLayout(cred_group)
         self.cred_stacked = QStackedWidget()
 
-        # openEO page: OIDC (just a label) or client ID/secret
         oe_page = QWidget()
         oe_layout = QFormLayout(oe_page)
         oe_layout.addRow(QLabel("Use 'Run' to sign in in browser (OIDC), or set client credentials below:"))
@@ -104,7 +142,6 @@ class PWTTMainDialog(QDialog):
         oe_layout.addRow("Client secret:", self.openeo_client_secret)
         self.cred_stacked.addWidget(oe_page)
 
-        # GEE page: project name
         gee_page = QWidget()
         gee_layout = QFormLayout(gee_page)
         self.gee_project = QLineEdit()
@@ -112,7 +149,6 @@ class PWTTMainDialog(QDialog):
         gee_layout.addRow("GEE project name:", self.gee_project)
         self.cred_stacked.addWidget(gee_page)
 
-        # Local page: CDSE username/password
         local_page = QWidget()
         local_layout = QFormLayout(local_page)
         self.cdse_username = QLineEdit()
@@ -170,20 +206,14 @@ class PWTTMainDialog(QDialog):
         out_layout.addWidget(self.output_dir)
         layout.addWidget(out_group)
 
-        # Run
+        # Run button
         self.run_btn = QPushButton(QIcon(":/pwtt/icon_run.svg"), "Run")
         self.run_btn.clicked.connect(self._run)
         layout.addWidget(self.run_btn)
 
-        # Progress and log
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        layout.addWidget(self.progress_bar)
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setMaximumHeight(120)
-        layout.addWidget(self.log_text)
+        layout.addStretch()
+        scroll.setWidget(container)
+        self.setWidget(scroll)
 
     def _on_backend_changed(self, index):
         backend_id = self.backend_combo.currentData()
@@ -209,11 +239,11 @@ class PWTTMainDialog(QDialog):
             self.map_tool = PWTTMapToolExtent(canvas, self._on_aoi_drawn)
         self._previous_map_tool = canvas.mapTool()
         canvas.setMapTool(self.map_tool)
-        self.log_text.append("Draw a rectangle on the map to set the area of interest.")
+        self._status_signal.emit("Draw a rectangle on the map to set the area of interest.")
 
     def _on_aoi_drawn(self, wkt, rect):
         if wkt is None or rect is None:
-            self.log_text.append("Please draw a rectangle with non-zero area.")
+            self._status_signal.emit("Please draw a rectangle with non-zero area.")
             try:
                 self.iface.mapCanvas().setMapTool(self._previous_map_tool)
             except Exception:
@@ -221,9 +251,12 @@ class PWTTMainDialog(QDialog):
             return
         self.aoi_wkt = wkt
         self.aoi_rect = rect
-        self.aoi_label.setText(f"AOI: {rect.xMinimum():.4f}, {rect.yMinimum():.4f} — {rect.xMaximum():.4f}, {rect.yMaximum():.4f} (WGS84)")
+        self.aoi_label.setText(
+            f"AOI: {rect.xMinimum():.4f}, {rect.yMinimum():.4f} — "
+            f"{rect.xMaximum():.4f}, {rect.yMaximum():.4f} (WGS84)"
+        )
         self.iface.mapCanvas().setMapTool(self._previous_map_tool)
-        self.log_text.append("AOI set.")
+        self._status_signal.emit("AOI set.")
 
     def _load_settings(self):
         s = QgsSettings()
@@ -250,7 +283,6 @@ class PWTTMainDialog(QDialog):
         s.endGroup()
 
     def closeEvent(self, event):
-        """Restore map tool if AOI draw tool is active, to avoid use-after-free when dialog closes."""
         canvas = self.iface.mapCanvas()
         if self.map_tool and canvas.mapTool() == self.map_tool and self._previous_map_tool:
             try:
@@ -267,8 +299,7 @@ class PWTTMainDialog(QDialog):
         inf = self.inference_start.date()
         if inf < war:
             QMessageBox.warning(
-                self,
-                "PWTT",
+                self, "PWTT",
                 "Inference start date should be on or after war start date.",
             )
             return
@@ -276,8 +307,7 @@ class PWTTMainDialog(QDialog):
         BackendClass = _get_backend_class(backend_id)
         if BackendClass is None:
             QMessageBox.warning(
-                self,
-                "PWTT",
+                self, "PWTT",
                 f"Backend '{backend_id}' is not available. Check that the required package is installed.",
             )
             return
@@ -296,6 +326,7 @@ class PWTTMainDialog(QDialog):
             QMessageBox.warning(self, "PWTT", "Please choose an output directory.")
             return
         os.makedirs(out_dir, exist_ok=True)
+
         from ..core.pwtt_task import PWTTRunTask
         from qgis.core import QgsApplication
         self._task = PWTTRunTask(
@@ -311,13 +342,19 @@ class PWTTMainDialog(QDialog):
         self._task.taskCompleted.connect(self._on_task_completed)
         self._task.taskTerminated.connect(self._on_task_terminated)
         if hasattr(self._task, "progressChanged"):
-            self._task.progressChanged.connect(self.progress_bar.setValue)
+            self._task.progressChanged.connect(
+                lambda v: self.log_dock.progress_bar.setValue(int(v))
+            )
         self._task.on_status_message(self._on_status_message)
         QgsApplication.taskManager().addTask(self._task)
+
         self.run_btn.setEnabled(False)
-        self.progress_bar.setValue(0)
-        self.log_text.clear()
-        self.log_text.append("Task started…")
+        self.log_dock.progress_bar.setValue(0)
+        self.log_dock.log_text.clear()
+        self.log_dock.log_text.append("Task started…")
+        # Bring the log dock into view so the user can watch progress
+        self.log_dock.show()
+        self.log_dock.raise_()
 
     def _get_credentials(self, backend_id):
         if backend_id == "openeo":
@@ -335,13 +372,13 @@ class PWTTMainDialog(QDialog):
         return {}
 
     def _on_status_message(self, msg: str):
-        """Receives progress messages from the background task thread."""
-        self.log_text.append(msg)
+        """Called from background thread — signal bridges to main thread."""
+        self._status_signal.emit(msg)
 
     def _on_task_completed(self):
         self.run_btn.setEnabled(True)
-        self.progress_bar.setValue(100)
-        self.log_text.append("Done.")
+        self.log_dock.progress_bar.setValue(100)
+        self.log_dock.log_text.append("Done.")
         self._task = None
 
     def _on_task_terminated(self):
@@ -350,11 +387,11 @@ class PWTTMainDialog(QDialog):
         self._task = None
         if task and task.exception:
             err = str(task.exception)
-            self.log_text.append(f"<b>Task failed:</b> {err}")
+            self.log_dock.log_text.append(f"<b>Task failed:</b> {err}")
             if task.error_detail:
-                self.log_text.append(f"<pre>{task.error_detail}</pre>")
+                self.log_dock.log_text.append(f"<pre>{task.error_detail}</pre>")
             QMessageBox.critical(self, "PWTT — Error", err)
         elif task and task.isCanceled():
-            self.log_text.append("Task was cancelled by user.")
+            self.log_dock.log_text.append("Task was cancelled by user.")
         else:
-            self.log_text.append("Task terminated unexpectedly (no error details available).")
+            self.log_dock.log_text.append("Task terminated unexpectedly (no error details available).")

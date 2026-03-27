@@ -37,7 +37,7 @@ class OpenEOBackend(PWTTBackend):
             client_id = credentials.get("client_id")
             client_secret = credentials.get("client_secret")
             if client_id and client_secret:
-                self._conn.authenticate_oidc(client_id=client_id, client_secret=client_secret)
+                self._conn.authenticate_oidc_client_credentials(client_id=client_id, client_secret=client_secret)
             else:
                 self._conn.authenticate_oidc()
             return True
@@ -98,14 +98,12 @@ class OpenEOBackend(PWTTBackend):
 
         if progress_callback:
             progress_callback(50, "Creating batch job…")
-        job = result.execute_batch(
+        # execute_batch with outputfile= creates, starts, polls, and downloads automatically
+        result.execute_batch(
             outputfile=output_path,
-            format="GTiff",
+            out_format="GTiff",
             job_options={"driver-memory": "2G"},
         )
-        if progress_callback:
-            progress_callback(70, "Downloading result…")
-        job.get_results().download_file(output_path)
         if progress_callback:
             progress_callback(95, "Done.")
         return output_path

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Main plugin class: toolbar, menu, dialog launch."""
+"""Main plugin class: toolbar, menu, dock panels."""
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
@@ -18,14 +18,19 @@ class PWTTPlugin:
         self.menu = "PWTT"
         self.toolbar = self.iface.addToolBar("PWTT")
         self.toolbar.setObjectName("PWTT")
-        self.dialog = None
+        self.controls_dock = None
+        self.log_dock = None
+        self._action_controls = None
+        self._action_log = None
 
-    def add_action(self, icon, text, callback, enabled_flag=True, add_to_menu=True, add_to_toolbar=True):
+    def add_action(self, icon, text, callback, enabled_flag=True,
+                   add_to_menu=True, add_to_toolbar=True, checkable=False):
         if isinstance(icon, str):
             icon = QIcon(icon)
         action = QAction(icon, text, self.iface.mainWindow())
         action.triggered.connect(callback)
         action.setEnabled(enabled_flag)
+        action.setCheckable(checkable)
         if add_to_toolbar:
             self.toolbar.addAction(action)
         if add_to_menu:
@@ -34,11 +39,52 @@ class PWTTPlugin:
         return action
 
     def initGui(self):
-        self.add_action(
+        self._action_controls = self.add_action(
             QIcon(":/pwtt/icon_main.svg"),
-            "PWTT - Battle Damage Detection",
-            self.run,
+            "PWTT — Damage Detection",
+            self._toggle_controls,
+            checkable=True,
         )
+        self._action_log = self.add_action(
+            QIcon(":/pwtt/icon_run.svg"),
+            "PWTT — Run Log",
+            self._toggle_log,
+            checkable=True,
+        )
+
+    def _ensure_docks(self):
+        if self.controls_dock is not None:
+            return
+        from .ui.main_dialog import PWTTLogDock, PWTTControlsDock
+        mw = self.iface.mainWindow()
+
+        self.log_dock = PWTTLogDock(mw)
+        mw.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
+        self.log_dock.hide()
+
+        self.controls_dock = PWTTControlsDock(self.iface, self.plugin_dir, self.log_dock, mw)
+        mw.addDockWidget(Qt.RightDockWidgetArea, self.controls_dock)
+        self.controls_dock.hide()
+
+        # Keep toolbar button check state in sync with dock visibility
+        self.controls_dock.visibilityChanged.connect(self._action_controls.setChecked)
+        self.log_dock.visibilityChanged.connect(self._action_log.setChecked)
+
+    def _toggle_controls(self, checked=False):
+        self._ensure_docks()
+        if checked:
+            self.controls_dock.show()
+            self.controls_dock.raise_()
+        else:
+            self.controls_dock.hide()
+
+    def _toggle_log(self, checked=False):
+        self._ensure_docks()
+        if checked:
+            self.log_dock.show()
+            self.log_dock.raise_()
+        else:
+            self.log_dock.hide()
 
     def unload(self):
         for action in self.actions:
@@ -49,14 +95,18 @@ class PWTTPlugin:
         except Exception:
             pass
         del self.toolbar
-        if self.dialog:
-            self.dialog.close()
-            self.dialog = None
+        mw = self.iface.mainWindow()
+        if self.controls_dock:
+            mw.removeDockWidget(self.controls_dock)
+            self.controls_dock.deleteLater()
+            self.controls_dock = None
+        if self.log_dock:
+            mw.removeDockWidget(self.log_dock)
+            self.log_dock.deleteLater()
+            self.log_dock = None
 
     def run(self):
-        from .ui.main_dialog import PWTTMainDialog
-        if self.dialog is None:
-            self.dialog = PWTTMainDialog(self.iface, self.plugin_dir, parent=self.iface.mainWindow())
-        self.dialog.show()
-        self.dialog.raise_()
-        self.dialog.activateWindow()
+        """Show controls dock (called from menu or legacy entry points)."""
+        self._ensure_docks()
+        self.controls_dock.show()
+        self.controls_dock.raise_()
