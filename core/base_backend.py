@@ -5,6 +5,14 @@ from abc import ABC, abstractmethod
 from typing import Optional, Callable, Tuple
 
 
+class ProductsOfflineError(Exception):
+    """Raised when all available products are in cold storage and staging orders were triggered."""
+
+    def __init__(self, message, product_ids=None):
+        super().__init__(message)
+        self.product_ids = product_ids or []
+
+
 class PWTTBackend(ABC):
     """All backends (openEO, GEE, local) implement this contract.
 

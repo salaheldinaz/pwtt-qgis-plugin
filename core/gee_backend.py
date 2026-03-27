@@ -5,7 +5,6 @@ import requests
 from typing import Optional
 from .base_backend import PWTTBackend
 from .utils import wkt_to_bbox
-from . import gee_pwtt
 
 
 class GEEBackend(PWTTBackend):
@@ -55,6 +54,8 @@ class GEEBackend(PWTTBackend):
         west, south, east, north = bbox
         aoi_geom = ee.Geometry.Rectangle([west, south, east, north])
         aoi = ee.FeatureCollection([ee.Feature(aoi_geom)])
+
+        from . import gee_pwtt
 
         if progress_callback:
             progress_callback(20, "Running PWTT on Earth Engine…")

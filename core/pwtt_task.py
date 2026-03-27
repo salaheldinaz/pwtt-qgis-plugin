@@ -11,7 +11,7 @@ class PWTTRunTask(QgsTask):
 
     status_message_changed = None  # will be wired as a signal-like list of callbacks
 
-    def __init__(self, backend, aoi_wkt, war_start, inference_start, pre_interval, post_interval, output_dir, include_footprints=False):
+    def __init__(self, backend, aoi_wkt, war_start, inference_start, pre_interval, post_interval, output_dir, include_footprints=False, job_id=None):
         super().__init__("PWTT processing", QgsTask.CanCancel)
         self.backend = backend
         self.aoi_wkt = aoi_wkt
@@ -21,10 +21,13 @@ class PWTTRunTask(QgsTask):
         self.post_interval = post_interval
         self.output_dir = output_dir
         self.include_footprints = include_footprints
+        self.job_id = job_id
         self.output_tif = None
         self.footprints_gpkg = None
         self.exception = None
         self.error_detail = ""
+        self.products_offline = False
+        self.offline_product_ids = []
         self._status_msg = ""
         self._msg_callbacks = []
 
@@ -42,6 +45,7 @@ class PWTTRunTask(QgsTask):
 
     def run(self):
         from .utils import ensure_output_dir
+        from .base_backend import ProductsOfflineError
         out_tif = os.path.join(self.output_dir, "pwtt_result.tif")
         ensure_output_dir(out_tif)
         footprints_path = os.path.join(self.output_dir, "pwtt_footprints.gpkg") if self.include_footprints else None
@@ -64,6 +68,11 @@ class PWTTRunTask(QgsTask):
                 include_footprints=False,
                 footprints_path=None,
             )
+        except ProductsOfflineError as e:
+            self.products_offline = True
+            self.offline_product_ids = list(e.product_ids)
+            self._emit_msg(str(e))
+            return False
         except Exception as e:
             self.exception = e
             self.error_detail = traceback.format_exc()

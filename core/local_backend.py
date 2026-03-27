@@ -119,6 +119,7 @@ class LocalBackend(PWTTBackend):
         pre_arrays = []  # list of (vv, vh, profile)
         post_arrays = []
         triggered_orders = 0
+        offline_product_ids = []
 
         def load_products(products, arrays_list, label):
             nonlocal triggered_orders
@@ -133,6 +134,7 @@ class LocalBackend(PWTTBackend):
                 safe_dir = download_product(self._token, pid, name, cache_dir, wait_for_offline=False)
                 if safe_dir is None:
                     triggered_orders += 1
+                    offline_product_ids.append(pid)
                     if progress_callback:
                         progress_callback(0, f"{label}: {name} is offline, staging order triggered…")
                     continue
@@ -158,10 +160,12 @@ class LocalBackend(PWTTBackend):
 
         if not pre_arrays or not post_arrays:
             if triggered_orders > 0:
-                raise RuntimeError(
+                from .base_backend import ProductsOfflineError
+                raise ProductsOfflineError(
                     f"All available products are in cold storage. "
                     f"Staging orders have been triggered for {triggered_orders} product(s). "
-                    f"Please try again in 30–60 minutes."
+                    f"Will auto-check and resume when products become available.",
+                    product_ids=offline_product_ids,
                 )
             raise RuntimeError(
                 "Could not load VV/VH data from any product. "

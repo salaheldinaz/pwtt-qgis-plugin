@@ -19,9 +19,9 @@ class PWTTPlugin:
         self.toolbar = self.iface.addToolBar("PWTT")
         self.toolbar.setObjectName("PWTT")
         self.controls_dock = None
-        self.log_dock = None
+        self.jobs_dock = None
         self._action_controls = None
-        self._action_log = None
+        self._action_jobs = None
 
     def add_action(self, icon, text, callback, enabled_flag=True,
                    add_to_menu=True, add_to_toolbar=True, checkable=False):
@@ -41,34 +41,34 @@ class PWTTPlugin:
     def initGui(self):
         self._action_controls = self.add_action(
             QIcon(":/pwtt/icon_main.svg"),
-            "PWTT — Damage Detection",
+            "PWTT \u2014 Damage Detection",
             self._toggle_controls,
             checkable=True,
         )
-        self._action_log = self.add_action(
+        self._action_jobs = self.add_action(
             QIcon(":/pwtt/icon_run.svg"),
-            "PWTT — Run Log",
-            self._toggle_log,
+            "PWTT \u2014 Jobs",
+            self._toggle_jobs,
             checkable=True,
         )
 
     def _ensure_docks(self):
         if self.controls_dock is not None:
             return
-        from .ui.main_dialog import PWTTLogDock, PWTTControlsDock
+        from .ui.main_dialog import PWTTJobsDock, PWTTControlsDock
         mw = self.iface.mainWindow()
 
-        self.log_dock = PWTTLogDock(mw, self.plugin_dir)
-        mw.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
-        self.log_dock.hide()
+        self.jobs_dock = PWTTJobsDock(mw, self.plugin_dir)
+        mw.addDockWidget(Qt.BottomDockWidgetArea, self.jobs_dock)
+        self.jobs_dock.hide()
 
-        self.controls_dock = PWTTControlsDock(self.iface, self.plugin_dir, self.log_dock, mw)
+        self.controls_dock = PWTTControlsDock(self.iface, self.plugin_dir, self.jobs_dock, mw)
         mw.addDockWidget(Qt.RightDockWidgetArea, self.controls_dock)
         self.controls_dock.hide()
 
         # Keep toolbar button check state in sync with dock visibility
         self.controls_dock.visibilityChanged.connect(self._action_controls.setChecked)
-        self.log_dock.visibilityChanged.connect(self._action_log.setChecked)
+        self.jobs_dock.visibilityChanged.connect(self._action_jobs.setChecked)
 
     def _toggle_controls(self, checked=False):
         self._ensure_docks()
@@ -78,13 +78,13 @@ class PWTTPlugin:
         else:
             self.controls_dock.hide()
 
-    def _toggle_log(self, checked=False):
+    def _toggle_jobs(self, checked=False):
         self._ensure_docks()
         if checked:
-            self.log_dock.show()
-            self.log_dock.raise_()
+            self.jobs_dock.show()
+            self.jobs_dock.raise_()
         else:
-            self.log_dock.hide()
+            self.jobs_dock.hide()
 
     def unload(self):
         for action in self.actions:
@@ -100,10 +100,11 @@ class PWTTPlugin:
             mw.removeDockWidget(self.controls_dock)
             self.controls_dock.deleteLater()
             self.controls_dock = None
-        if self.log_dock:
-            mw.removeDockWidget(self.log_dock)
-            self.log_dock.deleteLater()
-            self.log_dock = None
+        if self.jobs_dock:
+            self.jobs_dock.cleanup()
+            mw.removeDockWidget(self.jobs_dock)
+            self.jobs_dock.deleteLater()
+            self.jobs_dock = None
 
     def run(self):
         """Show controls dock (called from menu or legacy entry points)."""
