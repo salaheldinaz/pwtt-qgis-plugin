@@ -129,10 +129,11 @@ def download_product(
     # 202 = order accepted (product being staged from cold storage)
     # 422 = product offline, not yet ordered or still staging
     if r.status_code in (202, 422):
+        # Always trigger the order so CDSE starts staging it for future attempts
+        _trigger_order(session, product_id)
         if not wait_for_offline:
             return None
-        # Trigger the order and poll until online
-        _trigger_order(session, product_id)
+        # Poll until online
         waited = 0
         while waited < MAX_ORDER_WAIT_S:
             time.sleep(ORDER_POLL_INTERVAL_S)
