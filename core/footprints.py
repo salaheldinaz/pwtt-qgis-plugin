@@ -69,25 +69,29 @@ def compute_footprints(
 
     # The real 'rasterstats' package may be shadowed by a QGIS plugin of the
     # same name.  Detect this and fall back to loading from our deps directory.
+    zonal_stats = None
     try:
         from rasterstats import zonal_stats
     except ImportError:
+        pass
+
+    if zonal_stats is None:
         # Either not installed, or shadowed by a QGIS plugin that doesn't
         # have zonal_stats.  Try loading from the plugin deps directory.
         import importlib, sys
-        from .deps import _deps_dir, ensure_on_path, install_with_dialog
+        from .deps import _deps_dir, ensure_on_path
         ensure_on_path()
         d = _deps_dir()
-        if d not in sys.path:
-            raise
         # Force re-import from deps by temporarily prioritising it
         _saved = sys.path[:]
         try:
             sys.path.insert(0, d)
-            if "rasterstats" in sys.modules:
-                del sys.modules["rasterstats"]
-            import rasterstats as _rs
-            zonal_stats = _rs.zonal_stats
+            # Remove cached shadow module so Python re-discovers
+            for key in list(sys.modules):
+                if key == "rasterstats" or key.startswith("rasterstats."):
+                    del sys.modules[key]
+            importlib.invalidate_caches()
+            from rasterstats import zonal_stats
         except ImportError:
             raise RuntimeError(
                 "rasterstats is not installed.  Use the Install Dependencies button or run:\n"
