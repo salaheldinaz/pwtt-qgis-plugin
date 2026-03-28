@@ -11,7 +11,7 @@ class PWTTRunTask(QgsTask):
 
     status_message_changed = None  # will be wired as a signal-like list of callbacks
 
-    def __init__(self, backend, aoi_wkt, war_start, inference_start, pre_interval, post_interval, output_dir, include_footprints=False, job_id=None):
+    def __init__(self, backend, aoi_wkt, war_start, inference_start, pre_interval, post_interval, output_dir, include_footprints=False, job_id=None, remote_job_id=None):
         super().__init__("PWTT processing", QgsTask.CanCancel)
         self.backend = backend
         self.aoi_wkt = aoi_wkt
@@ -22,6 +22,7 @@ class PWTTRunTask(QgsTask):
         self.output_dir = output_dir
         self.include_footprints = include_footprints
         self.job_id = job_id
+        self.remote_job_id = remote_job_id  # openEO job id for resume
         self.output_tif = None
         self.footprints_gpkg = None
         self.exception = None
@@ -30,6 +31,12 @@ class PWTTRunTask(QgsTask):
         self.offline_product_ids = []
         self._status_msg = ""
         self._msg_callbacks = []
+
+    def _capture_remote_job_id(self):
+        """Copy the remote job id from the backend (if it set one during run)."""
+        rid = getattr(self.backend, "remote_job_id", None)
+        if rid:
+            self.remote_job_id = rid
 
     def on_status_message(self, callback):
         """Register a callback(str) to receive progress messages from the worker thread."""
@@ -57,7 +64,7 @@ class PWTTRunTask(QgsTask):
                 raise Exception("Canceled")
 
         try:
-            result_path = self.backend.run(
+            run_kwargs = dict(
                 aoi_wkt=self.aoi_wkt,
                 war_start=self.war_start,
                 inference_start=self.inference_start,
@@ -68,15 +75,22 @@ class PWTTRunTask(QgsTask):
                 include_footprints=False,
                 footprints_path=None,
             )
+            # Pass remote_job_id for backends that support resuming (openEO)
+            if self.remote_job_id:
+                run_kwargs["remote_job_id"] = self.remote_job_id
+            result_path = self.backend.run(**run_kwargs)
         except ProductsOfflineError as e:
+            self._capture_remote_job_id()
             self.products_offline = True
             self.offline_product_ids = list(e.product_ids)
             self._emit_msg(str(e))
             return False
         except Exception as e:
+            self._capture_remote_job_id()
             self.exception = e
             self.error_detail = traceback.format_exc()
             return False
+        self._capture_remote_job_id()
         self.output_tif = result_path
         if self.include_footprints and footprints_path:
             try:

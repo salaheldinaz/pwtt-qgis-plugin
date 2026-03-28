@@ -57,7 +57,17 @@ class OpenEOBackend(PWTTBackend):
         progress_callback=None,
         include_footprints: bool = False,
         footprints_path: Optional[str] = None,
+        remote_job_id: Optional[str] = None,
     ) -> str:
+        import time
+
+        # If we already have an openEO job id, resume polling it instead of
+        # creating a brand-new batch job.
+        if remote_job_id:
+            return self._poll_and_download(
+                remote_job_id, output_path, progress_callback
+            )
+
         bbox = wkt_to_bbox(aoi_wkt)
         if not bbox:
             raise ValueError("Invalid AOI WKT")
@@ -102,12 +112,43 @@ class OpenEOBackend(PWTTBackend):
             progress_callback(30, "Creating batch job…")
         job = result.create_job(out_format="GTiff", job_options={"driver-memory": "2G"})
 
+        # Store the remote job id so the caller can persist it
+        self.remote_job_id = job.job_id
+
         if progress_callback:
             progress_callback(35, f"Starting batch job {job.job_id}…")
         job.start_job()
 
-        # Poll until the server-side job completes
+        return self._poll_and_download(job.job_id, output_path, progress_callback)
+
+    def _poll_and_download(self, job_id, output_path, progress_callback=None):
+        """Poll an existing openEO batch job until it finishes, then download."""
         import time
+
+        self.remote_job_id = job_id
+        job = self._conn.job(job_id)
+
+        # Check current status — if already finished, skip straight to download
+        status = job.status()
+        if status == "finished":
+            if progress_callback:
+                progress_callback(80, f"Batch job {job_id} already finished. Downloading…")
+            job.get_results().download_file(output_path)
+            if progress_callback:
+                progress_callback(95, "Done.")
+            return output_path
+
+        if status == "created":
+            if progress_callback:
+                progress_callback(35, f"Starting batch job {job_id}…")
+            job.start_job()
+
+        if status in ("error",):
+            raise RuntimeError(self._job_error_msg(job) or "openEO batch job failed.")
+        if status in ("canceled", "cancelled"):
+            raise RuntimeError("openEO batch job was cancelled.")
+
+        # Poll until the server-side job completes
         poll_wait = 10
         while True:
             time.sleep(poll_wait)
@@ -116,21 +157,12 @@ class OpenEOBackend(PWTTBackend):
             if status == "finished":
                 break
             if status == "error":
-                try:
-                    logs = job.logs()
-                    msg = "; ".join(
-                        e.get("message", "")
-                        for e in (logs or [])[-5:]
-                        if e.get("level") == "error"
-                    )
-                except Exception:
-                    msg = ""
-                raise RuntimeError(msg or "openEO batch job failed.")
+                raise RuntimeError(self._job_error_msg(job) or "openEO batch job failed.")
             if status in ("canceled", "cancelled"):
                 raise RuntimeError("openEO batch job was cancelled.")
 
             if progress_callback:
-                progress_callback(40, f"Batch job {job.job_id}: {status}")
+                progress_callback(40, f"Batch job {job_id}: {status}")
             poll_wait = min(poll_wait + 5, 30)
 
         if progress_callback:
@@ -140,3 +172,15 @@ class OpenEOBackend(PWTTBackend):
         if progress_callback:
             progress_callback(95, "Done.")
         return output_path
+
+    @staticmethod
+    def _job_error_msg(job):
+        try:
+            logs = job.logs()
+            return "; ".join(
+                e.get("message", "")
+                for e in (logs or [])[-5:]
+                if e.get("level") == "error"
+            )
+        except Exception:
+            return ""

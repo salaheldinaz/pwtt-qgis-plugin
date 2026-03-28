@@ -72,6 +72,7 @@ def create_job(
         "updated_at": now,
         "error": None,
         "offline_product_ids": [],
+        "remote_job_id": None,
         "output_tif": None,
         "footprints_gpkg": None,
     }

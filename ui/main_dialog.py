@@ -345,8 +345,8 @@ class PWTTJobsDock(QDockWidget):
         layout.setSpacing(4)
 
         # Job table
-        self.job_table = QTableWidget(0, 4)
-        self.job_table.setHorizontalHeaderLabels(["Status", "Backend", "Dates", "Created"])
+        self.job_table = QTableWidget(0, 5)
+        self.job_table.setHorizontalHeaderLabels(["Status", "Backend", "Remote Job", "Dates", "Created"])
         self.job_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.job_table.setSelectionMode(QTableWidget.SingleSelection)
         self.job_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -354,8 +354,9 @@ class PWTTJobsDock(QDockWidget):
         hdr = self.job_table.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(2, QHeaderView.Stretch)
-        hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(3, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.job_table.setMaximumHeight(180)
         self.job_table.itemSelectionChanged.connect(self._on_job_selected)
         layout.addWidget(self.job_table)
@@ -416,13 +417,21 @@ class PWTTJobsDock(QDockWidget):
             )
             self.job_table.setItem(row, 1, QTableWidgetItem(bname))
 
+            # Remote Job ID (e.g. openEO batch job id)
+            remote_id = job.get("remote_job_id") or ""
+            # Show truncated id for readability
+            display_id = remote_id[-12:] if len(remote_id) > 12 else remote_id
+            rid_item = QTableWidgetItem(display_id)
+            rid_item.setToolTip(remote_id)  # full id on hover
+            self.job_table.setItem(row, 2, rid_item)
+
             # Dates
             dates = f"{job['war_start'][:7]} \u2192 {job['inference_start'][:7]}"
-            self.job_table.setItem(row, 2, QTableWidgetItem(dates))
+            self.job_table.setItem(row, 3, QTableWidgetItem(dates))
 
             # Created
             created = job.get("created_at", "")[:16].replace("T", " ")
-            self.job_table.setItem(row, 3, QTableWidgetItem(created))
+            self.job_table.setItem(row, 4, QTableWidgetItem(created))
 
         # Restore selection
         if selected_id:
@@ -517,6 +526,7 @@ class PWTTJobsDock(QDockWidget):
             output_dir=job["output_dir"],
             include_footprints=job["include_footprints"],
             job_id=job["id"],
+            remote_job_id=job.get("remote_job_id"),
         )
 
         job_id = job["id"]
@@ -548,6 +558,17 @@ class PWTTJobsDock(QDockWidget):
         if self._get_selected_job_id() == job_id:
             self.log_text.append(msg)
 
+        # Persist remote job id as soon as the backend sets it
+        task = self._active_tasks.get(job_id)
+        if task:
+            remote_id = getattr(task, "remote_job_id", None)
+            if remote_id:
+                from ..core import job_store
+                existing = job_store.get_job(job_id)
+                if existing and existing.get("remote_job_id") != remote_id:
+                    job_store.update_job(job_id, remote_job_id=remote_id)
+                    self._refresh_job_list()
+
     def _on_task_progress(self, job_id, value):
         self._job_progress[job_id] = int(value)
         if self._get_selected_job_id() == job_id:
@@ -556,12 +577,15 @@ class PWTTJobsDock(QDockWidget):
     def _on_task_completed(self, job_id):
         from ..core import job_store
         task = self._active_tasks.pop(job_id, None)
-        job_store.update_job(
-            job_id,
+        update_fields = dict(
             status=job_store.STATUS_COMPLETED,
             output_tif=getattr(task, "output_tif", None),
             footprints_gpkg=getattr(task, "footprints_gpkg", None),
         )
+        remote_id = getattr(task, "remote_job_id", None)
+        if remote_id:
+            update_fields["remote_job_id"] = remote_id
+        job_store.update_job(job_id, **update_fields)
         self._job_progress[job_id] = 100
         self._job_logs.setdefault(job_id, []).append("Done.")
         self._refresh_job_list()
@@ -574,6 +598,11 @@ class PWTTJobsDock(QDockWidget):
         task = self._active_tasks.pop(job_id, None)
         if not task:
             return
+
+        # Persist remote job id (e.g. openEO) even on failure so we can resume
+        remote_id = getattr(task, "remote_job_id", None)
+        if remote_id:
+            job_store.update_job(job_id, remote_job_id=remote_id)
 
         if task.products_offline:
             job_store.update_job(
@@ -624,7 +653,13 @@ class PWTTJobsDock(QDockWidget):
         except RuntimeError as e:
             QMessageBox.warning(self, "PWTT", str(e))
             return
-        self._job_logs.setdefault(job["id"], []).append("Resuming\u2026")
+        remote_id = job.get("remote_job_id")
+        if remote_id:
+            self._job_logs.setdefault(job["id"], []).append(
+                f"Resuming remote job {remote_id}\u2026"
+            )
+        else:
+            self._job_logs.setdefault(job["id"], []).append("Resuming\u2026")
         self.launch_job(job, backend)
 
     def _stop_selected(self):
