@@ -37,12 +37,14 @@ class OpenEOBackend(PWTTBackend):
             client_id = credentials.get("client_id")
             client_secret = credentials.get("client_secret")
             if client_id and client_secret:
-                self._conn.authenticate_oidc_client_credentials(client_id=client_id, client_secret=client_secret)
+                self._conn.authenticate_oidc_client_credentials(
+                    client_id=client_id, client_secret=client_secret
+                )
             else:
                 self._conn.authenticate_oidc()
             return True
-        except Exception:
-            return False
+        except Exception as e:
+            raise RuntimeError(f"openEO authentication failed: {e}") from e
 
     def run(
         self,
@@ -93,17 +95,48 @@ class OpenEOBackend(PWTTBackend):
         )
         if progress_callback:
             progress_callback(25, "Computing change…")
-        diff = (post - pre).abs()
+        diff = (post - pre).apply(lambda x: x.absolute())
         result = diff.reduce_dimension(dimension="bands", reducer="max")
 
         if progress_callback:
-            progress_callback(50, "Creating batch job…")
-        # execute_batch with outputfile= creates, starts, polls, and downloads automatically
-        result.execute_batch(
-            outputfile=output_path,
-            out_format="GTiff",
-            job_options={"driver-memory": "2G"},
-        )
+            progress_callback(30, "Creating batch job…")
+        job = result.create_job(out_format="GTiff", job_options={"driver-memory": "2G"})
+
+        if progress_callback:
+            progress_callback(35, f"Starting batch job {job.job_id}…")
+        job.start_job()
+
+        # Poll until the server-side job completes
+        import time
+        poll_wait = 10
+        while True:
+            time.sleep(poll_wait)
+            status = job.status()
+
+            if status == "finished":
+                break
+            if status == "error":
+                try:
+                    logs = job.logs()
+                    msg = "; ".join(
+                        e.get("message", "")
+                        for e in (logs or [])[-5:]
+                        if e.get("level") == "error"
+                    )
+                except Exception:
+                    msg = ""
+                raise RuntimeError(msg or "openEO batch job failed.")
+            if status in ("canceled", "cancelled"):
+                raise RuntimeError("openEO batch job was cancelled.")
+
+            if progress_callback:
+                progress_callback(40, f"Batch job {job.job_id}: {status}")
+            poll_wait = min(poll_wait + 5, 30)
+
+        if progress_callback:
+            progress_callback(80, "Downloading result…")
+        job.get_results().download_file(output_path)
+
         if progress_callback:
             progress_callback(95, "Done.")
         return output_path

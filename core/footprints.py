@@ -62,11 +62,39 @@ def compute_footprints(
     """
     try:
         import geopandas as gpd
-        from rasterstats import zonal_stats
     except ImportError as e:
         raise RuntimeError(
             "Building footprints require geopandas and rasterstats: pip install geopandas rasterstats"
         ) from e
+
+    # The real 'rasterstats' package may be shadowed by a QGIS plugin of the
+    # same name.  Detect this and fall back to loading from our deps directory.
+    try:
+        from rasterstats import zonal_stats
+    except ImportError:
+        # Either not installed, or shadowed by a QGIS plugin that doesn't
+        # have zonal_stats.  Try loading from the plugin deps directory.
+        import importlib, sys
+        from .deps import _deps_dir, ensure_on_path, install_with_dialog
+        ensure_on_path()
+        d = _deps_dir()
+        if d not in sys.path:
+            raise
+        # Force re-import from deps by temporarily prioritising it
+        _saved = sys.path[:]
+        try:
+            sys.path.insert(0, d)
+            if "rasterstats" in sys.modules:
+                del sys.modules["rasterstats"]
+            import rasterstats as _rs
+            zonal_stats = _rs.zonal_stats
+        except ImportError:
+            raise RuntimeError(
+                "rasterstats is not installed.  Use the Install Dependencies button or run:\n"
+                "  uv pip install --target \"{}\" rasterstats".format(d)
+            )
+        finally:
+            sys.path[:] = _saved
 
     bbox = wkt_to_bbox(aoi_wkt)
     if not bbox:

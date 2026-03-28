@@ -14,6 +14,9 @@ class PWTTPlugin:
     def __init__(self, iface):
         self.iface = iface
         self.plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        # Make plugin-local deps importable
+        from .core import deps
+        deps.ensure_on_path()
         self.actions = []
         self.menu = "PWTT"
         self.toolbar = self.iface.addToolBar("PWTT")

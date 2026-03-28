@@ -65,13 +65,15 @@ class LocalBackend(PWTTBackend):
     def authenticate(self, credentials: dict) -> bool:
         user = (credentials.get("username") or "").strip()
         password = credentials.get("password") or ""
-        if not user or not password:
-            return False
+        if not user:
+            raise ValueError("CDSE username is required.")
+        if not password:
+            raise ValueError("CDSE password is required.")
         try:
             self._token = get_token(user, password)
             return True
-        except Exception:
-            return False
+        except Exception as e:
+            raise RuntimeError(f"CDSE authentication failed: {e}") from e
 
     def run(
         self,

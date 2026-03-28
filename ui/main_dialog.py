@@ -108,41 +108,152 @@ def _get_backend_class(backend_id):
 
 
 def _auth_with_progress(backend, credentials, backend_id, parent=None):
-    """Run backend.authenticate() in a background QThread with a progress dialog.
+    """Run backend.authenticate() in a background QThread with a progress/auth dialog.
 
-    Returns True on success, False on failure or cancellation.
+    Raises RuntimeError on authentication failure or user cancellation.
     """
-    from qgis.PyQt.QtCore import QThread
-    from qgis.PyQt.QtWidgets import QProgressDialog
+    import webbrowser as _wb
+    from qgis.PyQt.QtCore import QThread, pyqtSignal
+    from qgis.PyQt.QtWidgets import (
+        QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+        QProgressDialog, QApplication,
+    )
+
+    is_oidc = backend_id == "openeo" and not (credentials or {}).get("client_id")
 
     class _Worker(QThread):
+        auth_url_ready = pyqtSignal(str)
+
         def __init__(self, b, c):
             super().__init__()
-            self.b, self.c, self.ok = b, c, False
+            self.b = b
+            self.c = c
+            self.ok = False
+            self.error_msg = ""
 
         def run(self):
-            self.ok = self.b.authenticate(self.c)
-
-    hint = ""
-    if backend_id == "openeo" and not (credentials or {}).get("client_id"):
-        hint = "\nFor OIDC: open the Python console to see the login URL."
-
-    dlg = QProgressDialog(f"Authenticating\u2026{hint}", "Cancel", 0, 0, parent)
-    dlg.setWindowTitle("PWTT")
-    dlg.setWindowModality(Qt.WindowModal)
-    dlg.setMinimumDuration(0)
+            try:
+                self.ok = self.b.authenticate(self.c)
+                if not self.ok:
+                    self.error_msg = "Authentication failed. Check your credentials."
+            except Exception as e:
+                self.ok = False
+                self.error_msg = str(e)
 
     worker = _Worker(backend, credentials)
-    worker.finished.connect(dlg.close)
-    worker.start()
-    dlg.exec_()
+    canceled = [False]
 
-    if dlg.wasCanceled():
-        worker.wait(2000)
-        return False
+    if is_oidc and parent is not None:
+        # ── openEO OIDC device code flow ──────────────────────────────────────
+        dlg = QDialog(parent)
+        dlg.setWindowTitle("PWTT \u2014 openEO Sign In")
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumWidth(440)
+        layout = QVBoxLayout(dlg)
 
-    worker.wait()
-    return worker.ok
+        status_lbl = QLabel("Connecting to openEO CDSE\u2026")
+        status_lbl.setWordWrap(True)
+        layout.addWidget(status_lbl)
+
+        url_lbl = QLabel()
+        url_lbl.setWordWrap(True)
+        url_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        url_lbl.hide()
+        layout.addWidget(url_lbl)
+
+        url_btn_row = QHBoxLayout()
+        copy_btn = QPushButton("Copy URL")
+        copy_btn.setEnabled(False)
+        open_btn = QPushButton("Open in Browser")
+        open_btn.setEnabled(False)
+        url_btn_row.addWidget(copy_btn)
+        url_btn_row.addWidget(open_btn)
+        layout.addLayout(url_btn_row)
+
+        cancel_btn = QPushButton("Cancel")
+        layout.addWidget(cancel_btn)
+
+        detected_url = [None]
+
+        def _on_url_ready(url):
+            detected_url[0] = url
+            url_lbl.setText(url)
+            url_lbl.show()
+            copy_btn.setEnabled(True)
+            open_btn.setEnabled(True)
+            status_lbl.setText(
+                "Visit the URL below and approve the sign-in, then wait here:"
+            )
+            dlg.adjustSize()
+
+        def _on_copy():
+            if detected_url[0]:
+                QApplication.clipboard().setText(detected_url[0])
+
+        def _on_open():
+            if detected_url[0]:
+                _wb.open(detected_url[0])
+
+        def _on_cancel():
+            canceled[0] = True
+            try:
+                worker.finished.disconnect()
+            except Exception:
+                pass
+            dlg.reject()
+
+        worker.auth_url_ready.connect(_on_url_ready)
+        worker.finished.connect(dlg.accept)
+        copy_btn.clicked.connect(_on_copy)
+        open_btn.clicked.connect(_on_open)
+        cancel_btn.clicked.connect(_on_cancel)
+
+        # Intercept webbrowser calls made by the openEO OIDC library so the
+        # URL appears in our dialog instead of auto-opening or printing to stdout.
+        _orig_open = _wb.open
+        _orig_open_new = _wb.open_new
+        _orig_open_tab = _wb.open_new_tab
+
+        def _intercept(url, *a, **kw):
+            worker.auth_url_ready.emit(url)
+            return True  # Tell openEO the browser "opened" successfully
+
+        _wb.open = _intercept
+        _wb.open_new = _intercept
+        _wb.open_new_tab = _intercept
+        try:
+            worker.start()
+            dlg.exec_()
+        finally:
+            _wb.open = _orig_open
+            _wb.open_new = _orig_open_new
+            _wb.open_new_tab = _orig_open_tab
+
+        if canceled[0]:
+            worker.wait(2000)
+            raise RuntimeError("Authentication cancelled.")
+
+        worker.wait()
+
+    else:
+        # ── Standard busy-spinner progress dialog ─────────────────────────────
+        dlg = QProgressDialog("Authenticating\u2026", "Cancel", 0, 0, parent)
+        dlg.setWindowTitle("PWTT")
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+
+        worker.finished.connect(dlg.close)
+        worker.start()
+        dlg.exec_()
+
+        if dlg.wasCanceled():
+            worker.wait(2000)
+            raise RuntimeError("Authentication cancelled.")
+
+        worker.wait()
+
+    if not worker.ok:
+        raise RuntimeError(worker.error_msg or "Authentication failed. Check your credentials.")
 
 
 def _create_and_auth_backend(backend_id, parent=None):
@@ -176,11 +287,15 @@ def _create_and_auth_backend(backend_id, parent=None):
         creds = {}
     s.endGroup()
     if parent:
-        auth_ok = _auth_with_progress(backend, creds, backend_id, parent)
+        _auth_with_progress(backend, creds, backend_id, parent)  # raises on failure
     else:
-        auth_ok = backend.authenticate(creds)
-    if not auth_ok:
-        raise RuntimeError("Authentication failed. Check credentials in the Controls panel.")
+        try:
+            if not backend.authenticate(creds):
+                raise RuntimeError("Authentication failed. Check your credentials.")
+        except RuntimeError:
+            raise
+        except Exception as e:
+            raise RuntimeError(str(e)) from e
     return backend
 
 
@@ -195,8 +310,6 @@ class PWTTJobsDock(QDockWidget):
     _status_signal = pyqtSignal(str, str)   # (job_id, message)
     # Signal to auto-resume a job on the main thread
     _auto_resume_signal = pyqtSignal(str)   # job_id
-    # Tells the controls dock whether the Run button should be enabled
-    run_button_enabled = pyqtSignal(bool)
 
     def __init__(self, parent=None, plugin_dir=None):
         super().__init__(_dock_title("PWTT \u2014 Jobs", plugin_dir), parent)
@@ -423,7 +536,6 @@ class PWTTJobsDock(QDockWidget):
 
         QgsApplication.taskManager().addTask(task)
 
-        self.run_button_enabled.emit(False)
         self._refresh_job_list()
         self._select_job(job_id)
         self.show()
@@ -456,13 +568,11 @@ class PWTTJobsDock(QDockWidget):
         if self._get_selected_job_id() == job_id:
             self.progress_bar.setValue(100)
             self.log_text.append("Done.")
-        self._emit_run_enabled()
 
     def _on_task_terminated(self, job_id):
         from ..core import job_store
         task = self._active_tasks.pop(job_id, None)
         if not task:
-            self._emit_run_enabled()
             return
 
         if task.products_offline:
@@ -502,10 +612,6 @@ class PWTTJobsDock(QDockWidget):
         self._refresh_job_list()
         if self._get_selected_job_id() == job_id:
             self._on_job_selected()
-        self._emit_run_enabled()
-
-    def _emit_run_enabled(self):
-        self.run_button_enabled.emit(not bool(self._active_tasks))
 
     # ── Action handlers ───────────────────────────────────────────────────────
 
@@ -546,7 +652,6 @@ class PWTTJobsDock(QDockWidget):
         self._refresh_job_list()
         if self._get_selected_job_id() == job["id"]:
             self._on_job_selected()
-        self._emit_run_enabled()
 
     def _rerun_selected(self):
         """Create a new job with the same parameters and launch it."""
@@ -670,15 +775,9 @@ class PWTTControlsDock(QDockWidget):
 
         self._rubber_band = None
 
-        # Re-enable run button when jobs dock says so
-        self.jobs_dock.run_button_enabled.connect(self._set_run_enabled)
-
         self._build_ui()
         self._load_settings()
         self._on_backend_changed(self.backend_combo.currentIndex())
-
-    def _set_run_enabled(self, enabled):
-        self.run_btn.setEnabled(enabled)
 
     @staticmethod
     def _hint(text: str) -> QLabel:
@@ -711,6 +810,10 @@ class PWTTControlsDock(QDockWidget):
         self.dep_label.setWordWrap(True)
         self.dep_label.setStyleSheet("color: gray; font-size: 0.9em;")
         bl.addWidget(self.dep_label)
+        self.install_deps_btn = QPushButton("Install Dependencies")
+        self.install_deps_btn.hide()
+        self.install_deps_btn.clicked.connect(self._install_backend_deps)
+        bl.addWidget(self.install_deps_btn)
         layout.addWidget(backend_group)
 
         # Credentials stacked by backend
@@ -837,21 +940,39 @@ class PWTTControlsDock(QDockWidget):
     # ── Backend / credentials ─────────────────────────────────────────────────
 
     def _on_backend_changed(self, index):
+        from ..core import deps
         backend_id = self.backend_combo.currentData()
         self.cred_stacked.setCurrentIndex([b[0] for b in BACKENDS].index(backend_id))
-        BackendClass = _get_backend_class(backend_id)
-        if BackendClass is None:
-            self.dep_label.setText("Backend not available (module missing).")
+
+        missing_imports, pip_names = deps.backend_missing(backend_id)
+        self._pending_pip_install = pip_names  # stash for install button
+
+        if missing_imports:
+            if pip_names:
+                self.dep_label.setText(
+                    f"Missing: {', '.join(missing_imports)}"
+                )
+                self.install_deps_btn.show()
+            else:
+                self.dep_label.setText(
+                    f"Missing: {', '.join(missing_imports)} "
+                    f"(should be provided by QGIS \u2014 check your installation)"
+                )
+                self.install_deps_btn.hide()
             self.dep_label.setStyleSheet("color: orange; font-size: 0.9em;")
         else:
-            backend = BackendClass()
-            ok, msg = backend.check_dependencies()
-            if ok:
-                self.dep_label.setText("Dependencies: OK")
-                self.dep_label.setStyleSheet("color: green; font-size: 0.9em;")
-            else:
-                self.dep_label.setText(msg if msg else "Missing dependencies.")
-                self.dep_label.setStyleSheet("color: orange; font-size: 0.9em;")
+            self.dep_label.setText("Dependencies: OK")
+            self.dep_label.setStyleSheet("color: green; font-size: 0.9em;")
+            self.install_deps_btn.hide()
+
+    def _install_backend_deps(self):
+        """Install missing backend packages via the deps module."""
+        from ..core import deps
+        names = getattr(self, "_pending_pip_install", [])
+        if not names:
+            return
+        if deps.install_with_dialog(names, parent=self):
+            self._on_backend_changed(self.backend_combo.currentIndex())
 
     def _get_credentials(self, backend_id):
         if backend_id == "openeo":
@@ -971,6 +1092,8 @@ class PWTTControlsDock(QDockWidget):
     # ── Run ───────────────────────────────────────────────────────────────────
 
     def _run(self):
+        from ..core import deps
+
         if not self.aoi_wkt:
             QMessageBox.warning(self, "PWTT", "Please draw an area of interest on the map first.")
             return
@@ -982,12 +1105,58 @@ class PWTTControlsDock(QDockWidget):
                 "Inference start date should be on or after war start date.",
             )
             return
+
         backend_id = self.backend_combo.currentData()
+
+        # ── Check backend dependencies (offer install if missing) ─────────
+        missing, pip_names = deps.backend_missing(backend_id)
+        if missing:
+            reply = QMessageBox.question(
+                self, "PWTT",
+                f"Missing packages: {', '.join(pip_names)}\n\nInstall now?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                if not deps.install_with_dialog(pip_names, parent=self):
+                    return
+                # Re-check after install
+                missing, _ = deps.backend_missing(backend_id)
+            if missing:
+                QMessageBox.warning(
+                    self, "PWTT",
+                    f"Cannot run: missing {', '.join(missing)}.",
+                )
+                return
+            # Refresh the deps label
+            self._on_backend_changed(self.backend_combo.currentIndex())
+
+        # ── Check footprint dependencies if enabled ───────────────────────
+        if self.include_footprints.isChecked():
+            fp_missing, fp_pip = deps.footprint_missing()
+            if fp_missing:
+                reply = QMessageBox.question(
+                    self, "PWTT",
+                    f"Building footprints require: {', '.join(fp_pip)}\n\nInstall now?",
+                    QMessageBox.Yes | QMessageBox.No,
+                )
+                if reply == QMessageBox.Yes:
+                    if not deps.install_with_dialog(fp_pip, parent=self):
+                        return
+                    fp_missing, _ = deps.footprint_missing()
+                if fp_missing:
+                    QMessageBox.warning(
+                        self, "PWTT",
+                        f"Cannot compute footprints: missing {', '.join(fp_missing)}.\n"
+                        f"Uncheck the footprints option or install the packages.",
+                    )
+                    return
+
+        # ── Create backend and authenticate ───────────────────────────────
         BackendClass = _get_backend_class(backend_id)
         if BackendClass is None:
             QMessageBox.warning(
                 self, "PWTT",
-                f"Backend '{backend_id}' is not available. Check that the required package is installed.",
+                f"Backend '{backend_id}' is not available.",
             )
             return
         backend = BackendClass()
@@ -996,8 +1165,11 @@ class PWTTControlsDock(QDockWidget):
             QMessageBox.warning(self, "PWTT", msg)
             return
         credentials = self._get_credentials(backend_id)
-        if not _auth_with_progress(backend, credentials, backend_id, parent=self):
-            QMessageBox.warning(self, "PWTT", "Authentication failed. Check your credentials.")
+        try:
+            _auth_with_progress(backend, credentials, backend_id, parent=self)
+        except RuntimeError as e:
+            if str(e) != "Authentication cancelled.":
+                QMessageBox.warning(self, "PWTT", str(e))
             return
         self._save_settings()
         out_dir = self.output_dir.filePath()
