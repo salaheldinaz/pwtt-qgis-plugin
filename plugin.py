@@ -83,6 +83,7 @@ class PWTTPlugin:
 
         # Back-reference so jobs dock can load parameters into controls
         self.jobs_dock.controls_dock = self.controls_dock
+        self.controls_dock.openeo_dock = self.openeo_dock
 
         # Keep toolbar button check state in sync with dock visibility
         self.controls_dock.visibilityChanged.connect(self._action_controls.setChecked)

@@ -1,10 +1,45 @@
 # -*- coding: utf-8 -*-
 """openEO / CDSE backend: server-side PWTT, download result GeoTIFF."""
 
+import os
+import shutil
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 from .base_backend import PWTTBackend
 from .utils import wkt_to_bbox
+
+
+def download_job_geotiff(results: Any, out_path: str, scratch_dir: str) -> str:
+    """
+    Download GeoTIFF batch-job output to ``out_path``.
+
+    The openeo client's ``download_file()`` raises when several STAC assets are
+    published (e.g. GeoTIFF plus JSON metadata). We select image/tiff assets
+    explicitly and, if there are several rasters, keep the largest file.
+    """
+    assets = results.get_assets()
+
+    def _is_geotiff(a) -> bool:
+        t = (a.metadata.get("type") or "").lower()
+        if t.startswith("image/tiff"):
+            return True
+        n = a.name.lower()
+        return n.endswith(".tif") or n.endswith(".tiff")
+
+    gt = [a for a in assets if _is_geotiff(a)]
+    if not gt:
+        names = [a.name for a in assets]
+        raise RuntimeError(f"No GeoTIFF in job results. Assets: {names}")
+
+    if len(gt) == 1:
+        gt[0].download(out_path)
+        return out_path
+
+    os.makedirs(scratch_dir, exist_ok=True)
+    paths = [a.download(scratch_dir) for a in gt]
+    chosen = max(paths, key=lambda p: p.stat().st_size)
+    shutil.copy2(chosen, out_path)
+    return out_path
 
 
 def _add_months(d: datetime, months: int) -> datetime:
@@ -33,7 +68,24 @@ class OpenEOBackend(PWTTBackend):
     def authenticate(self, credentials: dict) -> bool:
         try:
             import openeo
-            self._conn = openeo.connect("https://openeo.dataspace.copernicus.eu")
+
+            verify_ssl = credentials.get("verify_ssl", True)
+            if verify_ssl is None:
+                verify_ssl = True
+            session = None
+            if not verify_ssl:
+                import urllib3
+                import requests
+
+                session = requests.Session()
+                session.verify = False
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+            connect_kw = {"session": session} if session is not None else {}
+            self._conn = openeo.connect(
+                "https://openeo.dataspace.copernicus.eu",
+                **connect_kw,
+            )
             client_id = credentials.get("client_id")
             client_secret = credentials.get("client_secret")
             if client_id and client_secret:
@@ -223,7 +275,6 @@ class OpenEOBackend(PWTTBackend):
 
     def _download_results(self, job, output_path, progress_callback=None):
         """Download results and log metadata."""
-        import os
         job_id = job.job_id
 
         if progress_callback:
@@ -251,7 +302,8 @@ class OpenEOBackend(PWTTBackend):
 
         if progress_callback:
             progress_callback(82, f"Downloading result to {output_path}…")
-        results.download_file(output_path)
+        scratch = os.path.dirname(output_path) or "."
+        download_job_geotiff(results, output_path, scratch)
 
         size_mb = os.path.getsize(output_path) / (1024 * 1024) if os.path.isfile(output_path) else 0
         if progress_callback:

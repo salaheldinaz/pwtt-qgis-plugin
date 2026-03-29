@@ -275,6 +275,7 @@ def _create_and_auth_backend(backend_id, parent=None):
         creds = {
             "client_id": s.value("openeo_client_id", "") or None,
             "client_secret": s.value("openeo_client_secret", "") or None,
+            "verify_ssl": s.value("openeo_verify_ssl", True, type=bool),
         }
     elif backend_id == "gee":
         creds = {"project": s.value("gee_project", "")}
@@ -1165,8 +1166,11 @@ class PWTTOpenEOJobsDock(QDockWidget):
 
         self.download_btn.setEnabled(False)
         self.log_text.append(f"Downloading {job_id}…")
+        last_err = []
 
         def _worker():
+            from ..core.openeo_backend import download_job_geotiff
+
             try:
                 job = self._conn.job(job_id)
                 results = job.get_results()
@@ -1184,10 +1188,11 @@ class PWTTOpenEOJobsDock(QDockWidget):
                     self._log_signal.emit(f"Result metadata: {', '.join(parts)}")
                 except Exception:
                     pass
-                results.download_file(out_path)
+                download_job_geotiff(results, out_path, out_dir)
                 size_mb = os.path.getsize(out_path) / (1024 * 1024) if os.path.isfile(out_path) else 0
                 self._log_signal.emit(f"Downloaded {size_mb:.1f} MB to {out_path}")
             except Exception as e:
+                last_err.append(str(e))
                 self._log_signal.emit(f"Download error: {e}")
 
         def _check_done():
@@ -1197,7 +1202,8 @@ class PWTTOpenEOJobsDock(QDockWidget):
                 self.download_btn.setEnabled(True)
             elif not t.is_alive():
                 timer.stop()
-                self.log_text.append("Download failed.")
+                detail = f" {last_err[-1]}" if last_err else ""
+                self.log_text.append(f"Download failed.{detail}")
                 self.download_btn.setEnabled(True)
 
         t = threading.Thread(target=_worker, daemon=True)
@@ -1318,6 +1324,14 @@ class PWTTControlsDock(QDockWidget):
         self.openeo_client_secret.setEchoMode(QLineEdit.Password)
         self.openeo_client_secret.setPlaceholderText("Client secret (optional)")
         oe_layout.addRow("Client secret:", self.openeo_client_secret)
+        self.openeo_verify_ssl = QCheckBox("Verify TLS certificates (HTTPS)")
+        self.openeo_verify_ssl.setChecked(True)
+        self.openeo_verify_ssl.setToolTip(
+            "Turn off only if listing jobs or downloading results fails with "
+            "SSL/certificate errors. Result files are served from a different host than the API."
+        )
+        self.openeo_verify_ssl.stateChanged.connect(self._persist_openeo_verify_ssl)
+        oe_layout.addRow(self.openeo_verify_ssl)
         self.cred_stacked.addWidget(oe_page)
 
         gee_page = QWidget()
@@ -1465,6 +1479,7 @@ class PWTTControlsDock(QDockWidget):
             return {
                 "client_id": self.openeo_client_id.text().strip() or None,
                 "client_secret": self.openeo_client_secret.text().strip() or None,
+                "verify_ssl": self.openeo_verify_ssl.isChecked(),
             }
         if backend_id == "gee":
             return {"project": self.gee_project.text().strip()}
@@ -1598,12 +1613,24 @@ class PWTTControlsDock(QDockWidget):
 
     # ── Settings ──────────────────────────────────────────────────────────────
 
+    def _persist_openeo_verify_ssl(self, _state=None):
+        s = QgsSettings()
+        s.beginGroup("PWTT")
+        s.setValue("openeo_verify_ssl", self.openeo_verify_ssl.isChecked())
+        s.endGroup()
+        od = getattr(self, "openeo_dock", None)
+        if od is not None:
+            od._conn = None
+
     def _load_settings(self):
         s = QgsSettings()
         s.beginGroup("PWTT")
         self.gee_project.setText(s.value("gee_project", ""))
         self.openeo_client_id.setText(s.value("openeo_client_id", ""))
         self.openeo_client_secret.setText(s.value("openeo_client_secret", ""))
+        self.openeo_verify_ssl.blockSignals(True)
+        self.openeo_verify_ssl.setChecked(s.value("openeo_verify_ssl", True, type=bool))
+        self.openeo_verify_ssl.blockSignals(False)
         self.cdse_username.setText(s.value("cdse_username", ""))
         self.cdse_password.setText(s.value("cdse_password", ""))
         out = s.value("output_dir", "")
@@ -1617,6 +1644,7 @@ class PWTTControlsDock(QDockWidget):
         s.setValue("gee_project", self.gee_project.text())
         s.setValue("openeo_client_id", self.openeo_client_id.text())
         s.setValue("openeo_client_secret", self.openeo_client_secret.text())
+        s.setValue("openeo_verify_ssl", self.openeo_verify_ssl.isChecked())
         s.setValue("cdse_username", self.cdse_username.text())
         s.setValue("cdse_password", self.cdse_password.text())
         s.setValue("output_dir", self.output_dir.filePath())
