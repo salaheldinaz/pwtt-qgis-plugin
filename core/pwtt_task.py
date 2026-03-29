@@ -112,6 +112,10 @@ class PWTTRunTask(QgsTask):
                 "output_tif": self.output_tif,
                 "completed_at": datetime.now().isoformat(timespec="seconds"),
             }
+            # Include backend run_metadata (scenes, date ranges, logs, etc.)
+            run_meta = getattr(self.backend, "run_metadata", None)
+            if run_meta and isinstance(run_meta, dict):
+                meta["processing_details"] = run_meta
             meta_path = os.path.join(self.output_dir, "job_info.json")
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(meta, f, indent=2, ensure_ascii=False)

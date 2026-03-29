@@ -21,7 +21,12 @@ class PWTTBackend(ABC):
         id (property): Short identifier ('openeo', 'gee', 'local').
         authenticate(credentials): Validate credentials, return True on success.
         run(...): Execute the PWTT pipeline and write a GeoTIFF.
+
+    After run() completes, ``run_metadata`` contains processing details
+    (scenes used, date ranges, etc.) for inclusion in the job metadata file.
     """
+
+    run_metadata: dict = None  # populated by run()
 
     @property
     @abstractmethod

@@ -107,6 +107,19 @@ class LocalBackend(PWTTBackend):
         cache_dir = os.path.join(os.path.dirname(output_path), ".pwtt_cache")
         os.makedirs(cache_dir, exist_ok=True)
 
+        # Initialise run_metadata to collect scene details
+        self.run_metadata = {
+            "collection": "SENTINEL-1 IW_GRDH_1S",
+            "pre_period": {"start": pre_start, "end": war_start},
+            "post_period": {"start": inference_start, "end": post_end},
+            "bbox": [west, south, east, north],
+            "pre_scenes_found": [],
+            "post_scenes_found": [],
+            "pre_scenes_used": [],
+            "post_scenes_used": [],
+            "offline_scenes": [],
+        }
+
         if progress_callback:
             progress_callback(5, "Searching pre-war products…")
         pre_products = search_s1_grd(self._token, aoi_wkt, pre_start, war_start, max_results=20)
@@ -116,6 +129,18 @@ class LocalBackend(PWTTBackend):
         if not pre_products or not post_products:
             raise RuntimeError("No Sentinel-1 GRD products found for the given AOI and dates.")
 
+        # Record all found scenes
+        def _scene_summary(prod):
+            cd = prod.get("ContentDate") or {}
+            return {
+                "id": prod.get("Id", ""),
+                "name": prod.get("Name", ""),
+                "date": (cd.get("Start") or "")[:19],
+                "online": prod.get("Online", True),
+            }
+        self.run_metadata["pre_scenes_found"] = [_scene_summary(p) for p in pre_products]
+        self.run_metadata["post_scenes_found"] = [_scene_summary(p) for p in post_products]
+
         # Download and load up to 3 pre and 3 post (to limit disk/time)
         max_per_period = 3
         pre_arrays = []  # list of (vv, vh, profile)
@@ -123,7 +148,7 @@ class LocalBackend(PWTTBackend):
         triggered_orders = 0
         offline_product_ids = []
 
-        def load_products(products, arrays_list, label):
+        def load_products(products, arrays_list, label, used_key):
             nonlocal triggered_orders
             loaded = 0
             for i, prod in enumerate(products):
@@ -132,11 +157,16 @@ class LocalBackend(PWTTBackend):
                 if progress_callback:
                     progress_callback(0, f"{label} {loaded+1}/{max_per_period}…")
                 pid, name = prod["Id"], prod["Name"]
+                cd = prod.get("ContentDate") or {}
+                scene_date = (cd.get("Start") or "")[:19]
                 # Try download; skip offline products that aren't immediately available
                 safe_dir = download_product(self._token, pid, name, cache_dir, wait_for_offline=False)
                 if safe_dir is None:
                     triggered_orders += 1
                     offline_product_ids.append(pid)
+                    self.run_metadata["offline_scenes"].append(
+                        {"id": pid, "name": name, "date": scene_date}
+                    )
                     if progress_callback:
                         progress_callback(0, f"{label}: {name} is offline, staging order triggered…")
                     continue
@@ -151,14 +181,17 @@ class LocalBackend(PWTTBackend):
                 with rasterio.open(vh_path) as src:
                     vh = src.read(1)
                 arrays_list.append((vv.astype(np.float32), vh.astype(np.float32), profile, transform, crs))
+                self.run_metadata[used_key].append(
+                    {"id": pid, "name": name, "date": scene_date}
+                )
                 loaded += 1
 
         if progress_callback:
             progress_callback(12, "Downloading pre-war scenes…")
-        load_products(pre_products, pre_arrays, "Pre")
+        load_products(pre_products, pre_arrays, "Pre", "pre_scenes_used")
         if progress_callback:
             progress_callback(35, "Downloading post-war scenes…")
-        load_products(post_products, post_arrays, "Post")
+        load_products(post_products, post_arrays, "Post", "post_scenes_used")
 
         if not pre_arrays or not post_arrays:
             if triggered_orders > 0:
@@ -259,6 +292,15 @@ class LocalBackend(PWTTBackend):
         with rasterio.open(output_path, "w", **out_profile) as dst:
             dst.write(t_statistic.astype(np.float32), 1)
             dst.write(damage, 2)
+
+        # Finalize run_metadata with output details
+        self.run_metadata["output_size_bytes"] = os.path.getsize(output_path)
+        self.run_metadata["output_crs"] = str(ref_crs)
+        self.run_metadata["output_pixel_size_m"] = round(pixel_size, 2)
+        self.run_metadata["output_shape"] = [height, width]
+        self.run_metadata["pre_scenes_count"] = len(pre_arrays)
+        self.run_metadata["post_scenes_count"] = len(post_arrays)
+
         if progress_callback:
             progress_callback(95, "Done.")
         return output_path

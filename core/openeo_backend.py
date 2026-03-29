@@ -77,6 +77,18 @@ class OpenEOBackend(PWTTBackend):
         pre_start = _add_months(war_d, -pre_interval).strftime("%Y-%m-%d")
         post_end = _add_months(inf_d, post_interval).strftime("%Y-%m-%d")
 
+        # Initialise run_metadata
+        self.run_metadata = {
+            "collection": "SENTINEL1_GRD",
+            "bands": ["VV", "VH"],
+            "sar_backscatter": "sigma0-ellipsoid",
+            "pre_period": {"start": pre_start, "end": war_start},
+            "post_period": {"start": inference_start, "end": post_end},
+            "bbox": [west, south, east, north],
+            "processing": "openEO CDSE server-side",
+            "job_logs": [],
+        }
+
         if progress_callback:
             progress_callback(5, f"Loading pre-war collection ({pre_start} to {war_start})…")
         pre = (
@@ -130,6 +142,8 @@ class OpenEOBackend(PWTTBackend):
         import time
 
         self.remote_job_id = job_id
+        if self.run_metadata is None:
+            self.run_metadata = {"processing": "openEO CDSE server-side (resumed)"}
         job = self._conn.job(job_id)
 
         # Get full job metadata via describe()
@@ -209,14 +223,17 @@ class OpenEOBackend(PWTTBackend):
 
     def _download_results(self, job, output_path, progress_callback=None):
         """Download results and log metadata."""
+        import os
         job_id = job.job_id
 
         if progress_callback:
             progress_callback(78, "Fetching result metadata…")
 
+        result_meta = {}
         try:
             results = job.get_results()
             meta = results.get_metadata()
+            result_meta = meta
             bbox = meta.get("bbox")
             assets = meta.get("assets", {})
             asset_names = list(assets.keys())
@@ -236,11 +253,73 @@ class OpenEOBackend(PWTTBackend):
             progress_callback(82, f"Downloading result to {output_path}…")
         results.download_file(output_path)
 
+        size_mb = os.path.getsize(output_path) / (1024 * 1024) if os.path.isfile(output_path) else 0
         if progress_callback:
-            import os
-            size_mb = os.path.getsize(output_path) / (1024 * 1024) if os.path.isfile(output_path) else 0
             progress_callback(95, f"Download complete ({size_mb:.1f} MB). Job {job_id} done.")
+
+        # Collect run_metadata from job describe, logs, and result metadata
+        self._collect_run_metadata(job, result_meta, output_path)
+
         return output_path
+
+    def _collect_run_metadata(self, job, result_meta, output_path):
+        """Gather processing details into run_metadata after job completion."""
+        import os
+        if self.run_metadata is None:
+            self.run_metadata = {}
+
+        # Job-level info from describe()
+        try:
+            info = job.describe()
+            self.run_metadata["remote_job_id"] = info.get("id")
+            self.run_metadata["job_status"] = info.get("status")
+            self.run_metadata["job_created"] = info.get("created")
+            self.run_metadata["job_updated"] = info.get("updated")
+            if info.get("usage"):
+                self.run_metadata["usage"] = info["usage"]
+            if info.get("costs") is not None:
+                self.run_metadata["costs"] = info["costs"]
+        except Exception:
+            pass
+
+        # Result metadata (bbox, assets)
+        if result_meta:
+            if result_meta.get("bbox"):
+                self.run_metadata["result_bbox"] = result_meta["bbox"]
+            assets = result_meta.get("assets", {})
+            if assets:
+                self.run_metadata["result_assets"] = {
+                    name: {
+                        "type": a.get("type", ""),
+                        "href": a.get("href", ""),
+                    }
+                    for name, a in assets.items()
+                }
+
+        # Output file size
+        try:
+            if os.path.isfile(output_path):
+                self.run_metadata["output_size_bytes"] = os.path.getsize(output_path)
+        except OSError:
+            pass
+
+        # Extract scene/data info from server logs
+        try:
+            logs = job.logs()
+            entries = list(logs) if logs else []
+            log_messages = []
+            for entry in entries:
+                if isinstance(entry, dict):
+                    msg = entry.get("message", "")
+                    lvl = entry.get("level", "info")
+                else:
+                    msg = str(entry)
+                    lvl = "info"
+                if msg:
+                    log_messages.append({"level": lvl, "message": msg})
+            self.run_metadata["job_logs"] = log_messages
+        except Exception:
+            pass
 
     def _log_job_describe(self, job, progress_callback=None):
         """Fetch and log full job metadata from describe()."""
