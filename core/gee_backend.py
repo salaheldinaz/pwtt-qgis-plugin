@@ -45,6 +45,7 @@ class GEEBackend(PWTTBackend):
         progress_callback=None,
         include_footprints: bool = False,
         footprints_path: Optional[str] = None,
+        remote_job_id: Optional[str] = None,
         damage_threshold: float = 3.3,
         gee_viz: bool = False,
     ) -> str:

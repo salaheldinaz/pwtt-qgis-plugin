@@ -376,6 +376,26 @@ def _merge_openeo_creds_from_controls_dock(creds, controls_dock):
     return creds
 
 
+def _merge_local_creds_from_controls_dock(creds, controls_dock):
+    """Use CDSE username/password from the panel when set (Resume before Run saved settings)."""
+    if controls_dock is None or not hasattr(controls_dock, "_get_credentials"):
+        return creds
+    try:
+        ui = controls_dock._get_credentials("local")
+    except Exception:
+        return creds
+    u = (ui.get("username") or "").strip()
+    p = ui.get("password") or ""
+    if u or p:
+        out = dict(creds)
+        if u:
+            out["username"] = u
+        if p:
+            out["password"] = p
+        return out
+    return creds
+
+
 def _create_and_auth_backend(backend_id, parent=None, controls_dock=None):
     """Create a backend instance and authenticate using stored credentials.
 
@@ -412,6 +432,8 @@ def _create_and_auth_backend(backend_id, parent=None, controls_dock=None):
     s.endGroup()
     if backend_id == "openeo":
         creds = _merge_openeo_creds_from_controls_dock(creds, controls_dock)
+    elif backend_id == "local":
+        creds = _merge_local_creds_from_controls_dock(creds, controls_dock)
     if parent:
         _auth_with_progress(backend, creds, backend_id, parent)  # raises on failure
     else:

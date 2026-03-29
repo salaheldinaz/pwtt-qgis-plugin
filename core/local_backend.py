@@ -2,6 +2,7 @@
 """Full-local backend: CDSE download, Lee filter (scipy), t-test (numpy), post-process, rasterio output."""
 
 import os
+from datetime import datetime
 import numpy as np
 from typing import Optional
 from .base_backend import PWTTBackend
@@ -9,12 +10,12 @@ from .downloader import get_token, search_s1_grd, download_product, find_vv_vh_i
 from .utils import wkt_to_bbox
 
 
-def _add_months(y, m, months):
-    m -= 1
-    m += months
-    y += m // 12
+def _add_months_dt(d: datetime, months: int) -> datetime:
+    """Calendar add (same rule as openEO backend: clamp day to 28)."""
+    m = d.month - 1 + months
+    y = d.year + m // 12
     m = m % 12 + 1
-    return y, m
+    return datetime(y, m, min(d.day, 28))
 
 
 def _lee_filter(band: np.ndarray, kernel_radius: int = 1, enl: float = 5.0) -> np.ndarray:
@@ -86,6 +87,7 @@ class LocalBackend(PWTTBackend):
         progress_callback=None,
         include_footprints: bool = False,
         footprints_path: Optional[str] = None,
+        remote_job_id: Optional[str] = None,
         damage_threshold: float = 3.3,
         gee_viz: bool = False,
     ) -> str:
@@ -99,12 +101,10 @@ class LocalBackend(PWTTBackend):
         if not bbox:
             raise ValueError("Invalid AOI WKT")
         west, south, east, north = bbox
-        war_y, war_m = int(war_start[:4]), int(war_start[5:7])
-        inf_y, inf_m = int(inference_start[:4]), int(inference_start[5:7])
-        pre_start_y, pre_start_m = _add_months(war_y, war_m, -pre_interval)
-        post_end_y, post_end_m = _add_months(inf_y, inf_m, post_interval)
-        pre_start = f"{pre_start_y}-{pre_start_m:02d}-01"
-        post_end = f"{post_end_y}-{post_end_m:02d}-01"
+        war_d = datetime.strptime(war_start[:10], "%Y-%m-%d")
+        inf_d = datetime.strptime(inference_start[:10], "%Y-%m-%d")
+        pre_start = _add_months_dt(war_d, -pre_interval).strftime("%Y-%m-%d")
+        post_end = _add_months_dt(inf_d, post_interval).strftime("%Y-%m-%d")
 
         cache_dir = os.path.join(os.path.dirname(output_path), ".pwtt_cache")
         os.makedirs(cache_dir, exist_ok=True)
