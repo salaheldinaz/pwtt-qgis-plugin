@@ -2021,7 +2021,7 @@ class PWTTControlsDock(QDockWidget):
 
         self.war_start = QDateEdit()
         self.war_start.setCalendarPopup(True)
-        self.war_start.setDate(QDate(2023, 10, 07))
+        self.war_start.setDate(QDate(2023, 10, 7))
         params_layout.addRow("War start date:", self.war_start)
         params_layout.addRow(self._hint(
             "When hostilities began. Imagery before this date becomes the undamaged baseline."

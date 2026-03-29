@@ -1,8 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <!-- GRD / cold-storage staging: archive + SAR burst -->
-  <rect width="64" height="64" rx="12" fill="#0d1117"/>
-  <rect x="12" y="14" width="40" height="28" rx="3" fill="none" stroke="#FF9800" stroke-width="2"/>
-  <path d="M18 22h28M18 28h20M18 34h24" stroke="#64748b" stroke-width="1.5" stroke-linecap="round"/>
-  <path d="M44 40 L52 52 M48 40 L56 52" stroke="#38bdf8" stroke-width="2" stroke-linecap="round"/>
-  <circle cx="40" cy="36" r="3" fill="none" stroke="#2dd4bf" stroke-width="1.5"/>
+  <!-- GRD staging: archive box with radar waves -->
+  <rect x="14" y="16" width="36" height="32" rx="2" fill="none" stroke="#FF9800" stroke-width="3"/>
+  <path d="M20 26h24M20 34h18M20 42h22" stroke="#FF9800" stroke-width="2" stroke-linecap="round"/>
+  <path d="M46 12 L54 8 M50 16 L58 12" stroke="#38bdf8" stroke-width="2.5" stroke-linecap="round"/>
 </svg>
