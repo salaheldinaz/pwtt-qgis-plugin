@@ -6,7 +6,11 @@ import os
 
 from qgis.PyQt.QtGui import QColor
 from qgis.core import (
+    Qgis,
     QgsColorRampShader,
+    QgsGradientColorRamp,
+    QgsGradientStop,
+    QgsRasterMinMaxOrigin,
     QgsRasterShader,
     QgsSingleBandPseudoColorRenderer,
     QgsSingleSymbolRenderer,
@@ -67,36 +71,84 @@ def pwtt_raster_abstract(damage_threshold: float) -> str:
     )
 
 
+def _pwtt_tstatistic_color_ramp():
+    """Gradient ramp (0–1) with mid stop — same hues as viz_constants hex stops."""
+    return QgsGradientColorRamp(
+        QColor(T_STATISTIC_VIZ_HEX_LOW),
+        QColor(T_STATISTIC_VIZ_HEX_HIGH),
+        False,
+        [QgsGradientStop(0.5, QColor(T_STATISTIC_VIZ_HEX_MID))],
+    )
+
+
+def _pwtt_manual_color_ramp_shader():
+    """Fallback when createShader is missing or fails (older QGIS)."""
+    ramp_fn = QgsColorRampShader()
+    ramp_fn.setColorRampType(QgsColorRampShader.Interpolated)
+    ramp_fn.setMinimumValue(T_STATISTIC_VIZ_MIN)
+    ramp_fn.setMaximumValue(T_STATISTIC_VIZ_MAX)
+    mid = (T_STATISTIC_VIZ_MIN + T_STATISTIC_VIZ_MAX) / 2.0
+    items = [
+        QgsColorRampShader.ColorRampItem(
+            T_STATISTIC_VIZ_MIN, QColor(T_STATISTIC_VIZ_HEX_LOW), ""
+        ),
+        QgsColorRampShader.ColorRampItem(mid, QColor(T_STATISTIC_VIZ_HEX_MID), ""),
+        QgsColorRampShader.ColorRampItem(
+            T_STATISTIC_VIZ_MAX, QColor(T_STATISTIC_VIZ_HEX_HIGH), ""
+        ),
+    ]
+    ramp_fn.setColorRampItemList(items)
+    shader = QgsRasterShader()
+    shader.setRasterShaderFunction(ramp_fn)
+    return shader
+
+
+def _pwtt_pseudocolor_renderer(layer):
+    """Renderer the symbology panel understands; fixed 3–5 stretch (not NaN / stats)."""
+    provider = layer.dataProvider()
+    renderer = QgsSingleBandPseudoColorRenderer(provider, 1, None)
+    ramp = _pwtt_tstatistic_color_ramp()
+    if hasattr(renderer, "createShader"):
+        try:
+            renderer.createShader(
+                ramp,
+                Qgis.ShaderInterpolationMethod.Linear,
+                Qgis.ShaderClassificationMethod.Continuous,
+                0,
+                False,
+            )
+        except (AttributeError, TypeError):
+            renderer.setShader(_pwtt_manual_color_ramp_shader())
+    else:
+        renderer.setShader(_pwtt_manual_color_ramp_shader())
+
+    # Without these, classification min/max stay NaN; opening Layer Styling
+    # recomputes from raster stats and replaces colors.
+    renderer.setClassificationMin(T_STATISTIC_VIZ_MIN)
+    renderer.setClassificationMax(T_STATISTIC_VIZ_MAX)
+    renderer.setOpacity(1.0)
+
+    try:
+        mmo = QgsRasterMinMaxOrigin()
+        mmo.setLimits(Qgis.RasterRangeLimit.NotSet)
+        renderer.setMinMaxOrigin(mmo)
+    except AttributeError:
+        pass
+
+    return renderer
+
+
 def style_pwtt_raster_layer(layer, damage_threshold: float = 3.3) -> None:
     """Band 1 pseudocolor matching code/pwtt.py GEE viz; abstract; opacity."""
     if not layer or not layer.isValid():
         return
     layer.setAbstract(pwtt_raster_abstract(damage_threshold))
-    layer.setOpacity(T_STATISTIC_VIZ_OPACITY)
     if layer.bandCount() >= 1:
-        ramp_fn = QgsColorRampShader()
-        ramp_fn.setColorRampType(QgsColorRampShader.Interpolated)
-        ramp_fn.setMinimumValue(T_STATISTIC_VIZ_MIN)
-        ramp_fn.setMaximumValue(T_STATISTIC_VIZ_MAX)
-        mid = (T_STATISTIC_VIZ_MIN + T_STATISTIC_VIZ_MAX) / 2.0
-        items = [
-            QgsColorRampShader.ColorRampItem(
-                T_STATISTIC_VIZ_MIN, QColor(T_STATISTIC_VIZ_HEX_LOW), ""
-            ),
-            QgsColorRampShader.ColorRampItem(
-                mid, QColor(T_STATISTIC_VIZ_HEX_MID), ""
-            ),
-            QgsColorRampShader.ColorRampItem(
-                T_STATISTIC_VIZ_MAX, QColor(T_STATISTIC_VIZ_HEX_HIGH), ""
-            ),
-        ]
-        ramp_fn.setColorRampItemList(items)
-        shader = QgsRasterShader()
-        shader.setRasterShaderFunction(ramp_fn)
-        renderer = QgsSingleBandPseudoColorRenderer(
-            layer.dataProvider(), 1, shader
-        )
+        renderer = _pwtt_pseudocolor_renderer(layer)
         layer.setRenderer(renderer)
+    # Apply after renderer so QGIS does not reset it; symbology uses full-strength
+    # colors and this matches the global layer opacity control.
+    layer.setOpacity(T_STATISTIC_VIZ_OPACITY)
     layer.triggerRepaint()
 
 

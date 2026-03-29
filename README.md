@@ -1,6 +1,6 @@
 # PWTT QGIS Plugin — Battle Damage Detection
 
-QGIS plugin implementing the **Pixel-Wise T-Test (PWTT)** algorithm for building damage detection from Sentinel-1 SAR imagery. Choose among three processing backends: [openEO](https://openeo.org/) (recommended), [Google Earth Engine](https://earthengine.google.com/), or full-local processing.
+QGIS plugin implementing the **Pixel-Wise T-Test (PWTT)** algorithm for building damage detection from Sentinel-1 SAR imagery. Choose among three processing backends: [openEO](https://openeo.org/) , [Google Earth Engine](https://earthengine.google.com/), or full-local processing.
 
 ## Links
 
@@ -46,7 +46,7 @@ Use the same Python that QGIS uses (e.g. from QGIS’s Python environment or OS 
 
 | Backend | Where it runs | Auth | Packages |
 |--------|----------------|------|----------|
-| **openEO** (recommended) | [Copernicus Data Space](https://dataspace.copernicus.eu/) (cloud) | OIDC browser or client ID/secret | `openeo` |
+| **openEO**  | [Copernicus Data Space](https://dataspace.copernicus.eu/) (cloud) | OIDC browser or client ID/secret | `openeo` |
 | **Google Earth Engine** | [GEE](https://earthengine.google.com/) (cloud) | `ee.Authenticate()` + optional project name | `earthengine-api` |
 | **Local** | Your machine | CDSE username/password | `numpy`, `scipy`, `rasterio`, `requests` |
 

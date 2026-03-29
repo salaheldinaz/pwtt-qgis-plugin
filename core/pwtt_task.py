@@ -120,7 +120,9 @@ class PWTTRunTask(QgsTask):
                 if isinstance(s, dict) and s.get("id")
             ]
             self._emit_msg(str(e))
-            return False
+            # Return True so QgsTask emits taskCompleted (not taskTerminated). Waiting-for-GRD
+            # is handled in the jobs dock; False would trigger QGIS "task failed" notifications.
+            return True
         except Exception as e:
             self._capture_remote_job_id()
             self.exception = e

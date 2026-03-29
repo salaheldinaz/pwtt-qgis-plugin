@@ -46,7 +46,7 @@ from qgis.gui import QgsFileWidget, QgsRubberBand
 
 
 BACKENDS = [
-    ("openeo", "openEO (recommended)"),
+    ("openeo", "openEO"),
     ("gee", "Google Earth Engine"),
     ("local", "Local Processing"),
 ]
@@ -479,6 +479,8 @@ class PWTTJobsDock(QDockWidget):
     _status_signal = pyqtSignal(str, str)   # (job_id, message)
     # Signal to auto-resume a job on the main thread
     _auto_resume_signal = pyqtSignal(str)   # job_id
+    # Thread-safe: append a line to a job log (e.g. CDSE poll from background thread)
+    _order_poll_log = pyqtSignal(str, str)  # (job_id, message)
     # Emitted after the job table is refreshed (e.g. GRD staging dock sync)
     jobs_changed = pyqtSignal()
 
@@ -497,6 +499,7 @@ class PWTTJobsDock(QDockWidget):
 
         self._status_signal.connect(self._handle_status_message)
         self._auto_resume_signal.connect(self._auto_resume_job)
+        self._order_poll_log.connect(self._append_order_poll_log)
 
         # Order-polling timer (checks every 2 min)
         self._order_timer = QTimer(self)
@@ -541,12 +544,14 @@ class PWTTJobsDock(QDockWidget):
         btn_row = QHBoxLayout()
         self.load_btn = QPushButton("Load parameters")
         self.load_local_btn = QPushButton("Load Local")
+        self.apply_style_btn = QPushButton("Apply styling")
+        self.footprints_btn = QPushButton("Per-building (OSM)")
         self.resume_btn = QPushButton("Resume")
         self.stop_btn = QPushButton("Stop")
         self.cancel_btn = QPushButton("Cancel")
         self.rerun_btn = QPushButton("Rerun")
         self.delete_btn = QPushButton("Delete")
-        for btn in (self.load_btn, self.load_local_btn, self.resume_btn, self.stop_btn,
+        for btn in (self.load_btn, self.load_local_btn, self.apply_style_btn, self.footprints_btn, self.resume_btn, self.stop_btn,
                      self.cancel_btn, self.rerun_btn, self.delete_btn):
             btn.setEnabled(False)
             btn_row.addWidget(btn)
@@ -554,8 +559,17 @@ class PWTTJobsDock(QDockWidget):
         self.load_local_btn.setToolTip(
             "If the result GeoTIFF (and footprints) exist on disk, add them to the map"
         )
+        self.apply_style_btn.setToolTip(
+            "Re-apply PWTT band-1 pseudocolor (3\u20135) and layer opacity to this job\u2019s "
+            "result raster already in the project (matches layer name or GeoTIFF path)"
+        )
+        self.footprints_btn.setToolTip(
+            "Fetch OSM buildings and mean damage (T-stat) per polygon using the job\u2019s result GeoTIFF"
+        )
         self.load_btn.clicked.connect(self._load_selected)
         self.load_local_btn.clicked.connect(self._load_local_selected)
+        self.apply_style_btn.clicked.connect(self._apply_styling_to_result_selected)
+        self.footprints_btn.clicked.connect(self._footprints_for_local_selected)
         self.resume_btn.clicked.connect(self._resume_selected)
         self.stop_btn.clicked.connect(self._stop_selected)
         self.cancel_btn.clicked.connect(self._cancel_selected)
@@ -660,6 +674,20 @@ class PWTTJobsDock(QDockWidget):
         from ..core import job_store
         return job_store.get_job(jid)
 
+    def _local_result_tif_path(self, job):
+        """Path to the job\u2019s result GeoTIFF if it exists on disk, else None."""
+        if not job:
+            return None
+        jid = job["id"]
+        out_dir = (job.get("output_dir") or "").strip()
+        for cand in (
+            job.get("output_tif"),
+            os.path.join(out_dir, f"pwtt_{jid}.tif") if out_dir else None,
+        ):
+            if cand and os.path.isfile(cand) and os.path.getsize(cand) > 0:
+                return cand
+        return None
+
     def _select_job(self, job_id):
         for row in range(self.job_table.rowCount()):
             item = self.job_table.item(row, 0)
@@ -696,7 +724,7 @@ class PWTTJobsDock(QDockWidget):
         from ..core import job_store
         job = self._get_selected_job()
         if not job:
-            for btn in (self.load_btn, self.load_local_btn, self.resume_btn, self.stop_btn,
+            for btn in (self.load_btn, self.load_local_btn, self.apply_style_btn, self.footprints_btn, self.resume_btn, self.stop_btn,
                          self.cancel_btn, self.rerun_btn, self.delete_btn):
                 btn.setEnabled(False)
             self.log_text.clear()
@@ -706,6 +734,8 @@ class PWTTJobsDock(QDockWidget):
         st = job["status"]
         self.load_btn.setEnabled(True)
         self.load_local_btn.setEnabled(True)
+        self.apply_style_btn.setEnabled(True)
+        self.footprints_btn.setEnabled(self._local_result_tif_path(job) is not None)
         self.resume_btn.setEnabled(st in job_store.RESUMABLE_STATUSES)
         self.stop_btn.setEnabled(st == job_store.STATUS_RUNNING)
         self.cancel_btn.setEnabled(
@@ -796,6 +826,11 @@ class PWTTJobsDock(QDockWidget):
 
     # ── Task callbacks (main thread) ──────────────────────────────────────────
 
+    def _append_order_poll_log(self, job_id, msg):
+        self._job_logs.setdefault(job_id, []).append(msg)
+        if self._get_selected_job_id() == job_id:
+            self.log_text.append(msg)
+
     def _handle_status_message(self, job_id, msg):
         self._job_logs.setdefault(job_id, []).append(msg)
         if self._get_selected_job_id() == job_id:
@@ -824,6 +859,49 @@ class PWTTJobsDock(QDockWidget):
     def _on_task_completed(self, job_id):
         from ..core import job_store
         task = self._active_tasks.pop(job_id, None)
+        if not task:
+            return
+
+        # GRD offline: run() returned True so QgsTask does not show a failure notification.
+        if task.products_offline:
+            remote_id = getattr(task, "remote_job_id", None)
+            if remote_id:
+                job_store.update_job(job_id, remote_job_id=remote_id)
+            ids = list(task.offline_product_ids)
+            prows = list(getattr(task, "offline_products", []) or [])
+            by_id = {
+                p["id"]: p
+                for p in prows
+                if isinstance(p, dict) and p.get("id")
+            }
+            offline_products = [
+                {
+                    "id": pid,
+                    "name": str(by_id.get(pid, {}).get("name", "")),
+                    "date": str(by_id.get(pid, {}).get("date", "")),
+                }
+                for pid in ids
+            ]
+            job_store.update_job(
+                job_id,
+                status=job_store.STATUS_WAITING_ORDERS,
+                offline_product_ids=ids,
+                offline_products=offline_products,
+            )
+            ids_str = ", ".join(ids[:5])
+            if len(ids) > 5:
+                ids_str += f" (+{len(ids) - 5} more)"
+            self._job_logs.setdefault(job_id, []).append(
+                f"<b>Products offline</b> — staging from cold storage.<br>"
+                f"Product IDs: {ids_str}<br>"
+                f"Will auto-check every 2 min and resume when available."
+            )
+            self._job_progress.pop(job_id, None)
+            self._refresh_job_list()
+            if self._get_selected_job_id() == job_id:
+                self._on_job_selected()
+            return
+
         output_tif = getattr(task, "output_tif", None)
         footprints = getattr(task, "footprints_gpkg", None)  # backwards compat (first)
         footprints_gpkgs = getattr(task, "footprints_gpkgs", {}) or {}
@@ -869,37 +947,7 @@ class PWTTJobsDock(QDockWidget):
         if remote_id:
             job_store.update_job(job_id, remote_job_id=remote_id)
 
-        if task.products_offline:
-            ids = list(task.offline_product_ids)
-            prows = list(getattr(task, "offline_products", []) or [])
-            by_id = {
-                p["id"]: p
-                for p in prows
-                if isinstance(p, dict) and p.get("id")
-            }
-            offline_products = [
-                {
-                    "id": pid,
-                    "name": str(by_id.get(pid, {}).get("name", "")),
-                    "date": str(by_id.get(pid, {}).get("date", "")),
-                }
-                for pid in ids
-            ]
-            job_store.update_job(
-                job_id,
-                status=job_store.STATUS_WAITING_ORDERS,
-                offline_product_ids=ids,
-                offline_products=offline_products,
-            )
-            ids_str = ", ".join(task.offline_product_ids[:5])
-            if len(task.offline_product_ids) > 5:
-                ids_str += f" (+{len(task.offline_product_ids) - 5} more)"
-            self._job_logs.setdefault(job_id, []).append(
-                f"<b>Products offline</b> — staging from cold storage.<br>"
-                f"Product IDs: {ids_str}<br>"
-                f"Will auto-check every 2 min and resume when available."
-            )
-        elif task.isCanceled():
+        if task.isCanceled():
             current = job_store.get_job(job_id)
             if current and current["status"] not in (
                 job_store.STATUS_STOPPED, job_store.STATUS_CANCELLED
@@ -950,14 +998,7 @@ class PWTTJobsDock(QDockWidget):
         jid = job["id"]
         out_dir = (job.get("output_dir") or "").strip()
 
-        tif_path = None
-        for cand in (
-            job.get("output_tif"),
-            os.path.join(out_dir, f"pwtt_{jid}.tif") if out_dir else None,
-        ):
-            if cand and os.path.isfile(cand) and os.path.getsize(cand) > 0:
-                tif_path = cand
-                break
+        tif_path = self._local_result_tif_path(job)
 
         if not tif_path:
             hint = os.path.join(out_dir, f"pwtt_{jid}.tif") if out_dir else "(set output folder)"
@@ -1041,6 +1082,237 @@ class PWTTJobsDock(QDockWidget):
         self._job_logs.setdefault(jid, []).append(msg)
         if self._get_selected_job_id() == jid:
             self.log_text.append(msg)
+
+    @staticmethod
+    def _raster_source_paths_resolved(layer):
+        """Paths to compare to a job GeoTIFF (handles simple GDAL vs URI-ish sources)."""
+        src = (layer.source() or "").strip()
+        if not src:
+            return []
+        paths = [src]
+        if "|" in src:
+            paths.append(src.split("|", 1)[0].strip())
+        if src.lower().startswith("gdal:") and '"' in src:
+            # e.g. GDAL:"path":band
+            for part in src.split('"'):
+                p = part.strip()
+                if p.endswith(".tif") or p.endswith(".tiff") or os.path.sep in p:
+                    paths.append(p)
+        out = []
+        for p in paths:
+            if p and os.path.isfile(p):
+                try:
+                    out.append(os.path.realpath(p))
+                except OSError:
+                    out.append(os.path.abspath(p))
+        return list(dict.fromkeys(out))
+
+    def _apply_styling_to_result_selected(self):
+        """Re-run PWTT symbology on the selected job\u2019s result raster if it is in the map."""
+        job = self._get_selected_job()
+        if not job:
+            return
+        jid = job["id"]
+        backend_id = job.get("backend_id")
+        thr_default = float(job.get("damage_threshold", 3.3))
+        tif_path = self._local_result_tif_path(job)
+        try:
+            tif_resolved = os.path.realpath(tif_path) if tif_path else None
+        except OSError:
+            tif_resolved = os.path.abspath(tif_path) if tif_path else None
+
+        from qgis.core import QgsRasterLayer
+
+        from ..core.qgis_layer_tree import pwtt_damage_layer_name
+        from ..core.qgis_output_style import (
+            damage_threshold_from_job_meta,
+            style_pwtt_raster_layer,
+        )
+
+        expected_name = pwtt_damage_layer_name(jid, backend_id)
+        project = QgsProject.instance()
+        matched = []
+        for _lid, layer in project.mapLayers().items():
+            if not isinstance(layer, QgsRasterLayer) or not layer.isValid():
+                continue
+            layer_paths = self._raster_source_paths_resolved(layer)
+            name_ok = layer.name() == expected_name
+            path_ok = bool(
+                tif_resolved and layer_paths and any(p == tif_resolved for p in layer_paths)
+            )
+            if not name_ok and not path_ok:
+                continue
+            meta_tif = tif_path or (layer_paths[0] if layer_paths else (layer.source() or ""))
+            thr = damage_threshold_from_job_meta(meta_tif, default=thr_default)
+            style_pwtt_raster_layer(layer, damage_threshold=thr)
+            matched.append(layer.name())
+
+        if not matched:
+            QMessageBox.information(
+                self,
+                "PWTT",
+                "No matching result raster in the project.\n\n"
+                f"Expected layer name:\n  {expected_name}\n"
+                + (
+                    f"\nor GeoTIFF path:\n  {tif_path}"
+                    if tif_path
+                    else "\n(Set job output folder / run \u201cLoad Local\u201d so the plugin "
+                    "knows the GeoTIFF path for matching.)"
+                ),
+            )
+            return
+
+        msg = "Apply styling: updated " + ", ".join(matched)
+        self._job_logs.setdefault(jid, []).append(msg)
+        if self._get_selected_job_id() == jid:
+            self.log_text.append(msg)
+        try:
+            from qgis.utils import iface as qgis_iface
+
+            if qgis_iface is not None:
+                qgis_iface.mapCanvas().refresh()
+        except ImportError:
+            pass
+
+    def _footprints_for_local_selected(self):
+        """OSM buildings + zonal mean T-stat for this job\u2019s on-disk result raster."""
+        job = self._get_selected_job()
+        if not job:
+            return
+        jid = job["id"]
+        tif_path = self._local_result_tif_path(job)
+        if not tif_path:
+            hint = os.path.join(
+                (job.get("output_dir") or "").strip(), f"pwtt_{jid}.tif"
+            ) if (job.get("output_dir") or "").strip() else "(set output folder)"
+            QMessageBox.information(
+                self,
+                "PWTT",
+                "No local result GeoTIFF found for this job.\n\n"
+                "Run the job or point output to an existing raster, then try again.\n"
+                f"Expected e.g.:\n  {hint}",
+            )
+            return
+        out_dir = (job.get("output_dir") or "").strip()
+        if not out_dir:
+            QMessageBox.warning(self, "PWTT", "Job has no output folder set.")
+            return
+        gpkg_path = os.path.join(out_dir, f"pwtt_{jid}_footprints_current.gpkg")
+        if not _ensure_footprint_dependencies(self):
+            return
+
+        aoi_wkt = (job.get("aoi_wkt") or "").strip()
+        if not aoi_wkt:
+            from ..core.utils import raster_bounds_to_aoi_wkt
+
+            aoi_wkt = raster_bounds_to_aoi_wkt(tif_path)
+        if not aoi_wkt:
+            QMessageBox.warning(
+                self, "PWTT",
+                "Could not determine AOI (job has no AOI WKT and raster extent could not be read).",
+            )
+            return
+
+        if os.path.isfile(gpkg_path) and os.path.getsize(gpkg_path) > 0:
+            reply = QMessageBox.question(
+                self, "PWTT",
+                f"Footprints file already exists:\n{gpkg_path}\n\nOverwrite and recompute?",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            )
+            if reply == QMessageBox.Cancel:
+                return
+            if reply == QMessageBox.No:
+                self._add_local_footprints_layer(gpkg_path, jid, job.get("backend_id"))
+                return
+
+        os.makedirs(out_dir, exist_ok=True)
+        self.footprints_btn.setEnabled(False)
+        self._status_signal.emit(jid, f"Computing OSM building footprints for job {jid}\u2026")
+        last_err = []
+        done = []
+
+        def _worker():
+            try:
+                from ..core.footprints import compute_footprints
+
+                def _prog(pct, msg):
+                    self._status_signal.emit(jid, f"[{pct}%] {msg}")
+
+                compute_footprints(
+                    tif_path,
+                    aoi_wkt,
+                    gpkg_path,
+                    progress_callback=_prog,
+                )
+                done.append(True)
+            except Exception as e:
+                last_err.append(str(e))
+                self._status_signal.emit(jid, f"Footprints error: {e}")
+
+        def _check_done():
+            if t.is_alive():
+                return
+            timer.stop()
+            self.footprints_btn.setEnabled(self._local_result_tif_path(self._get_selected_job()) is not None)
+            if last_err:
+                return
+            if done and os.path.isfile(gpkg_path) and os.path.getsize(gpkg_path) > 0:
+                from ..core import job_store
+
+                existing = job_store.get_job(jid) or job
+                gpkgs = dict(existing.get("footprints_gpkgs") or {})
+                gpkgs["current_osm"] = gpkg_path
+                legacy = existing.get("footprints_gpkg") or gpkg_path
+                job_store.update_job(
+                    jid,
+                    footprints_gpkgs=gpkgs,
+                    footprints_gpkg=legacy,
+                )
+                self._refresh_job_list()
+                note = f"Footprints saved: {gpkg_path}"
+                self._job_logs.setdefault(jid, []).append(note)
+                if self._get_selected_job_id() == jid:
+                    self.log_text.append(note)
+                self._add_local_footprints_layer(gpkg_path, jid, job.get("backend_id"))
+            else:
+                self._status_signal.emit(jid, "Footprints step finished but output file is missing.")
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        timer = QTimer(self)
+        timer.timeout.connect(_check_done)
+        timer.start(400)
+
+    def _add_local_footprints_layer(self, path, job_id, backend_id):
+        from qgis.core import QgsProject, QgsVectorLayer
+
+        from ..core.qgis_layer_tree import (
+            add_map_layer_to_pwtt_job_group,
+            pwtt_footprints_layer_name,
+        )
+        from ..core.qgis_output_style import style_pwtt_footprints_layer
+
+        job = self._get_selected_job()
+        label = pwtt_footprints_layer_name(
+            job_id,
+            backend_id,
+            "current_osm",
+            war_start=(job or {}).get("war_start"),
+            inference_start=(job or {}).get("inference_start"),
+        )
+        layer = QgsVectorLayer(path, label, "ogr")
+        if layer.isValid():
+            style_pwtt_footprints_layer(layer)
+            add_map_layer_to_pwtt_job_group(QgsProject.instance(), layer, job_id, backend_id)
+            msg = f"Layer added: {label}"
+            self._job_logs.setdefault(job_id, []).append(msg)
+            if self._get_selected_job_id() == job_id:
+                self.log_text.append(msg)
+        else:
+            msg = "Failed to load footprints GeoPackage."
+            self._job_logs.setdefault(job_id, []).append(msg)
+            if self._get_selected_job_id() == job_id:
+                self.log_text.append(msg)
 
     def _resume_selected(self):
         job = self._get_selected_job()
@@ -1176,18 +1448,38 @@ class PWTTJobsDock(QDockWidget):
         ).start()
 
     def _poll_orders_worker(self, username, password, waiting_jobs):
+        from datetime import datetime
+
         try:
             from ..core.downloader import get_token, _is_product_online
+
             token = get_token(username, password)
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             for job in waiting_jobs:
-                all_online = all(
-                    _is_product_online(token, pid)
-                    for pid in job["offline_product_ids"]
+                jid = job["id"]
+                pids = job["offline_product_ids"]
+                online_n = sum(
+                    1 for pid in pids if _is_product_online(token, pid)
                 )
-                if all_online:
-                    self._auto_resume_signal.emit(job["id"])
-        except Exception:
-            pass
+                n = len(pids)
+                if online_n >= n:
+                    self._order_poll_log.emit(
+                        jid,
+                        f"[{ts}] Auto-check CDSE API: all {n} product(s) online — resuming.",
+                    )
+                    self._auto_resume_signal.emit(jid)
+                else:
+                    self._order_poll_log.emit(
+                        jid,
+                        f"[{ts}] Auto-check CDSE API: {online_n}/{n} product(s) online; still waiting.",
+                    )
+        except Exception as e:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            for job in waiting_jobs:
+                self._order_poll_log.emit(
+                    job["id"],
+                    f"[{ts}] Auto-check CDSE API failed (will retry on next timer): {e}",
+                )
         finally:
             self._poll_running = False
 
