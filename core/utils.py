@@ -23,3 +23,25 @@ def ensure_output_dir(path: str) -> str:
     if d:
         os.makedirs(d, exist_ok=True)
     return path
+
+
+def raster_bounds_to_aoi_wkt(raster_path: str) -> Optional[str]:
+    """Axis-aligned EPSG:4326 polygon WKT from a raster's geographic extent."""
+    try:
+        import rasterio
+        from rasterio.warp import transform_bounds
+    except ImportError:
+        return None
+    try:
+        with rasterio.open(raster_path) as src:
+            if src.crs is None:
+                return None
+            west, south, east, north = transform_bounds(
+                src.crs, "EPSG:4326", *src.bounds, densify_pts=21
+            )
+    except Exception:
+        return None
+    return (
+        f"POLYGON(({west} {south}, {east} {south}, {east} {north}, "
+        f"{west} {north}, {west} {south}))"
+    )

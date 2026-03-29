@@ -92,6 +92,43 @@ def _dock_title(base, plugin_dir):
     return f"{base} ({v})" if v else base
 
 
+def _ensure_footprint_dependencies(parent):
+    """Prompt to install footprint packages if needed. Return True if ready to run."""
+    from ..core import deps
+
+    fp_missing, fp_pip = deps.footprint_missing()
+    if not fp_missing:
+        return True
+    if fp_pip:
+        reply = QMessageBox.question(
+            parent, "PWTT",
+            f"Building footprints require: {', '.join(fp_pip)}\n\nInstall now?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if _is_message_box_yes(reply):
+            if not deps.install_with_dialog(fp_pip, parent=parent):
+                return False
+            fp_missing, fp_pip = deps.footprint_missing()
+    if fp_missing:
+        detail = ""
+        if "rasterstats" in fp_missing:
+            detail = deps.rasterstats_failure_detail()
+        qgis_only = [n for n in fp_missing if n not in (fp_pip or [])]
+        msg = f"Cannot compute footprints: missing {', '.join(fp_missing)}."
+        if qgis_only:
+            msg += (
+                f"\n{', '.join(qgis_only)} should be provided by QGIS — "
+                f"check your QGIS installation."
+            )
+        else:
+            msg += "\nInstall the packages or skip this step."
+        if detail:
+            msg += f"\n\n{detail}"
+        QMessageBox.warning(parent, "PWTT", msg)
+        return False
+    return True
+
+
 def _is_message_box_yes(reply):
     """Reliable Yes detection across PyQt5/6 (``QMessageBox.question`` return values)."""
     try:
@@ -934,6 +971,13 @@ class PWTTOpenEOJobsDock(QDockWidget):
         self.download_btn.setToolTip("Download result GeoTIFF and add as layer")
         self.download_btn.clicked.connect(self._download_selected)
         btn_row.addWidget(self.download_btn)
+        self.footprints_btn = QPushButton("Per-building (OSM)")
+        self.footprints_btn.setEnabled(False)
+        self.footprints_btn.setToolTip(
+            "After the GeoTIFF is downloaded: fetch OSM buildings and mean damage (T-stat) per polygon"
+        )
+        self.footprints_btn.clicked.connect(self._footprints_for_selected)
+        btn_row.addWidget(self.footprints_btn)
         self.logs_btn = QPushButton("Show Logs")
         self.logs_btn.setEnabled(False)
         self.logs_btn.setToolTip("Fetch and show server-side logs for selected job")
@@ -1069,11 +1113,13 @@ class PWTTOpenEOJobsDock(QDockWidget):
         row = self.job_table.currentRow()
         if row < 0 or row >= len(self._remote_jobs):
             self.download_btn.setEnabled(False)
+            self.footprints_btn.setEnabled(False)
             self.logs_btn.setEnabled(False)
             self.delete_remote_btn.setEnabled(False)
             return
         j = self._remote_jobs[row]
         self.download_btn.setEnabled(j["status"] == "finished")
+        self.footprints_btn.setEnabled(j["status"] == "finished")
         self.logs_btn.setEnabled(True)
         self.delete_remote_btn.setEnabled(j["status"] not in ("running", "queued"))
 
@@ -1083,6 +1129,15 @@ class PWTTOpenEOJobsDock(QDockWidget):
             return None
         item = self.job_table.item(row, 0)
         return item.data(Qt.UserRole) if item else None
+
+    def _remote_job_local_paths(self, job_id):
+        """Same layout as download: ``<project_or_home>/PWTT/<job_id>/pwtt_<job_id>.tif``."""
+        proj_path = QgsProject.instance().absolutePath()
+        base_dir = proj_path if proj_path else os.path.expanduser("~/PWTT")
+        out_dir = os.path.join(base_dir, job_id)
+        tif_path = os.path.join(out_dir, f"pwtt_{job_id}.tif")
+        gpkg_path = os.path.join(out_dir, f"pwtt_{job_id}_footprints.gpkg")
+        return out_dir, tif_path, gpkg_path
 
     # ── Show Logs ─────────────────────────────────────────────────────────────
 
@@ -1158,12 +1213,8 @@ class PWTTOpenEOJobsDock(QDockWidget):
         if not job_id or not self._conn:
             return
 
-        # Determine output directory
-        proj_path = QgsProject.instance().absolutePath()
-        base_dir = proj_path if proj_path else os.path.expanduser("~/PWTT")
-        out_dir = os.path.join(base_dir, job_id)
+        out_dir, out_path, _gpkg_unused = self._remote_job_local_paths(job_id)
         os.makedirs(out_dir, exist_ok=True)
-        out_path = os.path.join(out_dir, f"pwtt_{job_id}.tif")
 
         if os.path.isfile(out_path):
             reply = QMessageBox.question(
@@ -1234,6 +1285,94 @@ class PWTTOpenEOJobsDock(QDockWidget):
             self.log_text.append(f"Layer added: openEO result ({job_id})")
         else:
             self.log_text.append("Failed to load layer \u2014 file may be invalid.")
+
+    def _footprints_for_selected(self):
+        """OSM buildings + zonal mean T-stat for the downloaded openEO result raster."""
+        job_id = self._get_selected_remote_id()
+        if not job_id:
+            return
+        out_dir, tif_path, gpkg_path = self._remote_job_local_paths(job_id)
+        if not os.path.isfile(tif_path) or os.path.getsize(tif_path) == 0:
+            QMessageBox.information(
+                self, "PWTT",
+                "Download the result GeoTIFF first using \u201cDownload && Add to Map\u201d.",
+            )
+            return
+        if not _ensure_footprint_dependencies(self):
+            return
+        from ..core.utils import raster_bounds_to_aoi_wkt
+
+        aoi_wkt = raster_bounds_to_aoi_wkt(tif_path)
+        if not aoi_wkt:
+            QMessageBox.warning(
+                self, "PWTT",
+                "Could not read raster extent (missing CRS or rasterio unavailable).",
+            )
+            return
+        if os.path.isfile(gpkg_path) and os.path.getsize(gpkg_path) > 0:
+            reply = QMessageBox.question(
+                self, "PWTT",
+                f"Footprints file already exists:\n{gpkg_path}\n\nOverwrite and recompute?",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            )
+            if reply == QMessageBox.Cancel:
+                return
+            if reply == QMessageBox.No:
+                self._add_footprints_layer(gpkg_path, job_id)
+                return
+
+        os.makedirs(out_dir, exist_ok=True)
+        self.footprints_btn.setEnabled(False)
+        self.log_text.append(f"Computing OSM building footprints for {job_id}\u2026")
+        last_err = []
+        done = []
+
+        def _worker():
+            try:
+                from ..core.footprints import compute_footprints
+
+                def _prog(pct, msg):
+                    self._log_signal.emit(f"[{pct}%] {msg}")
+
+                compute_footprints(
+                    tif_path,
+                    aoi_wkt,
+                    gpkg_path,
+                    progress_callback=_prog,
+                )
+                done.append(True)
+            except Exception as e:
+                last_err.append(str(e))
+                self._log_signal.emit(f"Footprints error: {e}")
+
+        def _check_done():
+            if t.is_alive():
+                return
+            timer.stop()
+            self.footprints_btn.setEnabled(True)
+            if last_err:
+                return
+            if done and os.path.isfile(gpkg_path) and os.path.getsize(gpkg_path) > 0:
+                self.log_text.append(f"Footprints saved: {gpkg_path}")
+                self._add_footprints_layer(gpkg_path, job_id)
+            else:
+                self.log_text.append("Footprints step finished but output file is missing.")
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        timer = QTimer(self)
+        timer.timeout.connect(_check_done)
+        timer.start(400)
+
+    def _add_footprints_layer(self, path, job_id):
+        from qgis.core import QgsVectorLayer
+
+        layer = QgsVectorLayer(path, f"openEO footprints ({job_id})", "ogr")
+        if layer.isValid():
+            QgsProject.instance().addMapLayer(layer)
+            self.log_text.append(f"Layer added: openEO footprints ({job_id})")
+        else:
+            self.log_text.append("Failed to load footprints GeoPackage.")
 
     # ── Delete remote ────────────────────────────────────────────────────────
 
@@ -1781,35 +1920,8 @@ class PWTTControlsDock(QDockWidget):
 
         # ── Check footprint dependencies if enabled ───────────────────────
         if self.include_footprints.isChecked():
-            fp_missing, fp_pip = deps.footprint_missing()
-            if fp_missing:
-                if fp_pip:
-                    reply = QMessageBox.question(
-                        self, "PWTT",
-                        f"Building footprints require: {', '.join(fp_pip)}\n\nInstall now?",
-                        QMessageBox.Yes | QMessageBox.No,
-                    )
-                    if _is_message_box_yes(reply):
-                        if not deps.install_with_dialog(fp_pip, parent=self):
-                            return
-                        fp_missing, fp_pip = deps.footprint_missing()
-                if fp_missing:
-                    detail = ""
-                    if "rasterstats" in fp_missing:
-                        detail = deps.rasterstats_failure_detail()
-                    qgis_only = [n for n in fp_missing if n not in (fp_pip or [])]
-                    msg = f"Cannot compute footprints: missing {', '.join(fp_missing)}."
-                    if qgis_only:
-                        msg += (
-                            f"\n{', '.join(qgis_only)} should be provided by QGIS — "
-                            f"check your QGIS installation."
-                        )
-                    else:
-                        msg += "\nUncheck the footprints option or install the packages."
-                    if detail:
-                        msg += f"\n\n{detail}"
-                    QMessageBox.warning(self, "PWTT", msg)
-                    return
+            if not _ensure_footprint_dependencies(self):
+                return
 
         # ── Create backend and authenticate ───────────────────────────────
         BackendClass = _get_backend_class(backend_id)
