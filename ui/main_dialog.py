@@ -332,11 +332,37 @@ def _auth_with_progress(backend, credentials, backend_id, parent=None):
         raise RuntimeError(worker.error_msg or "Authentication failed. Check your credentials.")
 
 
-def _create_and_auth_backend(backend_id, parent=None):
+def _merge_openeo_creds_from_controls_dock(creds, controls_dock):
+    """Use client id/secret from the controls panel when both are set.
+
+    QgsSettings are only updated after a successful Run (_save_settings). Until then,
+    Connect && Refresh / resume paths read empty keys from disk and fall back to
+    interactive OIDC even though the user already filled Client ID/secret in the UI.
+    """
+    if controls_dock is None or not hasattr(controls_dock, "_get_credentials"):
+        return creds
+    try:
+        ui = controls_dock._get_credentials("openeo")
+    except Exception:
+        return creds
+    if ui.get("client_id") and ui.get("client_secret"):
+        out = dict(creds)
+        out["client_id"] = ui["client_id"]
+        out["client_secret"] = ui["client_secret"]
+        if "verify_ssl" in ui:
+            out["verify_ssl"] = ui["verify_ssl"]
+        return out
+    return creds
+
+
+def _create_and_auth_backend(backend_id, parent=None, controls_dock=None):
     """Create a backend instance and authenticate using stored credentials.
 
     If *parent* is given, authentication runs in a background thread with a
     progress dialog so the UI stays responsive (important for OIDC flows).
+
+    For openEO, pass *controls_dock* when available so client-credentials from the
+    PWTT panel (not yet flushed to QgsSettings) are used.
     """
     BackendClass = _get_backend_class(backend_id)
     if not BackendClass:
@@ -363,6 +389,8 @@ def _create_and_auth_backend(backend_id, parent=None):
     else:
         creds = {}
     s.endGroup()
+    if backend_id == "openeo":
+        creds = _merge_openeo_creds_from_controls_dock(creds, controls_dock)
     if parent:
         _auth_with_progress(backend, creds, backend_id, parent)  # raises on failure
     else:
@@ -778,7 +806,9 @@ class PWTTJobsDock(QDockWidget):
         if not job:
             return
         try:
-            backend = _create_and_auth_backend(job["backend_id"], parent=self)
+            backend = _create_and_auth_backend(
+                job["backend_id"], parent=self, controls_dock=self.controls_dock
+            )
         except RuntimeError as e:
             QMessageBox.warning(self, "PWTT", str(e))
             return
@@ -834,7 +864,9 @@ class PWTTJobsDock(QDockWidget):
         if not old:
             return
         try:
-            backend = _create_and_auth_backend(old["backend_id"], parent=self)
+            backend = _create_and_auth_backend(
+                old["backend_id"], parent=self, controls_dock=self.controls_dock
+            )
         except RuntimeError as e:
             QMessageBox.warning(self, "PWTT", str(e))
             return
@@ -925,7 +957,9 @@ class PWTTJobsDock(QDockWidget):
         if job_id in self._active_tasks:
             return
         try:
-            backend = _create_and_auth_backend(job["backend_id"])
+            backend = _create_and_auth_backend(
+                job["backend_id"], controls_dock=self.controls_dock
+            )
         except Exception:
             return
         self._job_logs.setdefault(job_id, []).append(
@@ -1037,7 +1071,11 @@ class PWTTOpenEOJobsDock(QDockWidget):
         """Authenticate (if needed) and list all openEO batch jobs."""
         if not self._conn:
             try:
-                backend = _create_and_auth_backend("openeo", parent=self)
+                backend = _create_and_auth_backend(
+                    "openeo",
+                    parent=self,
+                    controls_dock=getattr(self, "controls_dock", None),
+                )
                 self._conn = backend._conn
                 self.log_text.append("Connected to openEO CDSE.")
             except RuntimeError as e:
