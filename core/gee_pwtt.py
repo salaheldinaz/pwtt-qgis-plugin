@@ -2,7 +2,13 @@
 """Bundled GEE PWTT logic (lee_filter, ttest, detect_damage) so the plugin works when installed from ZIP."""
 
 import math
+import os
+import tempfile
+import webbrowser
+
 import ee
+
+DEFAULT_DAMAGE_THRESHOLD = 3.3
 
 
 def normal_cdf_approx(x_image):
@@ -111,6 +117,43 @@ def ttest(s1, inference_start, war_start, pre_interval, post_interval):
     )
 
 
+def open_geemap_preview(aoi, image, damage_threshold: float = DEFAULT_DAMAGE_THRESHOLD) -> None:
+    """Build a geemap Map and open it in the default browser (QGIS / desktop use)."""
+    try:
+        import geemap
+    except ImportError as e:
+        raise RuntimeError(
+            "Map preview requires the 'geemap' package. Install with: pip install geemap, "
+            "or turn off the preview option."
+        ) from e
+
+    m = geemap.Map()
+    m.add_basemap("SATELLITE")
+    vmin = float(damage_threshold)
+    vmax = vmin + 2.0
+    m.addLayer(
+        image.select("T_statistic"),
+        {"min": vmin, "max": vmax, "opacity": 0.5, "palette": ["yellow", "red", "purple"]},
+        "T-test",
+    )
+    m.centerObject(aoi)
+    fd, path = tempfile.mkstemp(suffix=".html", prefix="pwtt_gee_preview_")
+    os.close(fd)
+    if hasattr(m, "to_html"):
+        try:
+            m.to_html(filename=path, title="PWTT preview", width="100%", height="880px")
+        except TypeError:
+            try:
+                m.to_html(path)
+            except Exception:
+                m.save(path)
+        except Exception:
+            m.save(path)
+    else:
+        m.save(path)
+    webbrowser.open(f"file://{path}")
+
+
 def detect_damage(
     aoi,
     inference_start,
@@ -119,6 +162,8 @@ def detect_damage(
     post_interval=2,
     footprints=None,
     viz=False,
+    viz_return_map=False,
+    damage_threshold=DEFAULT_DAMAGE_THRESHOLD,
     export=False,
     export_dir="PWTT_Export",
     export_name=None,
@@ -194,7 +239,8 @@ def detect_damage(
     k100 = t_smooth.convolve(ee.Kernel.circle(100, "meters", True)).rename("k100")
     k150 = t_smooth.convolve(ee.Kernel.circle(150, "meters", True)).rename("k150")
 
-    damage = t_smooth.gt(3.3).rename("damage")
+    thr = ee.Number(float(damage_threshold))
+    damage = t_smooth.gt(thr).rename("damage")
     T_statistic = (t_smooth.add(k50).add(k100).add(k150)).divide(4).rename("T_statistic")
 
     # Mask p-values with urban mask
@@ -229,16 +275,21 @@ def detect_damage(
         )
 
     if viz:
-        import geemap
-        Map = geemap.Map()
-        Map.add_basemap("SATELLITE")
-        Map.addLayer(
-            image.select("T_statistic"),
-            {"min": 3, "max": 5, "opacity": 0.5, "palette": ["yellow", "red", "purple"]},
-            "T-test",
-        )
-        Map.centerObject(aoi)
-        return Map
+        if viz_return_map:
+            import geemap
+
+            Map = geemap.Map()
+            Map.add_basemap("SATELLITE")
+            vmin = float(damage_threshold)
+            vmax = vmin + 2.0
+            Map.addLayer(
+                image.select("T_statistic"),
+                {"min": vmin, "max": vmax, "opacity": 0.5, "palette": ["yellow", "red", "purple"]},
+                "T-test",
+            )
+            Map.centerObject(aoi)
+            return Map
+        open_geemap_preview(aoi, image, damage_threshold=damage_threshold)
 
     if footprints is not None:
         fc = ee.FeatureCollection(footprints).filterBounds(aoi)

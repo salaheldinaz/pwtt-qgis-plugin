@@ -15,6 +15,7 @@ from qgis.PyQt.QtWidgets import (
     QPushButton,
     QDateEdit,
     QSpinBox,
+    QDoubleSpinBox,
     QCheckBox,
     QProgressBar,
     QTextEdit,
@@ -533,6 +534,8 @@ class PWTTJobsDock(QDockWidget):
             include_footprints=job["include_footprints"],
             job_id=job["id"],
             remote_job_id=job.get("remote_job_id"),
+            damage_threshold=job.get("damage_threshold", 3.3),
+            gee_viz=job.get("gee_viz", False),
         )
 
         job_id = job["id"]
@@ -770,6 +773,8 @@ class PWTTJobsDock(QDockWidget):
             post_interval=old["post_interval"],
             output_dir="",  # set below
             include_footprints=old["include_footprints"],
+            damage_threshold=old.get("damage_threshold", 3.3),
+            gee_viz=old.get("gee_viz", False),
         )
         # Derive base dir from old output_dir (old is base/old_id/)
         base_dir = os.path.dirname(old["output_dir"].rstrip("/"))
@@ -1443,6 +1448,37 @@ class PWTTControlsDock(QDockWidget):
         params_layout.addRow(self._hint(
             "Overlay OpenStreetMap building footprints on the result to assess per-building damage."
         ))
+
+        self.damage_mask_group = QGroupBox("Damage mask (GEE & Local)")
+        dm_form = QFormLayout(self.damage_mask_group)
+        self.damage_threshold_spin = QDoubleSpinBox()
+        self.damage_threshold_spin.setRange(0.5, 20.0)
+        self.damage_threshold_spin.setDecimals(2)
+        self.damage_threshold_spin.setSingleStep(0.1)
+        self.damage_threshold_spin.setValue(3.3)
+        self.damage_threshold_spin.setToolTip(
+            "Damage band is 1 where the smoothed T-statistic exceeds this value."
+        )
+        dm_form.addRow("T-statistic >", self.damage_threshold_spin)
+        dm_form.addRow(self._hint(
+            "Binary damage output uses this cutoff. The openEO backend uses a different "
+            "change metric — switch to GEE or Local to use this threshold."
+        ))
+        params_layout.addRow(self.damage_mask_group)
+
+        self.gee_preview_group = QGroupBox("Earth Engine preview")
+        gp_l = QVBoxLayout(self.gee_preview_group)
+        self.gee_map_preview_cb = QCheckBox("Open interactive map in browser (requires geemap)")
+        self.gee_map_preview_cb.setToolTip(
+            "Exports a short HTML preview and opens your default browser after the EE image "
+            "is built, before the GeoTIFF downloads."
+        )
+        gp_l.addWidget(self.gee_map_preview_cb)
+        gp_l.addWidget(self._hint(
+            "Install geemap in the same environment as QGIS if preview fails."
+        ))
+        params_layout.addRow(self.gee_preview_group)
+
         layout.addWidget(params_group)
 
         # Output
@@ -1490,6 +1526,9 @@ class PWTTControlsDock(QDockWidget):
             self.dep_label.setText("Dependencies: OK")
             self.dep_label.setStyleSheet("color: green; font-size: 0.9em;")
             self.install_deps_btn.hide()
+
+        self.damage_mask_group.setVisible(backend_id in ("gee", "local"))
+        self.gee_preview_group.setVisible(backend_id == "gee")
 
     def _install_backend_deps(self):
         """Install missing backend packages via the deps module."""
@@ -1606,6 +1645,9 @@ class PWTTControlsDock(QDockWidget):
 
         self.include_footprints.setChecked(job.get("include_footprints", False))
 
+        self.damage_threshold_spin.setValue(float(job.get("damage_threshold", 3.3)))
+        self.gee_map_preview_cb.setChecked(job.get("gee_viz", False))
+
         # Output directory
         out = job.get("output_dir", "")
         if out:
@@ -1662,6 +1704,12 @@ class PWTTControlsDock(QDockWidget):
         out = s.value("output_dir", "")
         if out:
             self.output_dir.setFilePath(out)
+        self.damage_threshold_spin.setValue(
+            float(s.value("damage_threshold", 3.3))
+        )
+        self.gee_map_preview_cb.setChecked(
+            s.value("gee_map_preview", False, type=bool)
+        )
         s.endGroup()
 
     def _save_settings(self):
@@ -1674,6 +1722,8 @@ class PWTTControlsDock(QDockWidget):
         s.setValue("cdse_username", self.cdse_username.text())
         s.setValue("cdse_password", self.cdse_password.text())
         s.setValue("output_dir", self.output_dir.filePath())
+        s.setValue("damage_threshold", self.damage_threshold_spin.value())
+        s.setValue("gee_map_preview", self.gee_map_preview_cb.isChecked())
         s.endGroup()
 
     def closeEvent(self, event):
@@ -1780,6 +1830,8 @@ class PWTTControlsDock(QDockWidget):
             post_interval=self.post_interval.value(),
             output_dir="",  # will be set below
             include_footprints=self.include_footprints.isChecked(),
+            damage_threshold=self.damage_threshold_spin.value(),
+            gee_viz=self.gee_map_preview_cb.isChecked() if backend_id == "gee" else False,
         )
         # Output folder: base_dir / job_id
         job["output_dir"] = os.path.join(base_dir, job["id"])

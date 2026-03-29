@@ -86,6 +86,8 @@ class LocalBackend(PWTTBackend):
         progress_callback=None,
         include_footprints: bool = False,
         footprints_path: Optional[str] = None,
+        damage_threshold: float = 3.3,
+        gee_viz: bool = False,
     ) -> str:
         if not getattr(self, "_token", None):
             raise ValueError("Not authenticated. Call authenticate() first.")
@@ -285,7 +287,7 @@ class LocalBackend(PWTTBackend):
         k100 = convolve(max_change, _mean_kernel(100), mode="nearest")
         k150 = convolve(max_change, _mean_kernel(150), mode="nearest")
         t_statistic = (max_change + k50 + k100 + k150) / 4.0
-        damage = (t_statistic > 3.3).astype(np.float32)
+        damage = (t_statistic > float(damage_threshold)).astype(np.float32)
 
         if progress_callback:
             progress_callback(90, "Writing GeoTIFF…")

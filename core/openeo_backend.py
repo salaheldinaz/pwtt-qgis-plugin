@@ -110,6 +110,8 @@ class OpenEOBackend(PWTTBackend):
         include_footprints: bool = False,
         footprints_path: Optional[str] = None,
         remote_job_id: Optional[str] = None,
+        damage_threshold: float = 3.3,
+        gee_viz: bool = False,
     ) -> str:
         # If we already have an openEO job id, resume polling it instead of
         # creating a brand-new batch job.

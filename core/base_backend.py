@@ -54,6 +54,8 @@ class PWTTBackend(ABC):
         progress_callback: Optional[Callable[[int, str], None]] = None,
         include_footprints: bool = False,
         footprints_path: Optional[str] = None,
+        damage_threshold: float = 3.3,
+        gee_viz: bool = False,
     ) -> str:
         """Run PWTT and write result GeoTIFF. Returns path to output file."""
         ...

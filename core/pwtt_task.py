@@ -13,7 +13,21 @@ class PWTTRunTask(QgsTask):
 
     status_message_changed = None  # will be wired as a signal-like list of callbacks
 
-    def __init__(self, backend, aoi_wkt, war_start, inference_start, pre_interval, post_interval, output_dir, include_footprints=False, job_id=None, remote_job_id=None):
+    def __init__(
+        self,
+        backend,
+        aoi_wkt,
+        war_start,
+        inference_start,
+        pre_interval,
+        post_interval,
+        output_dir,
+        include_footprints=False,
+        job_id=None,
+        remote_job_id=None,
+        damage_threshold=3.3,
+        gee_viz=False,
+    ):
         super().__init__("PWTT processing", QgsTask.CanCancel)
         self.backend = backend
         self.aoi_wkt = aoi_wkt
@@ -25,6 +39,8 @@ class PWTTRunTask(QgsTask):
         self.include_footprints = include_footprints
         self.job_id = job_id
         self.remote_job_id = remote_job_id  # openEO job id for resume
+        self.damage_threshold = float(damage_threshold)
+        self.gee_viz = bool(gee_viz)
         self.output_tif = None
         self.footprints_gpkg = None
         self.exception = None
@@ -78,6 +94,8 @@ class PWTTRunTask(QgsTask):
                 progress_callback=progress,
                 include_footprints=False,
                 footprints_path=None,
+                damage_threshold=self.damage_threshold,
+                gee_viz=self.gee_viz,
             )
             # Pass remote_job_id for backends that support resuming (openEO)
             if self.remote_job_id:
@@ -109,6 +127,8 @@ class PWTTRunTask(QgsTask):
                 "pre_interval": self.pre_interval,
                 "post_interval": self.post_interval,
                 "include_footprints": self.include_footprints,
+                "damage_threshold": self.damage_threshold,
+                "gee_viz": self.gee_viz,
                 "output_tif": self.output_tif,
                 "completed_at": datetime.now().isoformat(timespec="seconds"),
             }

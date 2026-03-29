@@ -4,6 +4,7 @@
 import requests
 from typing import Optional
 from .base_backend import PWTTBackend
+from .gee_pwtt import DEFAULT_DAMAGE_THRESHOLD
 from .utils import wkt_to_bbox
 
 
@@ -45,6 +46,8 @@ class GEEBackend(PWTTBackend):
         progress_callback=None,
         include_footprints: bool = False,
         footprints_path: Optional[str] = None,
+        damage_threshold: float = DEFAULT_DAMAGE_THRESHOLD,
+        gee_viz: bool = False,
     ) -> str:
         import ee
 
@@ -67,7 +70,13 @@ class GEEBackend(PWTTBackend):
             post_interval=post_interval,
             viz=False,
             export=False,
+            damage_threshold=damage_threshold,
         )
+
+        if gee_viz:
+            if progress_callback:
+                progress_callback(40, "Opening Earth Engine map preview in browser…")
+            gee_pwtt.open_geemap_preview(aoi, image, damage_threshold=damage_threshold)
 
         if progress_callback:
             progress_callback(60, "Requesting download URL…")

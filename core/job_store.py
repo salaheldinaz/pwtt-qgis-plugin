@@ -55,6 +55,8 @@ def create_job(
     post_interval: int,
     output_dir: str,
     include_footprints: bool,
+    damage_threshold: float = 3.3,
+    gee_viz: bool = False,
 ) -> dict:
     now = datetime.now().isoformat(timespec="seconds")
     return {
@@ -67,6 +69,8 @@ def create_job(
         "post_interval": post_interval,
         "output_dir": output_dir,
         "include_footprints": include_footprints,
+        "damage_threshold": float(damage_threshold),
+        "gee_viz": bool(gee_viz),
         "status": STATUS_PENDING,
         "created_at": now,
         "updated_at": now,
