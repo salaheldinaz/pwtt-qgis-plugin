@@ -125,6 +125,7 @@ class PWTTPlugin:
         del self.toolbar
         mw = self.iface.mainWindow()
         if self.controls_dock:
+            self.controls_dock.cleanup_map_canvas()
             mw.removeDockWidget(self.controls_dock)
             self.controls_dock.deleteLater()
             self.controls_dock = None

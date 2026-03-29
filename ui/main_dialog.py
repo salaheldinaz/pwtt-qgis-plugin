@@ -1271,6 +1271,32 @@ class PWTTControlsDock(QDockWidget):
         self._load_settings()
         self._on_backend_changed(self.backend_combo.currentIndex())
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_aoi_rubber_band()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        if not self.aoi_wkt:
+            self._clear_rubber_band()
+
+    def _sync_aoi_rubber_band(self):
+        """Keep canvas overlay aligned with AOI state (handles hide/show without closeEvent)."""
+        if self.aoi_wkt and self.aoi_rect is not None:
+            self._draw_rubber_band(self.aoi_rect)
+        else:
+            self._clear_rubber_band()
+
+    def cleanup_map_canvas(self):
+        """Remove AOI overlay and extent map tool; call before dock teardown / plugin unload."""
+        self._clear_rubber_band()
+        canvas = self.iface.mapCanvas()
+        if self.map_tool and canvas.mapTool() == self.map_tool and self._previous_map_tool:
+            try:
+                canvas.setMapTool(self._previous_map_tool)
+            except Exception:
+                pass
+
     @staticmethod
     def _hint(text: str) -> QLabel:
         """Small grey italic one-liner placed at the top of a group box."""
@@ -1651,13 +1677,7 @@ class PWTTControlsDock(QDockWidget):
         s.endGroup()
 
     def closeEvent(self, event):
-        self._clear_rubber_band()
-        canvas = self.iface.mapCanvas()
-        if self.map_tool and canvas.mapTool() == self.map_tool and self._previous_map_tool:
-            try:
-                canvas.setMapTool(self._previous_map_tool)
-            except Exception:
-                pass
+        self.cleanup_map_canvas()
         super().closeEvent(event)
 
     # ── Run ───────────────────────────────────────────────────────────────────
