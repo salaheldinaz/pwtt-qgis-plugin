@@ -168,19 +168,26 @@ class PWTTRunTask(QgsTask):
 
     def finished(self, success):
         if success and self.output_tif and os.path.isfile(self.output_tif):
+            from .qgis_layer_tree import (
+                add_map_layer_to_pwtt_job_group,
+                pwtt_damage_layer_name,
+                pwtt_footprints_layer_name,
+            )
             from .qgis_output_style import style_pwtt_footprints_layer, style_pwtt_raster_layer
 
-            label = f"PWTT damage ({self.job_id})" if self.job_id else "PWTT damage"
+            backend_id = getattr(self.backend, "id", None)
+            project = QgsProject.instance()
+            label = pwtt_damage_layer_name(self.job_id, backend_id)
             layer = QgsRasterLayer(self.output_tif, label, "gdal")
             if layer.isValid():
                 style_pwtt_raster_layer(layer, damage_threshold=self.damage_threshold)
-                QgsProject.instance().addMapLayer(layer)
+                add_map_layer_to_pwtt_job_group(project, layer, self.job_id, backend_id)
             if self.footprints_gpkg and os.path.isfile(self.footprints_gpkg):
-                fp_label = f"PWTT footprints ({self.job_id})" if self.job_id else "PWTT footprints"
+                fp_label = pwtt_footprints_layer_name(self.job_id, backend_id)
                 vl = QgsVectorLayer(self.footprints_gpkg, fp_label, "ogr")
                 if vl.isValid():
                     style_pwtt_footprints_layer(vl)
-                    QgsProject.instance().addMapLayer(vl)
+                    add_map_layer_to_pwtt_job_group(project, vl, self.job_id, backend_id)
             # GEE map preview must run on the main thread (webbrowser.open)
             if self.gee_viz:
                 viz_aoi = getattr(self.backend, "_viz_aoi", None)

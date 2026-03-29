@@ -1723,16 +1723,22 @@ class PWTTOpenEOJobsDock(QDockWidget):
 
     def _add_tif_to_map(self, path, job_id):
         """Add a GeoTIFF to QGIS layers."""
-        from qgis.core import QgsRasterLayer
+        from qgis.core import QgsProject, QgsRasterLayer
 
+        from ..core.qgis_layer_tree import (
+            add_map_layer_to_pwtt_job_group,
+            pwtt_damage_layer_name,
+        )
         from ..core.qgis_output_style import damage_threshold_from_job_meta, style_pwtt_raster_layer
 
-        layer = QgsRasterLayer(path, f"openEO result ({job_id})", "gdal")
+        backend_id = "openeo"
+        label = pwtt_damage_layer_name(job_id, backend_id)
+        layer = QgsRasterLayer(path, label, "gdal")
         if layer.isValid():
             thr = damage_threshold_from_job_meta(path)
             style_pwtt_raster_layer(layer, damage_threshold=thr)
-            QgsProject.instance().addMapLayer(layer)
-            self.log_text.append(f"Layer added: openEO result ({job_id})")
+            add_map_layer_to_pwtt_job_group(QgsProject.instance(), layer, job_id, backend_id)
+            self.log_text.append(f"Layer added: {label}")
         else:
             self.log_text.append("Failed to load layer \u2014 file may be invalid.")
 
@@ -1815,15 +1821,21 @@ class PWTTOpenEOJobsDock(QDockWidget):
         timer.start(400)
 
     def _add_footprints_layer(self, path, job_id):
-        from qgis.core import QgsVectorLayer
+        from qgis.core import QgsProject, QgsVectorLayer
 
+        from ..core.qgis_layer_tree import (
+            add_map_layer_to_pwtt_job_group,
+            pwtt_footprints_layer_name,
+        )
         from ..core.qgis_output_style import style_pwtt_footprints_layer
 
-        layer = QgsVectorLayer(path, f"openEO footprints ({job_id})", "ogr")
+        backend_id = "openeo"
+        label = pwtt_footprints_layer_name(job_id, backend_id)
+        layer = QgsVectorLayer(path, label, "ogr")
         if layer.isValid():
             style_pwtt_footprints_layer(layer)
-            QgsProject.instance().addMapLayer(layer)
-            self.log_text.append(f"Layer added: openEO footprints ({job_id})")
+            add_map_layer_to_pwtt_job_group(QgsProject.instance(), layer, job_id, backend_id)
+            self.log_text.append(f"Layer added: {label}")
         else:
             self.log_text.append("Failed to load footprints GeoPackage.")
 
