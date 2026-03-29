@@ -156,76 +156,79 @@ class OpenEOBackend(PWTTBackend):
             "job_logs": [],
         }
 
-        # --- Load pre-war S1 collection ---
+        # --- Helper: compute single-band t-value from a S1 collection ---
+        def _load_and_ttest(band):
+            """Load S1 for one polarisation, reduce time to stats, return t-value cube (bandless)."""
+            pre_col = (
+                self._conn.load_collection(
+                    "SENTINEL1_GRD",
+                    temporal_extent=[pre_start, war_start],
+                    spatial_extent=spatial_extent,
+                    bands=[band],
+                )
+                .sar_backscatter(coefficient="sigma0-ellipsoid")
+            )
+            post_col = (
+                self._conn.load_collection(
+                    "SENTINEL1_GRD",
+                    temporal_extent=[inference_start, post_end],
+                    spatial_extent=spatial_extent,
+                    bands=[band],
+                )
+                .sar_backscatter(coefficient="sigma0-ellipsoid")
+            )
+            # Temporal reductions → each becomes a single-band cube, then
+            # reduce that band dim so we get a bandless scalar cube that
+            # supports top-level arithmetic.
+            pre_mean = pre_col.reduce_dimension(dimension="t", reducer="mean") \
+                              .reduce_dimension(dimension="bands", reducer="mean")
+            pre_sd = pre_col.reduce_dimension(dimension="t", reducer="sd") \
+                            .reduce_dimension(dimension="bands", reducer="mean")
+            pre_n = pre_col.reduce_dimension(dimension="t", reducer="count") \
+                           .reduce_dimension(dimension="bands", reducer="mean")
+            post_mean = post_col.reduce_dimension(dimension="t", reducer="mean") \
+                                .reduce_dimension(dimension="bands", reducer="mean")
+            post_sd = post_col.reduce_dimension(dimension="t", reducer="sd") \
+                              .reduce_dimension(dimension="bands", reducer="mean")
+            post_n = post_col.reduce_dimension(dimension="t", reducer="count") \
+                             .reduce_dimension(dimension="bands", reducer="mean")
+
+            # pooled_sd = sqrt( (pre_sd²*(n-1) + post_sd²*(n-1)) / (n_pre+n_post-2) )
+            pooled_var = (
+                pre_sd.power(2) * (pre_n - 1) + post_sd.power(2) * (post_n - 1)
+            ) / (pre_n + post_n - 2)
+            pooled_sd = pooled_var.power(0.5)
+            se = pooled_sd * ((1.0 / pre_n) + (1.0 / post_n)).power(0.5)
+            t_val = (post_mean - pre_mean).absolute() / se
+            return t_val
+
+        # --- Load and compute t-values per polarisation ---
         if progress_callback:
             progress_callback(5, f"Loading pre-war collection ({pre_start} to {war_start})…")
-        pre_col = (
-            self._conn.load_collection(
-                "SENTINEL1_GRD",
-                temporal_extent=[pre_start, war_start],
-                spatial_extent=spatial_extent,
-                bands=["VV", "VH"],
-            )
-            .sar_backscatter(coefficient="sigma0-ellipsoid")
-        )
-        pre_mean = pre_col.reduce_dimension(dimension="t", reducer="mean")
-        pre_sd = pre_col.reduce_dimension(dimension="t", reducer="sd")
-        pre_n = pre_col.reduce_dimension(dimension="t", reducer="count")
+        t_vv = _load_and_ttest("VV")
 
-        # --- Load post-war S1 collection ---
         if progress_callback:
-            progress_callback(10, f"Loading post-war collection ({inference_start} to {post_end})…")
-        post_col = (
-            self._conn.load_collection(
-                "SENTINEL1_GRD",
-                temporal_extent=[inference_start, post_end],
-                spatial_extent=spatial_extent,
-                bands=["VV", "VH"],
-            )
-            .sar_backscatter(coefficient="sigma0-ellipsoid")
-        )
-        post_mean = post_col.reduce_dimension(dimension="t", reducer="mean")
-        post_sd = post_col.reduce_dimension(dimension="t", reducer="sd")
-        post_n = post_col.reduce_dimension(dimension="t", reducer="count")
+            progress_callback(12, f"Loading post-war collection ({inference_start} to {post_end})…")
+        t_vh = _load_and_ttest("VH")
 
-        # --- Welch's two-sample t-test (per band: VV, VH) ---
-        # pooled_sd = sqrt( (pre_sd^2*(n_pre-1) + post_sd^2*(n_post-1)) / (n_pre+n_post-2) )
-        # t = |post_mean - pre_mean| / (pooled_sd * sqrt(1/n_pre + 1/n_post))
+        # --- Combine polarisations: max(t_VV, t_VH) ---
         if progress_callback:
-            progress_callback(15, "Building t-test process graph…")
-        pooled_var = (
-            (pre_sd ** 2) * (pre_n - 1) + (post_sd ** 2) * (post_n - 1)
-        ) / (pre_n + post_n - 2)
-        pooled_sd = pooled_var.apply(lambda x: x.power(0.5))
-        se = pooled_sd * ((1.0 / pre_n) + (1.0 / post_n)).apply(lambda x: x.power(0.5))
-        t_values = ((post_mean - pre_mean).apply(lambda x: x.absolute())) / se
+            progress_callback(18, "Combining polarisations (max t)…")
+        t_vv_b = t_vv.add_dimension(name="bands", label="VV", type="bands")
+        t_vh_b = t_vh.add_dimension(name="bands", label="VH", type="bands")
+        t_merged = t_vv_b.merge_cubes(t_vh_b)
+        max_change = t_merged.reduce_dimension(dimension="bands", reducer="max")
 
-        # Max t-value across VV/VH → single band
-        if progress_callback:
-            progress_callback(18, "Combining polarisations (max t, min p)…")
-        max_change = t_values.reduce_dimension(dimension="bands", reducer="max")
-
-        # --- Two-tailed p-value (normal approx, Abramowitz & Stegun 26.2.17) ---
-        # Computed as a UDF because the polynomial CDF approx can't be expressed
-        # with simple openEO arithmetic without deep nesting issues.
-        # Instead we use the simpler Boros-Moll bound: p ≈ 2*exp(-t^2/2)/sqrt(2*pi)
-        # which is a conservative upper bound for the p-value (good enough for
-        # thresholding; matches GEE's normal_cdf_approx for large t).
+        # --- Two-tailed p-value (normal approx) ---
+        # p ≈ 2 * exp(-t²/2) / sqrt(2π)  (conservative upper bound)
         inv_sqrt_2pi = 1.0 / math.sqrt(2.0 * math.pi)
-        p_value = (
-            max_change.apply(lambda x: (x * x * (-0.5)).exp() * (2.0 * inv_sqrt_2pi))
-        )
-        # Clamp p-value to [1e-10, 1]
-        p_value = p_value.apply(lambda x: x.max(1e-10))
-        p_value = p_value.apply(lambda x: x.min(1.0))
+        p_value = (max_change * max_change * (-0.5)).exp() * (2.0 * inv_sqrt_2pi)
+        p_value = p_value.apply(lambda x: x.max(1e-10).min(1.0))
 
-        # --- Spatial smoothing (mirrors GEE focal median + multi-scale convolution) ---
+        # --- Spatial smoothing (mirrors GEE multi-scale convolution) ---
         if progress_callback:
             progress_callback(22, "Adding spatial smoothing kernels…")
 
-        # apply_kernel expects a 2D list. At 10m resolution:
-        # 50m radius → 5px, 100m → 10px, 150m → 15px
-        # We use normalized circular kernels (mean filter).
         def _circle_kernel(radius_px):
             """Build a normalised circular 2D kernel as nested list."""
             size = 2 * radius_px + 1
@@ -240,6 +243,7 @@ class OpenEOBackend(PWTTBackend):
             total = sum(sum(row) for row in kernel)
             return [[v / total for v in row] for row in kernel]
 
+        # At 10 m resolution: 50 m → 5 px, 100 m → 10 px, 150 m → 15 px
         k50 = max_change.apply_kernel(_circle_kernel(5))
         k100 = max_change.apply_kernel(_circle_kernel(10))
         k150 = max_change.apply_kernel(_circle_kernel(15))
@@ -247,7 +251,7 @@ class OpenEOBackend(PWTTBackend):
         t_statistic = (max_change + k50 + k100 + k150) / 4.0
 
         # --- Damage binary band ---
-        damage = (t_statistic > thr).apply(lambda x: x * 1.0)
+        damage = (t_statistic > thr) * 1.0
 
         # --- Stack into 3-band result: T_statistic, damage, p_value ---
         if progress_callback:

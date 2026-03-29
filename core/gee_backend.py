@@ -28,11 +28,11 @@ class GEEBackend(PWTTBackend):
         project = (credentials.get("project") or "").strip()
         try:
             if not getattr(ee.data, "_credentials", None):
-                ee.Authenticate()
+                ee.Authenticate(auth_mode="localhost")
             ee.Initialize(project=project if project else None)
             return True
-        except Exception:
-            return False
+        except Exception as e:
+            raise RuntimeError(f"GEE authentication failed: {e}") from e
 
     def run(
         self,

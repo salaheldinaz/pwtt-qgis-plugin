@@ -165,7 +165,10 @@ def _auth_with_progress(backend, credentials, backend_id, parent=None):
         QProgressDialog, QApplication,
     )
 
-    is_oidc = backend_id == "openeo" and not (credentials or {}).get("client_id")
+    is_oidc = (
+        (backend_id == "openeo" and not (credentials or {}).get("client_id"))
+        or backend_id == "gee"
+    )
 
     class _Worker(QThread):
         auth_url_ready = pyqtSignal(str)
@@ -190,14 +193,21 @@ def _auth_with_progress(backend, credentials, backend_id, parent=None):
     canceled = [False]
 
     if is_oidc and parent is not None:
-        # ── openEO OIDC device code flow ──────────────────────────────────────
+        # ── Browser-based auth flow (openEO OIDC / GEE OAuth) ────────────────
+        _backend_label = {
+            "openeo": ("openEO Sign In", "Connecting to openEO CDSE\u2026"),
+            "gee": ("Google Earth Engine Sign In", "Connecting to Google Earth Engine\u2026"),
+        }
+        _title, _connecting = _backend_label.get(
+            backend_id, ("Sign In", "Connecting\u2026")
+        )
         dlg = QDialog(parent)
-        dlg.setWindowTitle("PWTT \u2014 openEO Sign In")
+        dlg.setWindowTitle(f"PWTT \u2014 {_title}")
         dlg.setWindowModality(Qt.WindowModal)
         dlg.setMinimumWidth(440)
         layout = QVBoxLayout(dlg)
 
-        status_lbl = QLabel("Connecting to openEO CDSE\u2026")
+        status_lbl = QLabel(_connecting)
         status_lbl.setWordWrap(True)
         layout.addWidget(status_lbl)
 
@@ -219,6 +229,12 @@ def _auth_with_progress(backend, credentials, backend_id, parent=None):
         cancel_btn = QPushButton("Cancel")
         layout.addWidget(cancel_btn)
 
+        # Save originals early so _on_open can use the real webbrowser.open.
+        _orig_open = _wb.open
+        _orig_open_new = _wb.open_new
+        _orig_open_tab = _wb.open_new_tab
+        _orig_get = _wb.get
+
         detected_url = [None]
 
         def _on_url_ready(url):
@@ -238,7 +254,7 @@ def _auth_with_progress(backend, credentials, backend_id, parent=None):
 
         def _on_open():
             if detected_url[0]:
-                _wb.open(detected_url[0])
+                _orig_open(detected_url[0])
 
         def _on_cancel():
             canceled[0] = True
@@ -254,19 +270,23 @@ def _auth_with_progress(backend, credentials, backend_id, parent=None):
         open_btn.clicked.connect(_on_open)
         cancel_btn.clicked.connect(_on_cancel)
 
-        # Intercept webbrowser calls made by the openEO OIDC library so the
-        # URL appears in our dialog instead of auto-opening or printing to stdout.
-        _orig_open = _wb.open
-        _orig_open_new = _wb.open_new
-        _orig_open_tab = _wb.open_new_tab
+        # Intercept webbrowser calls made by auth libraries (openEO OIDC,
+        # GEE OAuth) so the URL appears in our dialog instead of
+        # auto-opening or printing to stdout.
 
         def _intercept(url, *a, **kw):
-            worker.auth_url_ready.emit(url)
-            return True  # Tell openEO the browser "opened" successfully
+            if url:
+                worker.auth_url_ready.emit(url)
+            return True
+
+        class _DummyBrowser:
+            """Fake browser so ee.oauth._open_new_browser doesn't bail."""
+            name = "pwtt-interceptor"
 
         _wb.open = _intercept
         _wb.open_new = _intercept
         _wb.open_new_tab = _intercept
+        _wb.get = lambda *a, **kw: _DummyBrowser()
         try:
             worker.start()
             dlg.exec_()
@@ -274,6 +294,7 @@ def _auth_with_progress(backend, credentials, backend_id, parent=None):
             _wb.open = _orig_open
             _wb.open_new = _orig_open_new
             _wb.open_new_tab = _orig_open_tab
+            _wb.get = _orig_get
 
         if canceled[0]:
             worker.wait(2000)
@@ -288,11 +309,20 @@ def _auth_with_progress(backend, credentials, backend_id, parent=None):
         dlg.setWindowModality(Qt.WindowModal)
         dlg.setMinimumDuration(0)
 
+        # Do NOT use wasCanceled() after dlg.close(): on some platforms/Qt builds
+        # programmatic close is reported as canceled, so auth "succeeds" but we
+        # raise Authentication cancelled. and _run shows nothing (silent no-job).
+        prog_cancel_clicked = [False]
+
+        def _on_progress_dialog_cancel():
+            prog_cancel_clicked[0] = True
+
+        dlg.canceled.connect(_on_progress_dialog_cancel)
         worker.finished.connect(dlg.close)
         worker.start()
         dlg.exec_()
 
-        if dlg.wasCanceled():
+        if prog_cancel_clicked[0]:
             worker.wait(2000)
             raise RuntimeError("Authentication cancelled.")
 
@@ -1942,6 +1972,9 @@ class PWTTControlsDock(QDockWidget):
         except RuntimeError as e:
             if str(e) != "Authentication cancelled.":
                 QMessageBox.warning(self, "PWTT", str(e))
+            return
+        except Exception as e:
+            QMessageBox.warning(self, "PWTT", str(e))
             return
         self._save_settings()
         base_dir = self.output_dir.filePath()
