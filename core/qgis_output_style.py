@@ -14,6 +14,9 @@ from qgis.core import (
 )
 
 from .viz_constants import (
+    T_STATISTIC_VIZ_HEX_HIGH,
+    T_STATISTIC_VIZ_HEX_LOW,
+    T_STATISTIC_VIZ_HEX_MID,
     T_STATISTIC_VIZ_MAX,
     T_STATISTIC_VIZ_MIN,
     T_STATISTIC_VIZ_OPACITY,
@@ -76,14 +79,15 @@ def style_pwtt_raster_layer(layer, damage_threshold: float = 3.3) -> None:
         ramp_fn.setMinimumValue(T_STATISTIC_VIZ_MIN)
         ramp_fn.setMaximumValue(T_STATISTIC_VIZ_MAX)
         mid = (T_STATISTIC_VIZ_MIN + T_STATISTIC_VIZ_MAX) / 2.0
-        # HTML named colors: yellow, red, purple (Earth Engine palette)
         items = [
             QgsColorRampShader.ColorRampItem(
-                T_STATISTIC_VIZ_MIN, QColor(255, 255, 0), ""
+                T_STATISTIC_VIZ_MIN, QColor(T_STATISTIC_VIZ_HEX_LOW), ""
             ),
-            QgsColorRampShader.ColorRampItem(mid, QColor(255, 0, 0), ""),
             QgsColorRampShader.ColorRampItem(
-                T_STATISTIC_VIZ_MAX, QColor(128, 0, 128), ""
+                mid, QColor(T_STATISTIC_VIZ_HEX_MID), ""
+            ),
+            QgsColorRampShader.ColorRampItem(
+                T_STATISTIC_VIZ_MAX, QColor(T_STATISTIC_VIZ_HEX_HIGH), ""
             ),
         ]
         ramp_fn.setColorRampItemList(items)
