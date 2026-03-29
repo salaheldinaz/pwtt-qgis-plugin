@@ -157,8 +157,13 @@ class OpenEOBackend(PWTTBackend):
         }
 
         # --- Helper: compute single-band t-value from a S1 collection ---
+        # NOTE on openEO client arithmetic:
+        #   DataCube +,-,*,/ scalar  → works (uses apply internally)
+        #   DataCube +,-,*,/ DataCube → works (uses merge_cubes with overlap_resolver)
+        #   DataCube.power()          → BROKEN outside band-math mode
+        #   DataCube.apply(lambda)    → enters band-math mode, power() works inside
         def _load_and_ttest(band):
-            """Load S1 for one polarisation, reduce time to stats, return t-value cube (bandless)."""
+            """Load S1 for one polarisation, compute t-value cube (bandless)."""
             pre_col = (
                 self._conn.load_collection(
                     "SENTINEL1_GRD",
@@ -177,29 +182,36 @@ class OpenEOBackend(PWTTBackend):
                 )
                 .sar_backscatter(coefficient="sigma0-ellipsoid")
             )
-            # Temporal reductions → each becomes a single-band cube, then
-            # reduce that band dim so we get a bandless scalar cube that
-            # supports top-level arithmetic.
+            # Temporal reductions → single-band cube, then drop band dim
             pre_mean = pre_col.reduce_dimension(dimension="t", reducer="mean") \
                               .reduce_dimension(dimension="bands", reducer="mean")
-            pre_sd = pre_col.reduce_dimension(dimension="t", reducer="sd") \
-                            .reduce_dimension(dimension="bands", reducer="mean")
+            pre_var = pre_col.reduce_dimension(dimension="t", reducer="variance") \
+                             .reduce_dimension(dimension="bands", reducer="mean")
             pre_n = pre_col.reduce_dimension(dimension="t", reducer="count") \
                            .reduce_dimension(dimension="bands", reducer="mean")
             post_mean = post_col.reduce_dimension(dimension="t", reducer="mean") \
                                 .reduce_dimension(dimension="bands", reducer="mean")
-            post_sd = post_col.reduce_dimension(dimension="t", reducer="sd") \
-                              .reduce_dimension(dimension="bands", reducer="mean")
+            post_var = post_col.reduce_dimension(dimension="t", reducer="variance") \
+                               .reduce_dimension(dimension="bands", reducer="mean")
             post_n = post_col.reduce_dimension(dimension="t", reducer="count") \
                              .reduce_dimension(dimension="bands", reducer="mean")
 
-            # pooled_sd = sqrt( (pre_sd²*(n-1) + post_sd²*(n-1)) / (n_pre+n_post-2) )
+            # Pooled t-test using only +,-,*,/ (no .power() needed):
+            # variance = sd², so we use variance directly
+            # pooled_var = (pre_var*(n-1) + post_var*(n-1)) / (n_pre+n_post-2)
             pooled_var = (
-                pre_sd.power(2) * (pre_n - 1) + post_sd.power(2) * (post_n - 1)
+                pre_var * (pre_n - 1) + post_var * (post_n - 1)
             ) / (pre_n + post_n - 2)
-            pooled_sd = pooled_var.power(0.5)
-            se = pooled_sd * ((1.0 / pre_n) + (1.0 / post_n)).power(0.5)
-            t_val = (post_mean - pre_mean).absolute() / se
+            # pooled_sd = sqrt(pooled_var) — must use apply() for sqrt
+            pooled_sd = pooled_var.apply(lambda x: x.power(0.5))
+            # se = pooled_sd * sqrt(1/n_pre + 1/n_post)
+            inv_n_sum = (1.0 / pre_n) + (1.0 / post_n)
+            inv_n_sum_sqrt = inv_n_sum.apply(lambda x: x.power(0.5))
+            se = pooled_sd * inv_n_sum_sqrt
+            # t = |post_mean - pre_mean| / se
+            diff = post_mean - pre_mean
+            abs_diff = diff.apply(lambda x: x.absolute())
+            t_val = abs_diff / se
             return t_val
 
         # --- Load and compute t-values per polarisation ---
@@ -222,7 +234,8 @@ class OpenEOBackend(PWTTBackend):
         # --- Two-tailed p-value (normal approx) ---
         # p ≈ 2 * exp(-t²/2) / sqrt(2π)  (conservative upper bound)
         inv_sqrt_2pi = 1.0 / math.sqrt(2.0 * math.pi)
-        p_value = (max_change * max_change * (-0.5)).exp() * (2.0 * inv_sqrt_2pi)
+        neg_half_t_sq = max_change * max_change * (-0.5)
+        p_value = neg_half_t_sq.apply(lambda x: x.exp() * (2.0 * inv_sqrt_2pi))
         p_value = p_value.apply(lambda x: x.max(1e-10).min(1.0))
 
         # --- Spatial smoothing (mirrors GEE multi-scale convolution) ---
