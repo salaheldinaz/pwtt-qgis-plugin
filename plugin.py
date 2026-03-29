@@ -23,8 +23,10 @@ class PWTTPlugin:
         self.toolbar.setObjectName("PWTT")
         self.controls_dock = None
         self.jobs_dock = None
+        self.openeo_dock = None
         self._action_controls = None
         self._action_jobs = None
+        self._action_openeo = None
 
     def add_action(self, icon, text, callback, enabled_flag=True,
                    add_to_menu=True, add_to_toolbar=True, checkable=False):
@@ -54,11 +56,17 @@ class PWTTPlugin:
             self._toggle_jobs,
             checkable=True,
         )
+        self._action_openeo = self.add_action(
+            QIcon(":/pwtt/icon_run.svg"),
+            "PWTT \u2014 openEO Jobs",
+            self._toggle_openeo,
+            checkable=True,
+        )
 
     def _ensure_docks(self):
         if self.controls_dock is not None:
             return
-        from .ui.main_dialog import PWTTJobsDock, PWTTControlsDock
+        from .ui.main_dialog import PWTTJobsDock, PWTTControlsDock, PWTTOpenEOJobsDock
         mw = self.iface.mainWindow()
 
         self.jobs_dock = PWTTJobsDock(mw, self.plugin_dir)
@@ -69,9 +77,17 @@ class PWTTPlugin:
         mw.addDockWidget(Qt.RightDockWidgetArea, self.controls_dock)
         self.controls_dock.hide()
 
+        self.openeo_dock = PWTTOpenEOJobsDock(mw, self.plugin_dir)
+        mw.addDockWidget(Qt.BottomDockWidgetArea, self.openeo_dock)
+        self.openeo_dock.hide()
+
+        # Back-reference so jobs dock can load parameters into controls
+        self.jobs_dock.controls_dock = self.controls_dock
+
         # Keep toolbar button check state in sync with dock visibility
         self.controls_dock.visibilityChanged.connect(self._action_controls.setChecked)
         self.jobs_dock.visibilityChanged.connect(self._action_jobs.setChecked)
+        self.openeo_dock.visibilityChanged.connect(self._action_openeo.setChecked)
 
     def _toggle_controls(self, checked=False):
         self._ensure_docks()
@@ -88,6 +104,14 @@ class PWTTPlugin:
             self.jobs_dock.raise_()
         else:
             self.jobs_dock.hide()
+
+    def _toggle_openeo(self, checked=False):
+        self._ensure_docks()
+        if checked:
+            self.openeo_dock.show()
+            self.openeo_dock.raise_()
+        else:
+            self.openeo_dock.hide()
 
     def unload(self):
         for action in self.actions:
@@ -108,6 +132,10 @@ class PWTTPlugin:
             mw.removeDockWidget(self.jobs_dock)
             self.jobs_dock.deleteLater()
             self.jobs_dock = None
+        if self.openeo_dock:
+            mw.removeDockWidget(self.openeo_dock)
+            self.openeo_dock.deleteLater()
+            self.openeo_dock = None
 
     def run(self):
         """Show controls dock (called from menu or legacy entry points)."""

@@ -320,6 +320,7 @@ class PWTTJobsDock(QDockWidget):
         self._job_logs = {}        # job_id -> [str]
         self._job_progress = {}    # job_id -> int (0-100)
         self._poll_running = False
+        self.controls_dock = None  # set after construction by plugin
 
         self._build_ui()
 
@@ -363,15 +364,18 @@ class PWTTJobsDock(QDockWidget):
 
         # Action buttons
         btn_row = QHBoxLayout()
+        self.load_btn = QPushButton("Load")
         self.resume_btn = QPushButton("Resume")
         self.stop_btn = QPushButton("Stop")
         self.cancel_btn = QPushButton("Cancel")
         self.rerun_btn = QPushButton("Rerun")
         self.delete_btn = QPushButton("Delete")
-        for btn in (self.resume_btn, self.stop_btn, self.cancel_btn,
+        for btn in (self.load_btn, self.resume_btn, self.stop_btn, self.cancel_btn,
                      self.rerun_btn, self.delete_btn):
             btn.setEnabled(False)
             btn_row.addWidget(btn)
+        self.load_btn.setToolTip("Load job AOI to map and parameters to controls panel")
+        self.load_btn.clicked.connect(self._load_selected)
         self.resume_btn.clicked.connect(self._resume_selected)
         self.stop_btn.clicked.connect(self._stop_selected)
         self.cancel_btn.clicked.connect(self._cancel_selected)
@@ -469,14 +473,15 @@ class PWTTJobsDock(QDockWidget):
         from ..core import job_store
         job = self._get_selected_job()
         if not job:
-            for btn in (self.resume_btn, self.stop_btn, self.cancel_btn,
-                         self.rerun_btn, self.delete_btn):
+            for btn in (self.load_btn, self.resume_btn, self.stop_btn,
+                         self.cancel_btn, self.rerun_btn, self.delete_btn):
                 btn.setEnabled(False)
             self.log_text.clear()
             self.progress_bar.setValue(0)
             return
 
         st = job["status"]
+        self.load_btn.setEnabled(True)
         self.resume_btn.setEnabled(st in job_store.RESUMABLE_STATUSES)
         self.stop_btn.setEnabled(st == job_store.STATUS_RUNNING)
         self.cancel_btn.setEnabled(
@@ -644,6 +649,15 @@ class PWTTJobsDock(QDockWidget):
 
     # ── Action handlers ───────────────────────────────────────────────────────
 
+    def _load_selected(self):
+        """Load job AOI to map, zoom to it, and fill parameters in controls panel."""
+        job = self._get_selected_job()
+        if not job:
+            return
+        if not self.controls_dock:
+            return
+        self.controls_dock.load_job_params(job)
+
     def _resume_selected(self):
         job = self._get_selected_job()
         if not job:
@@ -706,9 +720,17 @@ class PWTTJobsDock(QDockWidget):
             inference_start=old["inference_start"],
             pre_interval=old["pre_interval"],
             post_interval=old["post_interval"],
-            output_dir=old["output_dir"],
+            output_dir="",  # set below
             include_footprints=old["include_footprints"],
         )
+        # Derive base dir from old output_dir (old is base/old_id/)
+        base_dir = os.path.dirname(old["output_dir"].rstrip("/"))
+        if not base_dir:
+            proj_path = QgsProject.instance().absolutePath()
+            base_dir = proj_path if proj_path else os.path.expanduser("~/PWTT")
+        new_job["output_dir"] = os.path.join(base_dir, new_job["id"])
+        os.makedirs(new_job["output_dir"], exist_ok=True)
+        job_store.save_job(new_job)
         self.launch_job(new_job, backend)
 
     def _delete_selected(self):
@@ -787,6 +809,265 @@ class PWTTJobsDock(QDockWidget):
 
     def cleanup(self):
         self._order_timer.stop()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PWTTOpenEOJobsDock — list all openEO remote jobs, download results
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class PWTTOpenEOJobsDock(QDockWidget):
+    """List openEO batch jobs from the server and download/add results."""
+
+    _jobs_loaded = pyqtSignal(list)  # emitted from worker thread
+
+    def __init__(self, parent=None, plugin_dir=None):
+        super().__init__(_dock_title("PWTT \u2014 openEO Jobs", plugin_dir), parent)
+        self.setObjectName("PWTTOpenEOJobsDock")
+        self.setAllowedAreas(Qt.AllDockWidgetAreas)
+        self._conn = None  # openEO connection (set after auth)
+        self._remote_jobs = []  # list of job metadata dicts
+        self._build_ui()
+        self._jobs_loaded.connect(self._populate_table)
+
+    def _build_ui(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        # Top bar: refresh
+        top_row = QHBoxLayout()
+        self.refresh_btn = QPushButton("Connect && Refresh")
+        self.refresh_btn.setToolTip("Authenticate to openEO and list all batch jobs")
+        self.refresh_btn.clicked.connect(self._refresh_jobs)
+        top_row.addWidget(self.refresh_btn)
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color: gray; font-size: 0.9em;")
+        top_row.addWidget(self.status_label, 1)
+        layout.addLayout(top_row)
+
+        # Job table
+        self.job_table = QTableWidget(0, 5)
+        self.job_table.setHorizontalHeaderLabels(
+            ["Job ID", "Status", "Created", "Updated", "Title"]
+        )
+        self.job_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.job_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.job_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.job_table.verticalHeader().hide()
+        hdr = self.job_table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(4, QHeaderView.Stretch)
+        layout.addWidget(self.job_table)
+
+        # Action buttons
+        btn_row = QHBoxLayout()
+        self.download_btn = QPushButton("Download && Add to Map")
+        self.download_btn.setEnabled(False)
+        self.download_btn.setToolTip("Download result GeoTIFF and add as layer")
+        self.download_btn.clicked.connect(self._download_selected)
+        btn_row.addWidget(self.download_btn)
+        self.delete_remote_btn = QPushButton("Delete Remote Job")
+        self.delete_remote_btn.setEnabled(False)
+        self.delete_remote_btn.clicked.connect(self._delete_selected)
+        btn_row.addWidget(self.delete_remote_btn)
+        layout.addLayout(btn_row)
+
+        # Log
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setMaximumHeight(100)
+        layout.addWidget(self.log_text)
+
+        self.job_table.itemSelectionChanged.connect(self._on_selection_changed)
+        self.setWidget(w)
+
+    # ── Auth & refresh ───────────────────────────────────────────────────────
+
+    def _refresh_jobs(self):
+        """Authenticate (if needed) and list all openEO batch jobs."""
+        if not self._conn:
+            try:
+                self._conn = _create_and_auth_backend("openeo", parent=self)._conn
+            except RuntimeError as e:
+                if str(e) != "Authentication cancelled.":
+                    QMessageBox.warning(self, "PWTT", str(e))
+                return
+            except Exception as e:
+                QMessageBox.warning(self, "PWTT", f"openEO auth failed: {e}")
+                return
+
+        self.status_label.setText("Loading jobs\u2026")
+        self.refresh_btn.setEnabled(False)
+
+        def _worker():
+            try:
+                jobs = self._conn.list_jobs()
+                result = []
+                for j in jobs:
+                    result.append({
+                        "id": j.get("id", ""),
+                        "status": j.get("status", ""),
+                        "created": j.get("created", ""),
+                        "updated": j.get("updated", ""),
+                        "title": j.get("title", ""),
+                    })
+                self._jobs_loaded.emit(result)
+            except Exception as e:
+                self._jobs_loaded.emit([])
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _populate_table(self, jobs):
+        self._remote_jobs = jobs
+        self.job_table.setRowCount(len(jobs))
+
+        _color_map = {
+            "finished": "#4CAF50",
+            "running": "#2196F3",
+            "queued": "#FF9800",
+            "created": "#888",
+            "error": "#F44336",
+            "canceled": "#888",
+            "cancelled": "#888",
+        }
+
+        for row, j in enumerate(jobs):
+            # Job ID
+            jid = j["id"]
+            display_id = jid[-16:] if len(jid) > 16 else jid
+            id_item = QTableWidgetItem(display_id)
+            id_item.setToolTip(jid)
+            id_item.setData(Qt.UserRole, jid)
+            self.job_table.setItem(row, 0, id_item)
+
+            # Status
+            st_item = QTableWidgetItem(j["status"])
+            color = _color_map.get(j["status"], "#000")
+            st_item.setForeground(QColor(color))
+            self.job_table.setItem(row, 1, st_item)
+
+            # Created
+            created = (j.get("created") or "")[:19].replace("T", " ")
+            self.job_table.setItem(row, 2, QTableWidgetItem(created))
+
+            # Updated
+            updated = (j.get("updated") or "")[:19].replace("T", " ")
+            self.job_table.setItem(row, 3, QTableWidgetItem(updated))
+
+            # Title
+            self.job_table.setItem(row, 4, QTableWidgetItem(j.get("title") or ""))
+
+        self.status_label.setText(f"{len(jobs)} job(s)")
+        self.refresh_btn.setEnabled(True)
+
+    # ── Selection ────────────────────────────────────────────────────────────
+
+    def _on_selection_changed(self):
+        row = self.job_table.currentRow()
+        if row < 0 or row >= len(self._remote_jobs):
+            self.download_btn.setEnabled(False)
+            self.delete_remote_btn.setEnabled(False)
+            return
+        j = self._remote_jobs[row]
+        self.download_btn.setEnabled(j["status"] == "finished")
+        self.delete_remote_btn.setEnabled(j["status"] not in ("running", "queued"))
+
+    def _get_selected_remote_id(self):
+        row = self.job_table.currentRow()
+        if row < 0:
+            return None
+        item = self.job_table.item(row, 0)
+        return item.data(Qt.UserRole) if item else None
+
+    # ── Download ─────────────────────────────────────────────────────────────
+
+    def _download_selected(self):
+        """Download result of the selected openEO job and add to QGIS layers."""
+        job_id = self._get_selected_remote_id()
+        if not job_id or not self._conn:
+            return
+
+        # Determine output directory
+        proj_path = QgsProject.instance().absolutePath()
+        base_dir = proj_path if proj_path else os.path.expanduser("~/PWTT")
+        out_dir = os.path.join(base_dir, job_id)
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, f"pwtt_{job_id}.tif")
+
+        if os.path.isfile(out_path):
+            reply = QMessageBox.question(
+                self, "PWTT",
+                f"File already exists:\n{out_path}\n\nAdd existing file to map instead of re-downloading?",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            )
+            if reply == QMessageBox.Cancel:
+                return
+            if reply == QMessageBox.Yes:
+                self._add_tif_to_map(out_path, job_id)
+                return
+
+        self.download_btn.setEnabled(False)
+        self.log_text.append(f"Downloading {job_id}\u2026")
+
+        def _worker():
+            try:
+                job = self._conn.job(job_id)
+                job.get_results().download_file(out_path)
+                # Signal via the log (main thread will pick up)
+                self._jobs_loaded.emit(self._remote_jobs)  # trigger UI update
+            except Exception as e:
+                pass
+
+        def _check_done():
+            if os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
+                timer.stop()
+                self.log_text.append(f"Saved: {out_path}")
+                self._add_tif_to_map(out_path, job_id)
+                self.download_btn.setEnabled(True)
+            elif not t.is_alive():
+                timer.stop()
+                self.log_text.append("Download failed.")
+                self.download_btn.setEnabled(True)
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        timer = QTimer(self)
+        timer.timeout.connect(_check_done)
+        timer.start(1000)
+
+    def _add_tif_to_map(self, path, job_id):
+        """Add a GeoTIFF to QGIS layers."""
+        from qgis.core import QgsRasterLayer
+        layer = QgsRasterLayer(path, f"openEO result ({job_id})", "gdal")
+        if layer.isValid():
+            QgsProject.instance().addMapLayer(layer)
+            self.log_text.append(f"Layer added: openEO result ({job_id})")
+        else:
+            self.log_text.append("Failed to load layer \u2014 file may be invalid.")
+
+    # ── Delete remote ────────────────────────────────────────────────────────
+
+    def _delete_selected(self):
+        job_id = self._get_selected_remote_id()
+        if not job_id or not self._conn:
+            return
+        reply = QMessageBox.question(
+            self, "PWTT",
+            f"Delete remote openEO job {job_id}?\n\nThis cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            self._conn.job(job_id).delete()
+            self.log_text.append(f"Deleted remote job {job_id}")
+            self._refresh_jobs()
+        except Exception as e:
+            QMessageBox.warning(self, "PWTT", f"Failed to delete: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1088,6 +1369,63 @@ class PWTTControlsDock(QDockWidget):
         self.aoi_label.setText("No area drawn. Click the button, then draw a rectangle on the map.")
         self.clear_aoi_btn.setEnabled(False)
 
+    # ── Load job parameters ──────────────────────────────────────────────────
+
+    def load_job_params(self, job):
+        """Populate controls from a saved job and show its AOI on the map."""
+        from qgis.core import QgsRectangle
+        from ..core.utils import wkt_to_bbox
+
+        # Backend
+        backend_ids = [b[0] for b in BACKENDS]
+        if job["backend_id"] in backend_ids:
+            self.backend_combo.setCurrentIndex(backend_ids.index(job["backend_id"]))
+
+        # Dates & intervals
+        ws = job.get("war_start", "")
+        if ws:
+            self.war_start.setDate(QDate.fromString(ws, "yyyy-MM-dd"))
+        ins = job.get("inference_start", "")
+        if ins:
+            self.inference_start.setDate(QDate.fromString(ins, "yyyy-MM-dd"))
+        if job.get("pre_interval"):
+            self.pre_interval.setValue(job["pre_interval"])
+        if job.get("post_interval"):
+            self.post_interval.setValue(job["post_interval"])
+
+        self.include_footprints.setChecked(job.get("include_footprints", False))
+
+        # Output directory
+        out = job.get("output_dir", "")
+        if out:
+            self.output_dir.setFilePath(out)
+
+        # AOI — parse WKT, set rubber band, zoom
+        aoi_wkt = job.get("aoi_wkt")
+        if aoi_wkt:
+            bbox = wkt_to_bbox(aoi_wkt)
+            if bbox:
+                west, south, east, north = bbox
+                rect = QgsRectangle(west, south, east, north)
+                self._on_aoi_drawn(aoi_wkt, rect)
+
+                # Zoom to AOI
+                canvas = self.iface.mapCanvas()
+                canvas_crs = canvas.mapSettings().destinationCrs()
+                src_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+                geom = QgsGeometry.fromRect(rect)
+                if canvas_crs != src_crs:
+                    transform = QgsCoordinateTransform(
+                        src_crs, canvas_crs, QgsProject.instance()
+                    )
+                    geom.transform(transform)
+                canvas.setExtent(geom.boundingBox())
+                canvas.refresh()
+
+        # Make sure controls dock is visible
+        self.show()
+        self.raise_()
+
     # ── Settings ──────────────────────────────────────────────────────────────
 
     def _load_settings(self):
@@ -1207,11 +1545,12 @@ class PWTTControlsDock(QDockWidget):
                 QMessageBox.warning(self, "PWTT", str(e))
             return
         self._save_settings()
-        out_dir = self.output_dir.filePath()
-        if not out_dir:
-            QMessageBox.warning(self, "PWTT", "Please choose an output directory.")
-            return
-        os.makedirs(out_dir, exist_ok=True)
+        base_dir = self.output_dir.filePath()
+        if not base_dir:
+            # Default to project folder or home
+            proj_path = QgsProject.instance().absolutePath()
+            base_dir = proj_path if proj_path else os.path.expanduser("~/PWTT")
+            self.output_dir.setFilePath(base_dir)
 
         from ..core import job_store
         job = job_store.create_job(
@@ -1221,7 +1560,11 @@ class PWTTControlsDock(QDockWidget):
             inference_start=self.inference_start.date().toString("yyyy-MM-dd"),
             pre_interval=self.pre_interval.value(),
             post_interval=self.post_interval.value(),
-            output_dir=out_dir,
+            output_dir="",  # will be set below
             include_footprints=self.include_footprints.isChecked(),
         )
+        # Output folder: base_dir / job_id
+        job["output_dir"] = os.path.join(base_dir, job["id"])
+        os.makedirs(job["output_dir"], exist_ok=True)
+        job_store.save_job(job)
         self.jobs_dock.launch_job(job, backend)
