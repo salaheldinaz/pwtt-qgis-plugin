@@ -57,7 +57,7 @@ class PWTTPlugin:
             checkable=True,
         )
         self._action_openeo = self.add_action(
-            QIcon(":/pwtt/icon_run.svg"),
+            QIcon(":/pwtt/icon_openeo.svg"),
             "PWTT \u2014 openEO Jobs",
             self._toggle_openeo,
             checkable=True,

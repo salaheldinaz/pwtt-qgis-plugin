@@ -1,15 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <!-- Draw AOI icon: dashed rectangle with crosshair -->
-  <rect x="0" y="0" width="64" height="64" rx="8" fill="#16213e"/>
-  <!-- Dashed rectangle -->
-  <rect x="12" y="14" width="40" height="36" rx="2" fill="none"
-        stroke="#e94560" stroke-width="2.5" stroke-dasharray="6 3"/>
-  <!-- Corner handles -->
-  <rect x="9" y="11" width="6" height="6" fill="#e94560"/>
-  <rect x="49" y="11" width="6" height="6" fill="#e94560"/>
-  <rect x="9" y="47" width="6" height="6" fill="#e94560"/>
-  <rect x="49" y="47" width="6" height="6" fill="#e94560"/>
-  <!-- Crosshair -->
-  <line x1="32" y1="22" x2="32" y2="42" stroke="#0f3460" stroke-width="1.5" opacity="0.6"/>
-  <line x1="20" y1="32" x2="44" y2="32" stroke="#0f3460" stroke-width="1.5" opacity="0.6"/>
+  <!-- Draw AOI: polygon vertices + corner bracket -->
+  <rect width="64" height="64" rx="12" fill="#0d1117"/>
+  <polygon points="32,14 50,26 44,48 20,48 14,26"
+           fill="none" stroke="#2dd4bf" stroke-width="2.5" stroke-linejoin="round"
+           stroke-dasharray="5 4"/>
+  <circle cx="32" cy="14" r="3.5" fill="#f59e0b"/>
+  <circle cx="50" cy="26" r="3.5" fill="#f59e0b"/>
+  <circle cx="44" cy="48" r="3.5" fill="#f59e0b"/>
+  <circle cx="20" cy="48" r="3.5" fill="#f59e0b"/>
+  <circle cx="14" cy="26" r="3.5" fill="#f59e0b"/>
+  <path d="M8 8h10v4M8 8v10h4M56 8h-10v4M56 8v10h-4M8 56h10v-4M8 56v-10h4M56 56h-10v-4M56 56v-10h-4"
+        fill="none" stroke="#334155" stroke-width="2" stroke-linecap="round"/>
 </svg>
