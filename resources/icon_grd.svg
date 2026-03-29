@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <!-- GRD staging: archive box with radar waves -->
-  <rect x="14" y="16" width="36" height="32" rx="2" fill="none" stroke="#FF9800" stroke-width="3"/>
-  <path d="M20 26h24M20 34h18M20 42h22" stroke="#FF9800" stroke-width="2" stroke-linecap="round"/>
-  <path d="M46 12 L54 8 M50 16 L58 12" stroke="#38bdf8" stroke-width="2.5" stroke-linecap="round"/>
+  <rect x="14" y="16" width="36" height="32" rx="2" fill="none" stroke="#000000" stroke-width="3"/>
+  <path d="M20 26h24M20 34h18M20 42h22" stroke="#000000" stroke-width="2" stroke-linecap="round"/>
+  <path d="M46 12 L54 8 M50 16 L58 12" stroke="#dc2626" stroke-width="2.5" stroke-linecap="round"/>
 </svg>

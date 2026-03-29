@@ -37,6 +37,7 @@ from qgis.core import (
     QgsCoordinateTransform,
     QgsGeometry,
     QgsProject,
+    QgsRectangle,
     QgsSettings,
     QgsWkbTypes,
 )
@@ -2001,15 +2002,45 @@ class PWTTControlsDock(QDockWidget):
         # AOI
         aoi_group = QGroupBox("Area of interest")
         aoi_layout = QVBoxLayout(aoi_group)
-        aoi_layout.addWidget(self._hint("Draw a rectangle on the map to define the analysis area."))
+        aoi_layout.addWidget(self._hint(
+            "Draw a rectangle on the map, or enter a WGS84 bounding box below (west, south, east, north)."
+        ))
         self.draw_aoi_btn = QPushButton(QIcon(":/pwtt/icon_draw_aoi.svg"), "Draw rectangle on map")
         self.draw_aoi_btn.clicked.connect(self._activate_aoi_tool)
         aoi_layout.addWidget(self.draw_aoi_btn)
+        coord_form = QFormLayout()
+        coord_form.setVerticalSpacing(2)
+        self.aoi_west = QDoubleSpinBox()
+        self.aoi_west.setRange(-180.0, 180.0)
+        self.aoi_west.setDecimals(6)
+        self.aoi_west.setValue(0.0)
+        coord_form.addRow("West (min lon):", self.aoi_west)
+        self.aoi_south = QDoubleSpinBox()
+        self.aoi_south.setRange(-90.0, 90.0)
+        self.aoi_south.setDecimals(6)
+        self.aoi_south.setValue(0.0)
+        coord_form.addRow("South (min lat):", self.aoi_south)
+        self.aoi_east = QDoubleSpinBox()
+        self.aoi_east.setRange(-180.0, 180.0)
+        self.aoi_east.setDecimals(6)
+        self.aoi_east.setValue(0.0)
+        coord_form.addRow("East (max lon):", self.aoi_east)
+        self.aoi_north = QDoubleSpinBox()
+        self.aoi_north.setRange(-90.0, 90.0)
+        self.aoi_north.setDecimals(6)
+        self.aoi_north.setValue(0.0)
+        coord_form.addRow("North (max lat):", self.aoi_north)
+        aoi_layout.addLayout(coord_form)
+        self.set_aoi_coords_btn = QPushButton("Set AOI from coordinates")
+        self.set_aoi_coords_btn.clicked.connect(self._apply_aoi_from_coordinates)
+        aoi_layout.addWidget(self.set_aoi_coords_btn)
         self.clear_aoi_btn = QPushButton("Clear AOI")
         self.clear_aoi_btn.clicked.connect(self._clear_aoi)
         self.clear_aoi_btn.setEnabled(False)
         aoi_layout.addWidget(self.clear_aoi_btn)
-        self.aoi_label = QLabel("No area drawn. Click the button, then draw a rectangle on the map.")
+        self.aoi_label = QLabel(
+            "No area set. Draw on the map or enter coordinates and click \u201cSet AOI from coordinates\u201d."
+        )
         self.aoi_label.setWordWrap(True)
         aoi_layout.addWidget(self.aoi_label)
         layout.addWidget(aoi_group)
@@ -2185,6 +2216,32 @@ class PWTTControlsDock(QDockWidget):
             level=Qgis.Info, duration=5,
         )
 
+    def _sync_aoi_coord_spinboxes(self, rect):
+        """Keep manual bbox fields aligned with current AOI (EPSG:4326)."""
+        if rect is None or rect.isEmpty():
+            return
+        for sb, val in (
+            (self.aoi_west, rect.xMinimum()),
+            (self.aoi_south, rect.yMinimum()),
+            (self.aoi_east, rect.xMaximum()),
+            (self.aoi_north, rect.yMaximum()),
+        ):
+            sb.blockSignals(True)
+            sb.setValue(val)
+            sb.blockSignals(False)
+
+    def _apply_aoi(self, wkt, rect):
+        """Set AOI from WKT and rectangle in EPSG:4326 (axis-aligned bbox)."""
+        self.aoi_wkt = wkt
+        self.aoi_rect = rect
+        self.aoi_label.setText(
+            f"AOI: {rect.xMinimum():.4f}, {rect.yMinimum():.4f} \u2014 "
+            f"{rect.xMaximum():.4f}, {rect.yMaximum():.4f} (WGS84)"
+        )
+        self.clear_aoi_btn.setEnabled(True)
+        self._sync_aoi_coord_spinboxes(rect)
+        self._draw_rubber_band(rect)
+
     def _on_aoi_drawn(self, wkt, rect):
         if wkt is None or rect is None:
             self.iface.messageBar().pushMessage(
@@ -2196,15 +2253,37 @@ class PWTTControlsDock(QDockWidget):
             except Exception:
                 pass
             return
-        self.aoi_wkt = wkt
-        self.aoi_rect = rect
-        self.aoi_label.setText(
-            f"AOI: {rect.xMinimum():.4f}, {rect.yMinimum():.4f} \u2014 "
-            f"{rect.xMaximum():.4f}, {rect.yMaximum():.4f} (WGS84)"
+        self._apply_aoi(wkt, rect)
+        try:
+            self.iface.mapCanvas().setMapTool(self._previous_map_tool)
+        except Exception:
+            pass
+
+    def _apply_aoi_from_coordinates(self):
+        west = self.aoi_west.value()
+        south = self.aoi_south.value()
+        east = self.aoi_east.value()
+        north = self.aoi_north.value()
+        if west >= east or south >= north:
+            self.iface.messageBar().pushMessage(
+                "PWTT",
+                "Invalid bbox: need west < east and south < north (decimal degrees, WGS84).",
+                level=Qgis.Warning,
+                duration=6,
+            )
+            return
+        rect = QgsRectangle(west, south, east, north)
+        if rect.isEmpty():
+            self.iface.messageBar().pushMessage(
+                "PWTT", "AOI rectangle is empty.", level=Qgis.Warning, duration=5,
+            )
+            return
+        geom = QgsGeometry.fromRect(rect)
+        wkt = geom.asWkt()
+        self._apply_aoi(wkt, rect)
+        self.iface.messageBar().pushMessage(
+            "PWTT", "Area of interest set from coordinates.", level=Qgis.Success, duration=4,
         )
-        self.clear_aoi_btn.setEnabled(True)
-        self.iface.mapCanvas().setMapTool(self._previous_map_tool)
-        self._draw_rubber_band(rect)
 
     def _draw_rubber_band(self, rect_4326):
         """Draw a persistent rectangle on the canvas for the current AOI (in EPSG:4326)."""
@@ -2231,14 +2310,15 @@ class PWTTControlsDock(QDockWidget):
         self._clear_rubber_band()
         self.aoi_wkt = None
         self.aoi_rect = None
-        self.aoi_label.setText("No area drawn. Click the button, then draw a rectangle on the map.")
+        self.aoi_label.setText(
+            "No area set. Draw on the map or enter coordinates and click \u201cSet AOI from coordinates\u201d."
+        )
         self.clear_aoi_btn.setEnabled(False)
 
     # ── Load job parameters ──────────────────────────────────────────────────
 
     def load_job_params(self, job):
         """Populate controls from a saved job and show its AOI on the map."""
-        from qgis.core import QgsRectangle
         from ..core.utils import wkt_to_bbox
 
         # Backend
@@ -2275,7 +2355,7 @@ class PWTTControlsDock(QDockWidget):
             if bbox:
                 west, south, east, north = bbox
                 rect = QgsRectangle(west, south, east, north)
-                self._on_aoi_drawn(aoi_wkt, rect)
+                self._apply_aoi(aoi_wkt, rect)
 
                 # Zoom to AOI
                 canvas = self.iface.mapCanvas()
@@ -2351,7 +2431,12 @@ class PWTTControlsDock(QDockWidget):
         from ..core import deps
 
         if not self.aoi_wkt:
-            QMessageBox.warning(self, "PWTT", "Please draw an area of interest on the map first.")
+            QMessageBox.warning(
+                self,
+                "PWTT",
+                "Please set an area of interest: draw on the map or enter WGS84 coordinates and "
+                "click \u201cSet AOI from coordinates\u201d.",
+            )
             return
         war = self.war_start.date()
         inf = self.inference_start.date()
