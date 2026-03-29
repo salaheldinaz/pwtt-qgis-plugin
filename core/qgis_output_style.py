@@ -107,6 +107,20 @@ def _pwtt_pseudocolor_renderer(layer):
     """Renderer the symbology panel understands; fixed 3–5 stretch (not NaN / stats)."""
     provider = layer.dataProvider()
     renderer = QgsSingleBandPseudoColorRenderer(provider, 1, None)
+
+    # MUST set before createShader(): QGIS builds QgsColorRampShader from
+    # classificationMin/Max; if they are still the default NaN, ramp items and
+    # labels stay NaN and nothing useful renders.
+    renderer.setClassificationMin(T_STATISTIC_VIZ_MIN)
+    renderer.setClassificationMax(T_STATISTIC_VIZ_MAX)
+
+    try:
+        mmo = QgsRasterMinMaxOrigin()
+        mmo.setLimits(Qgis.RasterRangeLimit.NotSet)
+        renderer.setMinMaxOrigin(mmo)
+    except AttributeError:
+        pass
+
     ramp = _pwtt_tstatistic_color_ramp()
     if hasattr(renderer, "createShader"):
         try:
@@ -122,18 +136,10 @@ def _pwtt_pseudocolor_renderer(layer):
     else:
         renderer.setShader(_pwtt_manual_color_ramp_shader())
 
-    # Without these, classification min/max stay NaN; opening Layer Styling
-    # recomputes from raster stats and replaces colors.
+    # Sync shader after createShader (covers edge cases where ramp steps diverge).
     renderer.setClassificationMin(T_STATISTIC_VIZ_MIN)
     renderer.setClassificationMax(T_STATISTIC_VIZ_MAX)
     renderer.setOpacity(1.0)
-
-    try:
-        mmo = QgsRasterMinMaxOrigin()
-        mmo.setLimits(Qgis.RasterRangeLimit.NotSet)
-        renderer.setMinMaxOrigin(mmo)
-    except AttributeError:
-        pass
 
     return renderer
 
