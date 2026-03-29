@@ -8,12 +8,13 @@ import webbrowser
 
 import ee
 
-DEFAULT_DAMAGE_THRESHOLD = 3.3
+from .viz_constants import (
+    T_STATISTIC_VIZ_MAX,
+    T_STATISTIC_VIZ_MIN,
+    T_STATISTIC_VIZ_OPACITY,
+)
 
-# T_statistic tile/map styling — must match code/pwtt.py detect_damage viz branch.
-T_STATISTIC_VIZ_MIN = 3.0
-T_STATISTIC_VIZ_MAX = 5.0
-T_STATISTIC_VIZ_OPACITY = 0.5
+DEFAULT_DAMAGE_THRESHOLD = 3.3
 
 
 def normal_cdf_approx(x_image):
