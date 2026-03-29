@@ -42,6 +42,14 @@ def download_job_geotiff(results: Any, out_path: str, scratch_dir: str) -> str:
     return out_path
 
 
+def _geotiff_already_downloaded(path: str, min_bytes: int = 4096) -> bool:
+    """True if ``path`` exists and is large enough to be a real raster (not a stub)."""
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) >= min_bytes
+    except OSError:
+        return False
+
+
 def _add_months(d: datetime, months: int) -> datetime:
     m = d.month - 1 + months
     y = d.year + m // 12
@@ -209,7 +217,7 @@ class OpenEOBackend(PWTTBackend):
 
         if status == "finished":
             if progress_callback:
-                progress_callback(80, f"Batch job {job_id} already finished. Downloading…")
+                progress_callback(80, f"Batch job {job_id} already finished.")
             return self._download_results(job, output_path, progress_callback)
 
         if status == "created":
@@ -278,6 +286,7 @@ class OpenEOBackend(PWTTBackend):
     def _download_results(self, job, output_path, progress_callback=None):
         """Download results and log metadata."""
         job_id = job.job_id
+        reuse_file = _geotiff_already_downloaded(output_path)
 
         if progress_callback:
             progress_callback(78, "Fetching result metadata…")
@@ -286,9 +295,9 @@ class OpenEOBackend(PWTTBackend):
         try:
             results = job.get_results()
             meta = results.get_metadata()
-            result_meta = meta
-            bbox = meta.get("bbox")
-            assets = meta.get("assets", {})
+            result_meta = meta if isinstance(meta, dict) else {}
+            bbox = result_meta.get("bbox")
+            assets = result_meta.get("assets", {})
             asset_names = list(assets.keys())
             if progress_callback:
                 parts = [f"Result: {len(asset_names)} asset(s)"]
@@ -302,14 +311,25 @@ class OpenEOBackend(PWTTBackend):
                 progress_callback(80, f"Could not fetch result metadata: {e}")
             results = job.get_results()
 
-        if progress_callback:
-            progress_callback(82, f"Downloading result to {output_path}…")
-        scratch = os.path.dirname(output_path) or "."
-        download_job_geotiff(results, output_path, scratch)
-
-        size_mb = os.path.getsize(output_path) / (1024 * 1024) if os.path.isfile(output_path) else 0
-        if progress_callback:
-            progress_callback(95, f"Download complete ({size_mb:.1f} MB). Job {job_id} done.")
+        if reuse_file:
+            size_mb = os.path.getsize(output_path) / (1024 * 1024)
+            if progress_callback:
+                progress_callback(
+                    95,
+                    f"GeoTIFF already in job folder ({size_mb:.1f} MB) — skipped download. Job {job_id} done.",
+                )
+        else:
+            if progress_callback:
+                progress_callback(82, f"Downloading result to {output_path}…")
+            scratch = os.path.dirname(output_path) or "."
+            download_job_geotiff(results, output_path, scratch)
+            size_mb = (
+                os.path.getsize(output_path) / (1024 * 1024)
+                if os.path.isfile(output_path)
+                else 0
+            )
+            if progress_callback:
+                progress_callback(95, f"Download complete ({size_mb:.1f} MB). Job {job_id} done.")
 
         # Collect run_metadata from job describe, logs, and result metadata
         self._collect_run_metadata(job, result_meta, output_path)
