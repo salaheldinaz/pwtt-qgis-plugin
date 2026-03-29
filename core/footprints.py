@@ -4,47 +4,81 @@
 import os
 import json
 import tempfile
+import time
 import requests
 from typing import Optional
 
 from .utils import wkt_to_bbox
 
+_OVERPASS_ENDPOINTS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+]
+
 
 def _fetch_osm_buildings(west: float, south: float, east: float, north: float, limit: int = 50000) -> Optional[str]:
-    """Query Overpass API for building polygons in bbox. Returns path to temp GeoJSON."""
-    overpass = "https://overpass-api.de/api/interpreter"
+    """Query Overpass API for building polygons in bbox. Returns path to temp GeoJSON.
+
+    Retries up to 3 times with exponential back-off and falls back to
+    alternative Overpass mirrors when the primary endpoint times out.
+    """
     query = f"""
-    [out:json][timeout:120];
+    [out:json][timeout:180];
     (
       way["building"]({south},{west},{north},{east});
     );
     out body geom;
     """
-    r = requests.post(overpass, data={"data": query}, timeout=120)
-    r.raise_for_status()
-    data = r.json()
-    features = []
-    for el in data.get("elements", []):
-        if el.get("type") != "way" or "geometry" not in el:
-            continue
-        coords = [[c["lon"], c["lat"]] for c in el["geometry"]]
-        if len(coords) < 3:
-            continue
-        if coords[0] != coords[-1]:
-            coords.append(coords[0])
-        features.append({
-            "type": "Feature",
-            "geometry": {"type": "Polygon", "coordinates": [coords]},
-            "properties": {"id": el.get("id", "")},
-        })
-        if len(features) >= limit:
-            break
-    geojson = {"type": "FeatureCollection", "features": features}
-    fd, path = tempfile.mkstemp(suffix=".geojson")
-    os.close(fd)
-    with open(path, "w") as f:
-        json.dump(geojson, f)
-    return path
+    last_err = None
+    for endpoint in _OVERPASS_ENDPOINTS:
+        for attempt in range(3):
+            try:
+                r = requests.post(endpoint, data={"data": query}, timeout=180)
+                if r.status_code == 429:
+                    wait = 10 * (attempt + 1)
+                    time.sleep(wait)
+                    continue
+                r.raise_for_status()
+                data = r.json()
+                features = []
+                for el in data.get("elements", []):
+                    if el.get("type") != "way" or "geometry" not in el:
+                        continue
+                    coords = [[c["lon"], c["lat"]] for c in el["geometry"]]
+                    if len(coords) < 3:
+                        continue
+                    if coords[0] != coords[-1]:
+                        coords.append(coords[0])
+                    features.append({
+                        "type": "Feature",
+                        "geometry": {"type": "Polygon", "coordinates": [coords]},
+                        "properties": {"id": el.get("id", "")},
+                    })
+                    if len(features) >= limit:
+                        break
+                geojson = {"type": "FeatureCollection", "features": features}
+                fd, path = tempfile.mkstemp(suffix=".geojson")
+                os.close(fd)
+                with open(path, "w") as f:
+                    json.dump(geojson, f)
+                return path
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                last_err = e
+                time.sleep(5 * (attempt + 1))
+                continue
+            except requests.exceptions.HTTPError as e:
+                last_err = e
+                if e.response is not None and e.response.status_code in (502, 503, 504):
+                    time.sleep(10 * (attempt + 1))
+                    continue
+                break
+    raise RuntimeError(
+        f"All Overpass API endpoints failed after retries.\n"
+        f"Last error: {last_err}\n"
+        f"The server may be overloaded — try again in a few minutes, "
+        f"or provide your own building footprints vector file."
+    )
 
 
 def compute_footprints(
