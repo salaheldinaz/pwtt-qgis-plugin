@@ -3,7 +3,7 @@
 
 from typing import Optional
 
-from qgis.core import QgsLayerTreeGroup, QgsMapLayer, QgsProject
+from qgis.core import QgsLayerTreeGroup, QgsLayerTreeNode, QgsMapLayer, QgsProject
 
 
 def pwtt_job_group_name(job_id: Optional[str], backend_id: Optional[str]) -> str:
@@ -26,9 +26,9 @@ def pwtt_footprints_layer_name(job_id: Optional[str], backend_id: Optional[str])
     return f"PWTT footprints ({bid})"
 
 
-def _find_group_by_name(root: QgsLayerTreeGroup, name: str) -> Optional[QgsLayerTreeGroup]:
-    for i in range(root.childCount()):
-        node = root.child(i)
+def _find_group_by_name(root: QgsLayerTreeNode, name: str) -> Optional[QgsLayerTreeGroup]:
+    # Use children() not childCount()/child(): QgsLayerTree root lacks those in PyQGIS 3.44+.
+    for node in root.children():
         if isinstance(node, QgsLayerTreeGroup) and node.name() == name:
             return node
     return None
