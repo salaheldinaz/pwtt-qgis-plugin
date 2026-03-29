@@ -69,6 +69,27 @@ _STATUS_COLORS = {
 }
 
 
+def _offline_grd_catalog_rows(job: dict) -> list:
+    """Merge stored product ids with optional name/date metadata for display."""
+    ids = list(job.get("offline_product_ids") or [])
+    raw = job.get("offline_products")
+    if not isinstance(raw, list):
+        raw = []
+    by_id = {
+        p["id"]: p
+        for p in raw
+        if isinstance(p, dict) and p.get("id")
+    }
+    return [
+        {
+            "id": pid,
+            "name": str(by_id.get(pid, {}).get("name", "")),
+            "date": str(by_id.get(pid, {}).get("date", "")),
+        }
+        for pid in ids
+    ]
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _read_plugin_version(plugin_dir):
@@ -415,6 +436,8 @@ class PWTTJobsDock(QDockWidget):
     _status_signal = pyqtSignal(str, str)   # (job_id, message)
     # Signal to auto-resume a job on the main thread
     _auto_resume_signal = pyqtSignal(str)   # job_id
+    # Emitted after the job table is refreshed (e.g. GRD staging dock sync)
+    jobs_changed = pyqtSignal()
 
     def __init__(self, parent=None, plugin_dir=None):
         super().__init__(_dock_title("PWTT \u2014 Jobs", plugin_dir), parent)
@@ -451,8 +474,10 @@ class PWTTJobsDock(QDockWidget):
         layout.setSpacing(4)
 
         # Job table
-        self.job_table = QTableWidget(0, 5)
-        self.job_table.setHorizontalHeaderLabels(["Status", "Backend", "Remote Job", "Dates", "Created"])
+        self.job_table = QTableWidget(0, 7)
+        self.job_table.setHorizontalHeaderLabels(
+            ["Status", "Backend", "Remote Job", "Local ID", "Output folder", "Dates", "Created"]
+        )
         self.job_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.job_table.setSelectionMode(QTableWidget.SingleSelection)
         self.job_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -461,8 +486,10 @@ class PWTTJobsDock(QDockWidget):
         hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(3, QHeaderView.Stretch)
-        hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(4, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(6, QHeaderView.ResizeToContents)
         self.job_table.setMaximumHeight(180)
         self.job_table.itemSelectionChanged.connect(self._on_job_selected)
         layout.addWidget(self.job_table)
@@ -534,13 +561,29 @@ class PWTTJobsDock(QDockWidget):
             rid_item.setToolTip(remote_id)  # full id on hover
             self.job_table.setItem(row, 2, rid_item)
 
+            # Local job id (plugin UUID)
+            lid = job["id"]
+            lid_disp = lid[:8] + "\u2026" if len(lid) > 10 else lid
+            lid_item = QTableWidgetItem(lid_disp)
+            lid_item.setToolTip(lid)
+            self.job_table.setItem(row, 3, lid_item)
+
+            # Output directory
+            out_dir = job.get("output_dir") or ""
+            odisp = out_dir
+            if len(out_dir) > 48:
+                odisp = "\u2026" + out_dir[-47:]
+            od_item = QTableWidgetItem(odisp)
+            od_item.setToolTip(out_dir)
+            self.job_table.setItem(row, 4, od_item)
+
             # Dates
             dates = f"{job['war_start'][:7]} \u2192 {job['inference_start'][:7]}"
-            self.job_table.setItem(row, 3, QTableWidgetItem(dates))
+            self.job_table.setItem(row, 5, QTableWidgetItem(dates))
 
             # Created
             created = job.get("created_at", "")[:16].replace("T", " ")
-            self.job_table.setItem(row, 4, QTableWidgetItem(created))
+            self.job_table.setItem(row, 6, QTableWidgetItem(created))
 
         # Restore selection
         if selected_id:
@@ -552,6 +595,8 @@ class PWTTJobsDock(QDockWidget):
         # Auto-select first row if nothing selected
         if self.job_table.rowCount() > 0 and self.job_table.currentRow() < 0:
             self.job_table.setCurrentCell(0, 0)
+
+        self.jobs_changed.emit()
 
     def _get_selected_job_id(self):
         row = self.job_table.currentRow()
@@ -573,6 +618,31 @@ class PWTTJobsDock(QDockWidget):
             if item and item.data(Qt.UserRole) == job_id:
                 self.job_table.setCurrentCell(row, 0)
                 return
+
+    def focus_job(self, job_id):
+        """Show the jobs dock and select *job_id* in the table."""
+        self.show()
+        self.raise_()
+        self._select_job(job_id)
+        self._on_job_selected()
+
+    def resume_job_by_id(self, job_id):
+        """Resume a job by id (used from GRD staging dock)."""
+        from ..core import job_store
+        job = job_store.get_job(job_id)
+        if not job:
+            QMessageBox.warning(self, "PWTT", "Job not found.")
+            return
+        if job_id in self._active_tasks:
+            QMessageBox.information(self, "PWTT", "This job is already running.")
+            return
+        if job["status"] not in job_store.RESUMABLE_STATUSES:
+            QMessageBox.information(
+                self, "PWTT", "This job is not in a resumable state."
+            )
+            return
+        self._select_job(job_id)
+        self._resume_selected()
 
     def _on_job_selected(self):
         from ..core import job_store
@@ -709,6 +779,8 @@ class PWTTJobsDock(QDockWidget):
             status=job_store.STATUS_COMPLETED,
             output_tif=output_tif,
             footprints_gpkg=footprints,
+            offline_product_ids=[],
+            offline_products=[],
         )
         remote_id = getattr(task, "remote_job_id", None)
         if remote_id:
@@ -745,10 +817,26 @@ class PWTTJobsDock(QDockWidget):
             job_store.update_job(job_id, remote_job_id=remote_id)
 
         if task.products_offline:
+            ids = list(task.offline_product_ids)
+            prows = list(getattr(task, "offline_products", []) or [])
+            by_id = {
+                p["id"]: p
+                for p in prows
+                if isinstance(p, dict) and p.get("id")
+            }
+            offline_products = [
+                {
+                    "id": pid,
+                    "name": str(by_id.get(pid, {}).get("name", "")),
+                    "date": str(by_id.get(pid, {}).get("date", "")),
+                }
+                for pid in ids
+            ]
             job_store.update_job(
                 job_id,
                 status=job_store.STATUS_WAITING_ORDERS,
-                offline_product_ids=task.offline_product_ids,
+                offline_product_ids=ids,
+                offline_products=offline_products,
             )
             ids_str = ", ".join(task.offline_product_ids[:5])
             if len(task.offline_product_ids) > 5:
@@ -974,6 +1062,274 @@ class PWTTJobsDock(QDockWidget):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  PWTTGrdStagingDock — local CDSE jobs waiting on offline GRD staging
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class PWTTGrdStagingDock(QDockWidget):
+    """Panel: Local jobs with Sentinel-1 GRD products staging from CDSE cold storage."""
+
+    _check_done = pyqtSignal(str, list)  # job_id, list of (product_id, online_bool)
+    _check_log = pyqtSignal(str)
+
+    def __init__(self, parent=None, plugin_dir=None):
+        super().__init__(_dock_title("PWTT \u2014 GRD staging", plugin_dir), parent)
+        self.setObjectName("PWTTGrdStagingDock")
+        self.setAllowedAreas(Qt.AllDockWidgetAreas)
+        self.jobs_dock = None
+        self.controls_dock = None
+        self._check_running = False
+        self._build_ui()
+        self._check_done.connect(self._on_check_done)
+        self._check_log.connect(self._append_log)
+
+    def _build_ui(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        hint = QLabel(
+            "Local backend: jobs waiting for GRD products to come online on CDSE. "
+            "The Jobs panel auto-checks every 2 minutes and resumes when all products are online."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #555; font-size: 0.9em;")
+        layout.addWidget(hint)
+
+        top_row = QHBoxLayout()
+        self.refresh_btn = QPushButton("Refresh list")
+        self.refresh_btn.clicked.connect(self.refresh_list)
+        top_row.addWidget(self.refresh_btn)
+        self.check_btn = QPushButton("Check CDSE now")
+        self.check_btn.setToolTip(
+            "Query the CDSE catalogue for the selected job\u2019s products (Online flag)."
+        )
+        self.check_btn.clicked.connect(self._check_selected_job)
+        top_row.addWidget(self.check_btn)
+        self.resume_btn = QPushButton("Resume job")
+        self.resume_btn.setToolTip("Same as Check && Resume in the Jobs panel.")
+        self.resume_btn.clicked.connect(self._resume_selected_job)
+        top_row.addWidget(self.resume_btn)
+        self.focus_jobs_btn = QPushButton("Show in Jobs")
+        self.focus_jobs_btn.setToolTip("Open the Jobs panel and select this job.")
+        self.focus_jobs_btn.clicked.connect(self._focus_in_jobs)
+        top_row.addWidget(self.focus_jobs_btn)
+        top_row.addStretch(1)
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color: gray; font-size: 0.9em;")
+        top_row.addWidget(self.status_label)
+        layout.addLayout(top_row)
+
+        layout.addWidget(QLabel("Waiting jobs (Local, CDSE staging):"))
+        self.jobs_table = QTableWidget(0, 4)
+        self.jobs_table.setHorizontalHeaderLabels(
+            ["Job", "Period (YYYY-MM)", "GRD #", "Output folder"]
+        )
+        self.jobs_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.jobs_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.jobs_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.jobs_table.verticalHeader().hide()
+        hj = self.jobs_table.horizontalHeader()
+        hj.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        hj.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        hj.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        hj.setSectionResizeMode(3, QHeaderView.Stretch)
+        layout.addWidget(self.jobs_table)
+
+        layout.addWidget(QLabel("Products for selected job:"))
+        self.products_table = QTableWidget(0, 4)
+        self.products_table.setHorizontalHeaderLabels(
+            ["Product name", "Product UUID", "Acquisition", "CDSE online"]
+        )
+        self.products_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.products_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.products_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.products_table.verticalHeader().hide()
+        hp = self.products_table.horizontalHeader()
+        hp.setSectionResizeMode(0, QHeaderView.Stretch)
+        hp.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        hp.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        hp.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        layout.addWidget(self.products_table)
+
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setMaximumHeight(100)
+        layout.addWidget(self.log_text)
+
+        self.jobs_table.itemSelectionChanged.connect(self._on_job_selection_changed)
+        self.setWidget(w)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh_list()
+
+    def _append_log(self, msg):
+        self.log_text.append(msg)
+
+    def refresh_list(self):
+        from ..core import job_store
+        waiting = [
+            j
+            for j in job_store.load_jobs()
+            if j.get("status") == job_store.STATUS_WAITING_ORDERS
+            and j.get("backend_id") == "local"
+            and j.get("offline_product_ids")
+        ]
+        self.jobs_table.setRowCount(len(waiting))
+        for row, job in enumerate(waiting):
+            jid = job["id"]
+            c0 = QTableWidgetItem(jid)
+            c0.setData(Qt.UserRole, jid)
+            self.jobs_table.setItem(row, 0, c0)
+            ym = f"{job['war_start'][:7]} \u2192 {job['inference_start'][:7]}"
+            self.jobs_table.setItem(row, 1, QTableWidgetItem(ym))
+            n = len(job.get("offline_product_ids") or [])
+            self.jobs_table.setItem(row, 2, QTableWidgetItem(str(n)))
+            od = job.get("output_dir") or ""
+            disp = od
+            if len(disp) > 52:
+                disp = "\u2026" + disp[-49:]
+            od_item = QTableWidgetItem(disp)
+            od_item.setToolTip(od)
+            self.jobs_table.setItem(row, 3, od_item)
+        nwait = len(waiting)
+        self.status_label.setText(
+            f"{nwait} job(s) waiting" if nwait else "No jobs waiting on GRD"
+        )
+        self._on_job_selection_changed()
+
+    def _selected_pwtt_job_id(self):
+        row = self.jobs_table.currentRow()
+        if row < 0:
+            return None
+        item = self.jobs_table.item(row, 0)
+        return item.data(Qt.UserRole) if item else None
+
+    def _on_job_selection_changed(self):
+        from ..core import job_store
+        jid = self._selected_pwtt_job_id()
+        self.resume_btn.setEnabled(bool(jid))
+        self.focus_jobs_btn.setEnabled(bool(jid))
+        self.check_btn.setEnabled(bool(jid) and not self._check_running)
+        if not jid:
+            self.products_table.setRowCount(0)
+            return
+        job = job_store.get_job(jid)
+        if not job:
+            self.products_table.setRowCount(0)
+            return
+        rows = _offline_grd_catalog_rows(job)
+        self.products_table.setRowCount(len(rows))
+        gray = QColor("#666")
+        for i, r in enumerate(rows):
+            nm = r.get("name") or "\u2014"
+            ni = QTableWidgetItem(nm)
+            ni.setToolTip(nm if nm != "\u2014" else r["id"])
+            self.products_table.setItem(i, 0, ni)
+            pid = r["id"]
+            short = pid[:10] + "\u2026" if len(pid) > 14 else pid
+            pi = QTableWidgetItem(short)
+            pi.setToolTip(pid)
+            pi.setData(Qt.UserRole, pid)
+            self.products_table.setItem(i, 1, pi)
+            self.products_table.setItem(i, 2, QTableWidgetItem(r.get("date") or ""))
+            st = QTableWidgetItem("\u2014")
+            st.setForeground(gray)
+            self.products_table.setItem(i, 3, st)
+
+    def _check_selected_job(self):
+        if self._check_running:
+            self._append_log("A CDSE check is already running.")
+            return
+        jid = self._selected_pwtt_job_id()
+        if not jid:
+            return
+        from ..core import job_store
+        job = job_store.get_job(jid)
+        if not job:
+            return
+        pids = list(job.get("offline_product_ids") or [])
+        if not pids:
+            return
+        s = QgsSettings()
+        s.beginGroup("PWTT")
+        username = s.value("cdse_username", "")
+        password = s.value("cdse_password", "")
+        s.endGroup()
+        if not username or not password:
+            self._append_log(
+                "CDSE username/password not set. Enter credentials in Damage Detection panel."
+            )
+            QMessageBox.warning(
+                self,
+                "PWTT",
+                "Set CDSE username and password in PWTT \u2014 Damage Detection, then try again.",
+            )
+            return
+        self._check_running = True
+        self.check_btn.setEnabled(False)
+        self._append_log(f"Checking {len(pids)} product(s) for job {jid}\u2026")
+
+        def _worker():
+            try:
+                from ..core.downloader import get_token, _is_product_online
+                token = get_token(username, password)
+                results = [(pid, _is_product_online(token, pid)) for pid in pids]
+                self._check_done.emit(jid, results)
+            except Exception as e:
+                self._check_log.emit(f"CDSE check failed: {e}")
+                self._check_done.emit("", [])
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_check_done(self, job_id, results):
+        self._check_running = False
+        self._on_job_selection_changed()
+        jid = self._selected_pwtt_job_id()
+        if job_id and results and jid == job_id:
+            green = QColor("#2E7D32")
+            red = QColor("#C62828")
+            for row in range(self.products_table.rowCount()):
+                item = self.products_table.item(row, 1)
+                if not item:
+                    continue
+                pid = item.data(Qt.UserRole)
+                online = None
+                for p, o in results:
+                    if p == pid:
+                        online = o
+                        break
+                st_item = self.products_table.item(row, 3)
+                if online is None or st_item is None:
+                    continue
+                if online:
+                    st_item.setText("Yes")
+                    st_item.setForeground(green)
+                else:
+                    st_item.setText("No")
+                    st_item.setForeground(red)
+            online_n = sum(1 for _, o in results if o)
+            self._append_log(
+                f"Job {job_id}: {online_n}/{len(results)} product(s) online on CDSE."
+            )
+        elif job_id or results:
+            self._append_log("CDSE check finished (job selection changed).")
+
+    def _resume_selected_job(self):
+        jid = self._selected_pwtt_job_id()
+        if not jid or not self.jobs_dock:
+            return
+        self.jobs_dock.resume_job_by_id(jid)
+
+    def _focus_in_jobs(self):
+        jid = self._selected_pwtt_job_id()
+        if not jid or not self.jobs_dock:
+            return
+        self.jobs_dock.focus_job(jid)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  PWTTOpenEOJobsDock — list all openEO remote jobs, download results
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -984,7 +1340,8 @@ class PWTTOpenEOJobsDock(QDockWidget):
     _log_signal = pyqtSignal(str)   # thread-safe log append
 
     def __init__(self, parent=None, plugin_dir=None):
-        super().__init__(_dock_title("PWTT \u2014 openEO Jobs", plugin_dir), parent)
+        # Short dock title (no PWTT/version suffix); server job title is in the Job ID tooltip.
+        super().__init__("openEO Jobs", parent)
         self.setObjectName("PWTTOpenEOJobsDock")
         self.setAllowedAreas(Qt.AllDockWidgetAreas)
         self._conn = None  # openEO connection (set after auth)
@@ -1011,9 +1368,9 @@ class PWTTOpenEOJobsDock(QDockWidget):
         layout.addLayout(top_row)
 
         # Job table
-        self.job_table = QTableWidget(0, 6)
+        self.job_table = QTableWidget(0, 5)
         self.job_table.setHorizontalHeaderLabels(
-            ["Job ID", "Status", "Progress", "Created", "Updated", "Title"]
+            ["Job ID", "Status", "Progress", "Created", "Updated"]
         )
         self.job_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.job_table.setSelectionMode(QTableWidget.SingleSelection)
@@ -1024,8 +1381,7 @@ class PWTTOpenEOJobsDock(QDockWidget):
         hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(5, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(4, QHeaderView.Stretch)
         layout.addWidget(self.job_table)
 
         # Action buttons
@@ -1134,6 +1490,8 @@ class PWTTOpenEOJobsDock(QDockWidget):
             id_item = QTableWidgetItem(display_id)
             # Build rich tooltip
             tip_parts = [f"ID: {jid}"]
+            if j.get("title"):
+                tip_parts.append(f"Title: {j['title']}")
             if j.get("costs") is not None:
                 tip_parts.append(f"Costs: {j['costs']}")
             usage = j.get("usage")
@@ -1162,9 +1520,6 @@ class PWTTOpenEOJobsDock(QDockWidget):
             # Updated
             updated = (j.get("updated") or "")[:19].replace("T", " ")
             self.job_table.setItem(row, 4, QTableWidgetItem(updated))
-
-            # Title
-            self.job_table.setItem(row, 5, QTableWidgetItem(j.get("title") or ""))
 
         # Summary in status bar
         by_status = {}
@@ -1347,8 +1702,13 @@ class PWTTOpenEOJobsDock(QDockWidget):
     def _add_tif_to_map(self, path, job_id):
         """Add a GeoTIFF to QGIS layers."""
         from qgis.core import QgsRasterLayer
+
+        from ..core.qgis_output_style import damage_threshold_from_job_meta, style_pwtt_raster_layer
+
         layer = QgsRasterLayer(path, f"openEO result ({job_id})", "gdal")
         if layer.isValid():
+            thr = damage_threshold_from_job_meta(path)
+            style_pwtt_raster_layer(layer, damage_threshold=thr)
             QgsProject.instance().addMapLayer(layer)
             self.log_text.append(f"Layer added: openEO result ({job_id})")
         else:
@@ -1435,8 +1795,11 @@ class PWTTOpenEOJobsDock(QDockWidget):
     def _add_footprints_layer(self, path, job_id):
         from qgis.core import QgsVectorLayer
 
+        from ..core.qgis_output_style import style_pwtt_footprints_layer
+
         layer = QgsVectorLayer(path, f"openEO footprints ({job_id})", "ogr")
         if layer.isValid():
+            style_pwtt_footprints_layer(layer)
             QgsProject.instance().addMapLayer(layer)
             self.log_text.append(f"Layer added: openEO footprints ({job_id})")
         else:
@@ -1664,7 +2027,7 @@ class PWTTControlsDock(QDockWidget):
             "Overlay OpenStreetMap building footprints on the result to assess per-building damage."
         ))
 
-        self.damage_mask_group = QGroupBox("Damage mask (GEE & Local)")
+        self.damage_mask_group = QGroupBox("Damage mask (T-statistic threshold)")
         dm_form = QFormLayout(self.damage_mask_group)
         self.damage_threshold_spin = QDoubleSpinBox()
         self.damage_threshold_spin.setRange(0.5, 20.0)
@@ -1672,12 +2035,15 @@ class PWTTControlsDock(QDockWidget):
         self.damage_threshold_spin.setSingleStep(0.1)
         self.damage_threshold_spin.setValue(3.3)
         self.damage_threshold_spin.setToolTip(
-            "Damage band is 1 where the smoothed T-statistic exceeds this value."
+            "Smoothed T-statistic cutoff for the binary damage band (band 2). "
+            "Same statistic for openEO, GEE, and local backends."
         )
         dm_form.addRow("T-statistic >", self.damage_threshold_spin)
         dm_form.addRow(self._hint(
-            "Binary damage output uses this cutoff. The openEO backend uses a different "
-            "change metric — switch to GEE or Local to use this threshold."
+            "All backends classify damage where T exceeds this value after smoothing. "
+            "Reference (UNOSAT building footprints): T>2 \u2248 max sensitivity; "
+            "T>3.3 balanced default; T>4 fewer false positives; T>5 only strongest change. "
+            "See github.com/oballinger/PWTT#recommended-thresholds"
         ))
         params_layout.addRow(self.damage_mask_group)
 
@@ -1742,7 +2108,7 @@ class PWTTControlsDock(QDockWidget):
             self.dep_label.setStyleSheet("color: green; font-size: 0.9em;")
             self.install_deps_btn.hide()
 
-        self.damage_mask_group.setVisible(backend_id in ("gee", "local"))
+        self.damage_mask_group.setVisible(True)
         self.gee_preview_group.setVisible(backend_id == "gee")
 
     def _install_backend_deps(self):

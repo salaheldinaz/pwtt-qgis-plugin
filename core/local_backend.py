@@ -203,6 +203,7 @@ class LocalBackend(PWTTBackend):
                     f"Staging orders have been triggered for {triggered_orders} product(s). "
                     f"Will auto-check and resume when products become available.",
                     product_ids=offline_product_ids,
+                    offline_scenes=list(self.run_metadata.get("offline_scenes", [])),
                 )
             raise RuntimeError(
                 "Could not load VV/VH data from any product. "

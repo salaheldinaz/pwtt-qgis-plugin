@@ -8,9 +8,10 @@ from typing import Optional, Callable, Tuple
 class ProductsOfflineError(Exception):
     """Raised when all available products are in cold storage and staging orders were triggered."""
 
-    def __init__(self, message, product_ids=None):
+    def __init__(self, message, product_ids=None, offline_scenes=None):
         super().__init__(message)
         self.product_ids = product_ids or []
+        self.offline_scenes = offline_scenes or []
 
 
 class PWTTBackend(ABC):

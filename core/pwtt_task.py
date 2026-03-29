@@ -47,6 +47,7 @@ class PWTTRunTask(QgsTask):
         self.error_detail = ""
         self.products_offline = False
         self.offline_product_ids = []
+        self.offline_products = []
         self._status_msg = ""
         self._msg_callbacks = []
 
@@ -105,6 +106,12 @@ class PWTTRunTask(QgsTask):
             self._capture_remote_job_id()
             self.products_offline = True
             self.offline_product_ids = list(e.product_ids)
+            scenes = getattr(e, "offline_scenes", None) or []
+            self.offline_products = [
+                {"id": s.get("id", ""), "name": s.get("name", ""), "date": s.get("date", "")}
+                for s in scenes
+                if isinstance(s, dict) and s.get("id")
+            ]
             self._emit_msg(str(e))
             return False
         except Exception as e:
@@ -161,14 +168,18 @@ class PWTTRunTask(QgsTask):
 
     def finished(self, success):
         if success and self.output_tif and os.path.isfile(self.output_tif):
+            from .qgis_output_style import style_pwtt_footprints_layer, style_pwtt_raster_layer
+
             label = f"PWTT damage ({self.job_id})" if self.job_id else "PWTT damage"
             layer = QgsRasterLayer(self.output_tif, label, "gdal")
             if layer.isValid():
+                style_pwtt_raster_layer(layer, damage_threshold=self.damage_threshold)
                 QgsProject.instance().addMapLayer(layer)
             if self.footprints_gpkg and os.path.isfile(self.footprints_gpkg):
                 fp_label = f"PWTT footprints ({self.job_id})" if self.job_id else "PWTT footprints"
                 vl = QgsVectorLayer(self.footprints_gpkg, fp_label, "ogr")
                 if vl.isValid():
+                    style_pwtt_footprints_layer(vl)
                     QgsProject.instance().addMapLayer(vl)
             # GEE map preview must run on the main thread (webbrowser.open)
             if self.gee_viz:
