@@ -1011,7 +1011,13 @@ class PWTTJobsDock(QDockWidget):
                 fp_items.append((src, pth))
 
         for src, pth in fp_items:
-            fp_label = pwtt_footprints_layer_name(jid, backend_id, src)
+            fp_label = pwtt_footprints_layer_name(
+                jid,
+                backend_id,
+                src,
+                war_start=job.get("war_start"),
+                inference_start=job.get("inference_start"),
+            )
             vl = QgsVectorLayer(pth, fp_label, "ogr")
             if vl.isValid():
                 style_pwtt_footprints_layer(vl)
@@ -1946,7 +1952,7 @@ class PWTTOpenEOJobsDock(QDockWidget):
         from ..core.qgis_output_style import style_pwtt_footprints_layer
 
         backend_id = "openeo"
-        label = pwtt_footprints_layer_name(job_id, backend_id)
+        label = pwtt_footprints_layer_name(job_id, backend_id, "current_osm")
         layer = QgsVectorLayer(path, label, "ogr")
         if layer.isValid():
             style_pwtt_footprints_layer(layer)

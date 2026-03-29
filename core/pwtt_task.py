@@ -212,7 +212,13 @@ class PWTTRunTask(QgsTask):
                 add_map_layer_to_pwtt_job_group(project, layer, self.job_id, backend_id)
             for source, fp_path in self.footprints_gpkgs.items():
                 if os.path.isfile(fp_path):
-                    fp_label = pwtt_footprints_layer_name(self.job_id, backend_id, source)
+                    fp_label = pwtt_footprints_layer_name(
+                        self.job_id,
+                        backend_id,
+                        source,
+                        war_start=self.war_start,
+                        inference_start=self.inference_start,
+                    )
                     vl = QgsVectorLayer(fp_path, fp_label, "ogr")
                     if vl.isValid():
                         style_pwtt_footprints_layer(vl)

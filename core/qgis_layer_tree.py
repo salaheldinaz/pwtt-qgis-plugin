@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Layer tree: group PWTT outputs by job id and tag layers with backend (gee / local / openeo)."""
 
+from datetime import date
 from typing import Optional
 
 from qgis.core import QgsLayerTreeGroup, QgsLayerTreeNode, QgsMapLayer, QgsProject
@@ -26,14 +27,36 @@ _FOOTPRINT_SOURCE_LABELS = {
 }
 
 
+def footprint_snapshot_date_iso(
+    source: Optional[str],
+    war_start: Optional[str] = None,
+    inference_start: Optional[str] = None,
+) -> str:
+    """YYYY-MM-DD for the OSM snapshot: historical sources use job dates; else today (current OSM)."""
+    ws = (war_start or "")[:10]
+    ins = (inference_start or "")[:10]
+    if source == "historical_war_start" and ws:
+        return ws
+    if source == "historical_inference_start" and ins:
+        return ins
+    return date.today().isoformat()
+
+
 def pwtt_footprints_layer_name(
-    job_id: Optional[str], backend_id: Optional[str], source: Optional[str] = None
+    job_id: Optional[str],
+    backend_id: Optional[str],
+    source: Optional[str] = None,
+    *,
+    war_start: Optional[str] = None,
+    inference_start: Optional[str] = None,
+    snapshot_date: Optional[str] = None,
 ) -> str:
     bid = (backend_id or "pwtt").lower()
     src = _FOOTPRINT_SOURCE_LABELS.get(source, source or "OSM")
+    snap = snapshot_date or footprint_snapshot_date_iso(source, war_start, inference_start)
     if job_id:
-        return f"PWTT footprints {src} ({bid}, {job_id})"
-    return f"PWTT footprints {src} ({bid})"
+        return f"PWTT footprints {src} ({bid}, {job_id}) · {snap}"
+    return f"PWTT footprints {src} ({bid}) · {snap}"
 
 
 def _find_group_by_name(root: QgsLayerTreeNode, name: str) -> Optional[QgsLayerTreeGroup]:
