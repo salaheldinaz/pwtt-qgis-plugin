@@ -32,7 +32,20 @@ def _run_overpass_query(query: str, limit: int = 50000) -> str:
                     time.sleep(10 * (attempt + 1))
                     continue
                 r.raise_for_status()
-                data = r.json()
+                raw = r.text
+                if not raw or not raw.strip():
+                    last_err = RuntimeError(f"Empty response from {endpoint}")
+                    time.sleep(5 * (attempt + 1))
+                    continue
+                try:
+                    data = json.loads(raw)
+                except ValueError as e:
+                    # Server returned non-JSON (XML error page, HTML, etc.)
+                    last_err = RuntimeError(
+                        f"Non-JSON response from {endpoint}: {raw[:300]!r}"
+                    )
+                    time.sleep(5 * (attempt + 1))
+                    continue
                 features = []
                 for el in data.get("elements", []):
                     if el.get("type") != "way" or "geometry" not in el:
@@ -68,8 +81,8 @@ def _run_overpass_query(query: str, limit: int = 50000) -> str:
     raise RuntimeError(
         f"All Overpass API endpoints failed after retries.\n"
         f"Last error: {last_err}\n"
-        f"The server may be overloaded — try again in a few minutes, "
-        f"or provide your own building footprints vector file."
+        f"The server may be overloaded or does not support this query — "
+        f"try again in a few minutes, or provide your own building footprints vector file."
     )
 
 

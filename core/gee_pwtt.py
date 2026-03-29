@@ -117,12 +117,20 @@ def ttest(s1, inference_start, war_start, pre_interval, post_interval):
     )
 
 
-def open_geemap_preview(aoi, image, damage_threshold: float = DEFAULT_DAMAGE_THRESHOLD) -> None:
+def open_geemap_preview(
+    aoi,
+    image,
+    damage_threshold: float = DEFAULT_DAMAGE_THRESHOLD,
+    output_dir: str = None,
+) -> None:
     """Build a standalone Leaflet map and open it in the default browser (QGIS / desktop use).
 
     Uses Leaflet.js from CDN so the page works as a file:// URL without Jupyter
     widget dependencies.  CartoDB Positron tiles are used as the basemap to avoid
     the Referer requirement imposed by OpenStreetMap's volunteer-run tile servers.
+
+    If *output_dir* is given the HTML is saved there as ``pwtt_gee_preview.html``
+    (in addition to being opened in the browser); otherwise a system temp file is used.
     """
     vmin = float(damage_threshold)
     vmax = vmin + 2.0
@@ -186,8 +194,12 @@ def open_geemap_preview(aoi, image, damage_threshold: float = DEFAULT_DAMAGE_THR
 </body>
 </html>"""
 
-    fd, path = tempfile.mkstemp(suffix=".html", prefix="pwtt_gee_preview_")
-    os.close(fd)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        path = os.path.join(output_dir, "pwtt_gee_preview.html")
+    else:
+        fd, path = tempfile.mkstemp(suffix=".html", prefix="pwtt_gee_preview_")
+        os.close(fd)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(html)
     webbrowser.open(f"file://{path}")
