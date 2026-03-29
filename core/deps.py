@@ -65,6 +65,40 @@ FOOTPRINT_DEPS = {
 
 # ── Queries ──────────────────────────────────────────────────────────────────
 
+def _rasterstats_ok():
+    """True if PyPI *rasterstats* (with ``zonal_stats``) is importable.
+
+    Another *sys.path* entry may expose a different ``rasterstats`` without
+    ``zonal_stats``.  We then prefer the copy in ``_deps_dir()`` (same approach
+    as ``footprints.compute_footprints``).  Without this, *pip* can succeed but
+    ``footprint_missing()`` still returns missing — the workflow stops right
+    after *Install now* with no job start.
+    """
+    try:
+        mod = __import__("rasterstats")
+        if hasattr(mod, "zonal_stats"):
+            return True
+    except ImportError:
+        pass
+    ensure_on_path()
+    d = _deps_dir()
+    if not os.path.isdir(d):
+        return False
+    _saved = sys.path[:]
+    try:
+        sys.path.insert(0, d)
+        for key in list(sys.modules):
+            if key == "rasterstats" or key.startswith("rasterstats."):
+                del sys.modules[key]
+        importlib.invalidate_caches()
+        mod = __import__("rasterstats")
+        return hasattr(mod, "zonal_stats")
+    except ImportError:
+        return False
+    finally:
+        sys.path[:] = _saved
+
+
 def find_missing(import_names):
     """Return the subset of *import_names* that cannot be imported.
 
@@ -73,11 +107,12 @@ def find_missing(import_names):
     """
     missing = []
     for name in import_names:
-        try:
-            mod = __import__(name)
-            # Guard against QGIS plugin "rasterstats" shadowing the real one
-            if name == "rasterstats" and not hasattr(mod, "zonal_stats"):
+        if name == "rasterstats":
+            if not _rasterstats_ok():
                 missing.append(name)
+            continue
+        try:
+            __import__(name)
         except ImportError:
             missing.append(name)
     return missing
@@ -112,6 +147,10 @@ def install(pip_names):
     the correct Python version).  Falls back to ``python3 -m pip install
     --target``.  Raises `RuntimeError` on failure.
     """
+    pip_names = list(pip_names)
+    if not pip_names:
+        raise RuntimeError("No packages specified for install.")
+
     d = _deps_dir()
     os.makedirs(d, exist_ok=True)
 
@@ -142,12 +181,26 @@ def install(pip_names):
 
     ensure_on_path()
     importlib.invalidate_caches()
+    if "rasterstats" in pip_names:
+        for key in list(sys.modules):
+            if key == "rasterstats" or key.startswith("rasterstats."):
+                del sys.modules[key]
+        importlib.invalidate_caches()
 
 
 def install_with_dialog(pip_names, parent=None):
     """Install packages with a progress dialog.  Returns True on success."""
     from qgis.PyQt.QtCore import Qt, QThread
-    from qgis.PyQt.QtWidgets import QProgressDialog, QMessageBox
+    from qgis.PyQt.QtWidgets import QApplication, QProgressDialog, QMessageBox
+
+    if not pip_names:
+        QMessageBox.warning(
+            parent,
+            "PWTT",
+            "No installable packages were requested (e.g. only QGIS-bundled "
+            "dependencies are missing). Install or enable them in QGIS, then try again.",
+        )
+        return False
 
     class _Worker(QThread):
         def __init__(self, names):
@@ -165,12 +218,16 @@ def install_with_dialog(pip_names, parent=None):
         f"Installing {', '.join(pip_names)}\u2026", "Cancel", 0, 0, parent
     )
     dlg.setWindowTitle("PWTT \u2014 Installing Dependencies")
-    dlg.setWindowModality(Qt.WindowModal)
+    dlg.setWindowModality(Qt.ApplicationModal)
     dlg.setMinimumDuration(0)
 
     worker = _Worker(pip_names)
     worker.finished.connect(dlg.close)
     worker.start()
+    dlg.show()
+    dlg.raise_()
+    dlg.activateWindow()
+    QApplication.processEvents()
     dlg.exec_()
 
     if dlg.wasCanceled():
