@@ -65,38 +65,71 @@ FOOTPRINT_DEPS = {
 
 # ── Queries ──────────────────────────────────────────────────────────────────
 
-def _rasterstats_ok():
-    """True if PyPI *rasterstats* (with ``zonal_stats``) is importable.
+def _try_import_zonal_stats():
+    """Return True if ``from rasterstats import zonal_stats`` yields a callable."""
+    from rasterstats import zonal_stats
+    if not callable(zonal_stats):
+        raise ImportError("rasterstats.zonal_stats is not callable")
+    return True
 
-    Another *sys.path* entry may expose a different ``rasterstats`` without
-    ``zonal_stats``.  We then prefer the copy in ``_deps_dir()`` (same approach
-    as ``footprints.compute_footprints``).  Without this, *pip* can succeed but
-    ``footprint_missing()`` still returns missing — the workflow stops right
-    after *Install now* with no job start.
+
+def _rasterstats_probe():
+    """Return ``(ok, detail)``.  *detail* is non-empty on failure (for error dialogs).
+
+    Mirrors ``footprints.compute_footprints``: prefer ``from rasterstats import zonal_stats``,
+    then force-load from ``_deps_dir()`` if a QGIS plugin shadows the name.
     """
+    # 1) Try the normal import path
     try:
-        mod = __import__("rasterstats")
-        if hasattr(mod, "zonal_stats"):
-            return True
-    except ImportError:
-        pass
+        _try_import_zonal_stats()
+        return True, ""
+    except Exception as e:
+        first = str(e)
+
+    # 2) Try from deps dir with path priority + module cache purge
     ensure_on_path()
     d = _deps_dir()
     if not os.path.isdir(d):
-        return False
-    _saved = sys.path[:]
+        return False, f"{first}\n(Deps folder does not exist yet: {d})"
+
+    _saved_path = sys.path[:]
+    _saved_mods = {k: sys.modules[k] for k in list(sys.modules)
+                   if k == "rasterstats" or k.startswith("rasterstats.")}
     try:
         sys.path.insert(0, d)
+        for key in list(_saved_mods):
+            del sys.modules[key]
+        importlib.invalidate_caches()
+        _try_import_zonal_stats()
+        return True, ""
+    except ImportError as e:
+        return False, (
+            f"{first}\n"
+            f"Loading from PWTT deps dir also failed: {e}\n"
+            f"Often this means packages were built for a different Python than QGIS uses. "
+            f"The plugin now installs with QGIS's interpreter first — try Install again, "
+            f"or run:\n  \"{sys.executable}\" -m pip install --target \"{d}\" rasterstats"
+        )
+    except Exception as e:
+        return False, f"{first}\nFrom deps dir: {type(e).__name__}: {e}"
+    finally:
+        sys.path[:] = _saved_path
+        # Restore original module state so we don't leave half-loaded modules
         for key in list(sys.modules):
             if key == "rasterstats" or key.startswith("rasterstats."):
                 del sys.modules[key]
-        importlib.invalidate_caches()
-        mod = __import__("rasterstats")
-        return hasattr(mod, "zonal_stats")
-    except ImportError:
-        return False
-    finally:
-        sys.path[:] = _saved
+        sys.modules.update(_saved_mods)
+
+
+def _rasterstats_ok():
+    ok, _ = _rasterstats_probe()
+    return ok
+
+
+def rasterstats_failure_detail():
+    """Short diagnostic when footprints need rasterstats but it is not usable."""
+    ok, detail = _rasterstats_probe()
+    return "" if ok else detail
 
 
 def find_missing(import_names):
@@ -151,26 +184,63 @@ def _install_into_target(pip_names, target_dir):
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
     uv = shutil.which("uv")
 
-    if uv:
-        cmd = [uv, "pip", "install",
-               "--target", target_dir,
-               "--python-version", py_ver] + list(pip_names)
-    else:
-        cmd = ["python3", "-m", "pip", "install",
-               "--target", target_dir] + list(pip_names)
+    attempts = []
 
-    try:
-        subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=300)
-    except subprocess.CalledProcessError as e:
+    # 1) Interpreters bundled with this QGIS (correct wheels). ``sys.executable``
+    #    is sometimes the QGIS binary on macOS — also try ``sys.prefix/bin/python*``.
+    py_candidates = []
+    pfx = getattr(sys, "prefix", "") or ""
+    if pfx:
+        for name in ("bin/python3", "bin/python"):
+            p = os.path.join(pfx, name)
+            if os.path.isfile(p):
+                py_candidates.append(p)
+    ex = getattr(sys, "executable", "") or ""
+    if ex and os.path.isfile(ex) and ex not in py_candidates:
+        py_candidates.append(ex)
+
+    pip_tail = ["-m", "pip", "install", "--upgrade", "--target", target_dir] + list(pip_names)
+    for py in py_candidates:
+        attempts.append([py] + pip_tail)
+
+    if uv:
+        attempts.append(
+            [uv, "pip", "install", "--upgrade",
+             "--target", target_dir,
+             "--python-version", py_ver]
+            + list(pip_names)
+        )
+
+    attempts.append(
+        ["python3", "-m", "pip", "install", "--upgrade", "--target", target_dir]
+        + list(pip_names)
+    )
+
+    last_out = b""
+    last_exc = None
+    for cmd in attempts:
+        try:
+            subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=300)
+            return
+        except FileNotFoundError as e:
+            last_exc = e
+            continue
+        except subprocess.CalledProcessError as e:
+            last_out = e.output or b""
+            last_exc = e
+            continue
+
+    tail = last_out.decode(errors="replace") if last_out else ""
+    if isinstance(last_exc, subprocess.CalledProcessError):
         raise RuntimeError(
-            f"Failed to install {', '.join(pip_names)}:\n"
-            f"{e.output.decode(errors='replace')}"
-        ) from e
-    except FileNotFoundError as e:
-        raise RuntimeError(
-            "Cannot find uv or pip.  Install packages manually:\n"
-            f"  uv pip install --target \"{target_dir}\" {' '.join(pip_names)}"
-        ) from e
+            f"Failed to install {', '.join(pip_names)} (tried QGIS python, uv, then python3):\n"
+            f"{tail}"
+        ) from last_exc
+    hint_py = py_candidates[0] if py_candidates else (ex or "python3")
+    raise RuntimeError(
+        "Cannot run pip (no working QGIS/python interpreter, uv, or python3). Install manually:\n"
+        f"  \"{hint_py}\" -m pip install --target \"{target_dir}\" {' '.join(pip_names)}"
+    ) from last_exc
 
 
 def _finalize_install(pip_names):

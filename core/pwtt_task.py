@@ -170,6 +170,20 @@ class PWTTRunTask(QgsTask):
                 vl = QgsVectorLayer(self.footprints_gpkg, fp_label, "ogr")
                 if vl.isValid():
                     QgsProject.instance().addMapLayer(vl)
+            # GEE map preview must run on the main thread (webbrowser.open)
+            if self.gee_viz:
+                viz_aoi = getattr(self.backend, "_viz_aoi", None)
+                viz_image = getattr(self.backend, "_viz_image", None)
+                viz_thr = getattr(self.backend, "_viz_threshold", self.damage_threshold)
+                if viz_aoi is not None and viz_image is not None:
+                    try:
+                        from .gee_pwtt import open_geemap_preview
+                        open_geemap_preview(viz_aoi, viz_image, damage_threshold=viz_thr)
+                    except Exception as e:
+                        from qgis.core import QgsMessageLog, Qgis
+                        QgsMessageLog.logMessage(
+                            f"GEE map preview failed: {e}", "PWTT", level=Qgis.Warning,
+                        )
         if not success and self.exception:
             from qgis.core import QgsMessageLog, Qgis
             QgsMessageLog.logMessage(

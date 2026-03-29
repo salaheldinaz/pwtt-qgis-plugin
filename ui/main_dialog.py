@@ -1783,21 +1783,32 @@ class PWTTControlsDock(QDockWidget):
         if self.include_footprints.isChecked():
             fp_missing, fp_pip = deps.footprint_missing()
             if fp_missing:
-                reply = QMessageBox.question(
-                    self, "PWTT",
-                    f"Building footprints require: {', '.join(fp_pip)}\n\nInstall now?",
-                    QMessageBox.Yes | QMessageBox.No,
-                )
-                if _is_message_box_yes(reply):
-                    if not deps.install_with_dialog(fp_pip, parent=self):
-                        return
-                    fp_missing, _ = deps.footprint_missing()
-                if fp_missing:
-                    QMessageBox.warning(
+                if fp_pip:
+                    reply = QMessageBox.question(
                         self, "PWTT",
-                        f"Cannot compute footprints: missing {', '.join(fp_missing)}.\n"
-                        f"Uncheck the footprints option or install the packages.",
+                        f"Building footprints require: {', '.join(fp_pip)}\n\nInstall now?",
+                        QMessageBox.Yes | QMessageBox.No,
                     )
+                    if _is_message_box_yes(reply):
+                        if not deps.install_with_dialog(fp_pip, parent=self):
+                            return
+                        fp_missing, fp_pip = deps.footprint_missing()
+                if fp_missing:
+                    detail = ""
+                    if "rasterstats" in fp_missing:
+                        detail = deps.rasterstats_failure_detail()
+                    qgis_only = [n for n in fp_missing if n not in (fp_pip or [])]
+                    msg = f"Cannot compute footprints: missing {', '.join(fp_missing)}."
+                    if qgis_only:
+                        msg += (
+                            f"\n{', '.join(qgis_only)} should be provided by QGIS — "
+                            f"check your QGIS installation."
+                        )
+                    else:
+                        msg += "\nUncheck the footprints option or install the packages."
+                    if detail:
+                        msg += f"\n\n{detail}"
+                    QMessageBox.warning(self, "PWTT", msg)
                     return
 
         # ── Create backend and authenticate ───────────────────────────────
