@@ -1,7 +1,46 @@
 # -*- coding: utf-8 -*-
-"""Bundled GEE PWTT logic (lee_filter, ttest, filter_s1) so the plugin works when installed from ZIP."""
+"""Bundled GEE PWTT logic (lee_filter, ttest, detect_damage) so the plugin works when installed from ZIP."""
 
+import math
 import ee
+
+
+def normal_cdf_approx(x_image):
+    """Approximate standard normal CDF for positive x using Abramowitz & Stegun 26.2.17.
+    Max error < 7.5e-8. Operates entirely on ee.Image objects (server-side).
+    """
+    b1 = 0.319381530
+    b2 = -0.356563782
+    b3 = 1.781477937
+    b4 = -1.882575977
+    b5 = 1.330274429
+
+    t = ee.Image.constant(1).divide(
+        ee.Image.constant(1).add(ee.Image.constant(0.2316419).multiply(x_image))
+    )
+    phi = x_image.pow(2).multiply(-0.5).exp().divide(math.sqrt(2 * math.pi))
+
+    # Horner's method: poly = t*(b1 + t*(b2 + t*(b3 + t*(b4 + t*b5))))
+    poly = t.multiply(
+        ee.Image.constant(b1).add(t.multiply(
+            ee.Image.constant(b2).add(t.multiply(
+                ee.Image.constant(b3).add(t.multiply(
+                    ee.Image.constant(b4).add(t.multiply(b5))
+                ))
+            ))
+        ))
+    )
+    return ee.Image.constant(1).subtract(phi.multiply(poly))
+
+
+def two_tailed_pvalue(t_image):
+    """Compute two-tailed p-value from absolute t-values using normal approximation.
+    Valid for large degrees of freedom (df > 30).
+    """
+    cdf = normal_cdf_approx(t_image)
+    return ee.Image.constant(2).multiply(
+        ee.Image.constant(1).subtract(cdf)
+    ).max(ee.Image.constant(1e-10))
 
 
 def lee_filter(image):
@@ -39,12 +78,15 @@ def ttest(s1, inference_start, war_start, pre_interval, post_interval):
         war_start,
     )
     post = s1.filterDate(inference_start, inference_start.advance(post_interval, "month"))
+
     pre_mean = pre.mean()
     pre_sd = pre.reduce(ee.Reducer.stdDev())
-    pre_n = ee.Number(pre.aggregate_array("orbitNumber_start").distinct().size())
+    pre_n = pre.select("VV").count()
+
     post_mean = post.mean()
     post_sd = post.reduce(ee.Reducer.stdDev())
-    post_n = ee.Number(post.aggregate_array("orbitNumber_start").distinct().size())
+    post_n = post.select("VV").count()
+
     pooled_sd = (
         pre_sd.pow(2)
         .multiply(pre_n.subtract(1))
@@ -56,10 +98,20 @@ def ttest(s1, inference_start, war_start, pre_interval, post_interval):
         ee.Image(1).divide(pre_n).add(ee.Image(1).divide(post_n)).sqrt()
     )
     change = post_mean.subtract(pre_mean).divide(denom).abs()
-    return change
+
+    # Compute two-tailed p-values (normal approx, valid for df > 30)
+    p_values = two_tailed_pvalue(change).rename(["VV_pvalue", "VH_pvalue"])
+
+    # Return t-values, p-values, and sample sizes
+    return (
+        change
+        .addBands(p_values)
+        .addBands(pre_n.toFloat().rename("n_pre"))
+        .addBands(post_n.toFloat().rename("n_post"))
+    )
 
 
-def filter_s1(
+def detect_damage(
     aoi,
     inference_start,
     war_start,
@@ -73,6 +125,7 @@ def filter_s1(
     export_scale=10,
     grid_scale=500,
     export_grid=False,
+    clip=True,
 ):
     inference_start = ee.Date(inference_start)
     war_start = ee.Date(war_start)
@@ -82,10 +135,9 @@ def filter_s1(
         .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH"))
         .filter(ee.Filter.eq("instrumentMode", "IW"))
         .filterBounds(aoi)
-        .filter(ee.Filter.contains(".geo", ee.FeatureCollection(aoi).geometry()))
         .filterDate(
-            ee.Date(inference_start),
-            ee.Date(inference_start).advance(post_interval, "months"),
+            inference_start,
+            inference_start.advance(post_interval, "months"),
         )
         .aggregate_array("relativeOrbitNumber_start")
         .distinct()
@@ -115,29 +167,51 @@ def filter_s1(
         .mean()
     )
 
-    image = ee.ImageCollection(orbits.map(map_orbit)).max()
-    image = image.addBands(
-        image.select("VV").max(image.select("VH")).rename("max_change")
-    ).select("max_change")
-    image = image.focalMedian(10, "gaussian", "meters").clip(aoi).updateMask(urban.gt(0.1))
+    orbit_images = ee.ImageCollection(orbits.map(map_orbit))
+    # Max t-value across orbits; min p-value across orbits; max sample sizes
+    t_max = orbit_images.select(["VV", "VH"]).max()
+    p_min = orbit_images.select(["VV_pvalue", "VH_pvalue"]).min()
+    n_pre = orbit_images.select("n_pre").max()
+    n_post = orbit_images.select("n_post").max()
+    image = t_max.addBands(p_min)
 
-    k50 = image.convolve(ee.Kernel.circle(50, "meters", True)).rename("k50")
-    k100 = image.convolve(ee.Kernel.circle(100, "meters", True)).rename("k100")
-    k150 = image.convolve(ee.Kernel.circle(150, "meters", True)).rename("k150")
-    damage = image.select("max_change").gt(3).rename("damage")
-    image = image.addBands(damage)
-    image = image.addBands([k50, k100, k150])
-    image = image.addBands(
-        (
-            image.select("max_change")
-            .add(image.select("k50"))
-            .add(image.select("k100"))
-            .add(image.select("k150"))
-            .divide(4)
-        ).rename("T_statistic")
+    # Combine polarizations: max t-value, min p-value
+    max_change = image.select("VV").max(image.select("VH")).rename("max_change")
+    p_value = image.select("VV_pvalue").min(image.select("VH_pvalue")).rename("p_value")
+    image = max_change.addBands(p_value)
+
+    # Bonferroni correction: multiply p-value by number of orbits, cap at 1
+    n_orbits = orbits.size()
+    p_value = p_value.multiply(n_orbits).min(ee.Image.constant(1)).rename("p_value")
+
+    # Spatial smoothing applies only to t-values
+    t_smooth = max_change.focalMedian(10, "gaussian", "meters")
+    if clip:
+        t_smooth = t_smooth.clip(aoi)
+    t_smooth = t_smooth.updateMask(urban.gt(0.1))
+
+    k50 = t_smooth.convolve(ee.Kernel.circle(50, "meters", True)).rename("k50")
+    k100 = t_smooth.convolve(ee.Kernel.circle(100, "meters", True)).rename("k100")
+    k150 = t_smooth.convolve(ee.Kernel.circle(150, "meters", True)).rename("k150")
+
+    damage = t_smooth.gt(3.3).rename("damage")
+    T_statistic = (t_smooth.add(k50).add(k100).add(k150)).divide(4).rename("T_statistic")
+
+    # Mask p-values with urban mask
+    p_value = p_value.updateMask(urban.gt(0.1))
+    if clip:
+        p_value = p_value.clip(aoi)
+
+    image = (
+        T_statistic
+        .addBands(damage)
+        .addBands(p_value)
+        .addBands(n_pre)
+        .addBands(n_post)
+        .toFloat()
     )
-    image = image.select("T_statistic", "damage").toFloat()
-    image = image.clip(aoi)
+    if clip:
+        image = image.clip(aoi)
 
     if export_grid and export_name:
         grid = aoi.geometry().bounds().coveringGrid("EPSG:3857", grid_scale)
@@ -192,3 +266,7 @@ def filter_s1(
         )
         task.start()
     return image
+
+
+# Backward-compatible alias
+filter_s1 = detect_damage

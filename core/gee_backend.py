@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Google Earth Engine backend: uses bundled gee_pwtt, downloads via getDownloadURL (streamed)."""
+"""Google Earth Engine backend: uses bundled gee_pwtt (detect_damage), downloads via getDownloadURL (streamed)."""
 
 import requests
 from typing import Optional
@@ -59,7 +59,7 @@ class GEEBackend(PWTTBackend):
 
         if progress_callback:
             progress_callback(20, "Running PWTT on Earth Engine…")
-        image = gee_pwtt.filter_s1(
+        image = gee_pwtt.detect_damage(
             aoi,
             inference_start=inference_start,
             war_start=war_start,
@@ -77,7 +77,7 @@ class GEEBackend(PWTTBackend):
                     "region": aoi_geom,
                     "scale": 10,
                     "format": "GEO_TIFF",
-                    "bands": ["T_statistic", "damage"],
+                    "bands": ["T_statistic", "damage", "p_value"],
                 }
             )
         except Exception as e:
