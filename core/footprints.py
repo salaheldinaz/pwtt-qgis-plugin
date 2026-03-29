@@ -68,37 +68,54 @@ def compute_footprints(
         ) from e
 
     # The real 'rasterstats' package may be shadowed by a QGIS plugin of the
-    # same name.  Detect this and fall back to loading from our deps directory.
+    # same name.  Use deps._rasterstats_probe which handles the shadow.
     zonal_stats = None
     try:
         from rasterstats import zonal_stats
     except ImportError:
         pass
 
-    if zonal_stats is None:
-        # Either not installed, or shadowed by a QGIS plugin that doesn't
-        # have zonal_stats.  Try loading from the plugin deps directory.
+    if zonal_stats is None or not callable(zonal_stats):
         import importlib, sys
-        from .deps import _deps_dir, ensure_on_path
+        from .deps import (
+            _deps_dir, _find_real_rasterstats_dir,
+            _purge_rasterstats_modules, ensure_on_path,
+        )
         ensure_on_path()
-        d = _deps_dir()
-        # Force re-import from deps by temporarily prioritising it
-        _saved = sys.path[:]
-        try:
-            sys.path.insert(0, d)
-            # Remove cached shadow module so Python re-discovers
-            for key in list(sys.modules):
-                if key == "rasterstats" or key.startswith("rasterstats."):
-                    del sys.modules[key]
-            importlib.invalidate_caches()
-            from rasterstats import zonal_stats
-        except ImportError:
+        real_dir = _find_real_rasterstats_dir()
+        extra_dirs = [d for d in [real_dir, _deps_dir()] if d and os.path.isdir(d)]
+        if not extra_dirs:
             raise RuntimeError(
                 "rasterstats is not installed.  Use the Install Dependencies button or run:\n"
-                "  uv pip install --target \"{}\" rasterstats".format(d)
+                "  pip install rasterstats"
             )
+        _saved = sys.path[:]
+        _saved_mods = {k: sys.modules[k] for k in list(sys.modules)
+                       if k == "rasterstats" or k.startswith("rasterstats.")}
+        loaded = False
+        try:
+            for d in extra_dirs:
+                _purge_rasterstats_modules()
+                importlib.invalidate_caches()
+                sys.path[:] = [d] + [p for p in _saved if p != d]
+                try:
+                    from rasterstats import zonal_stats
+                    if callable(zonal_stats):
+                        loaded = True
+                        break
+                except ImportError:
+                    continue
         finally:
             sys.path[:] = _saved
+            if not loaded:
+                _purge_rasterstats_modules()
+                sys.modules.update(_saved_mods)
+        if not loaded:
+            raise RuntimeError(
+                "rasterstats is not installed or is shadowed by a QGIS plugin.\n"
+                "Use the Install Dependencies button or run:\n"
+                "  pip install rasterstats"
+            )
 
     bbox = wkt_to_bbox(aoi_wkt)
     if not bbox:

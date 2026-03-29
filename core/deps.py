@@ -65,6 +65,13 @@ FOOTPRINT_DEPS = {
 
 # ── Queries ──────────────────────────────────────────────────────────────────
 
+def _purge_rasterstats_modules():
+    """Remove all cached ``rasterstats*`` entries from ``sys.modules``."""
+    for key in list(sys.modules):
+        if key == "rasterstats" or key.startswith("rasterstats."):
+            del sys.modules[key]
+
+
 def _try_import_zonal_stats():
     """Return True if ``from rasterstats import zonal_stats`` yields a callable."""
     from rasterstats import zonal_stats
@@ -73,51 +80,80 @@ def _try_import_zonal_stats():
     return True
 
 
+def _find_real_rasterstats_dir():
+    """Find a ``site-packages`` directory on ``sys.path`` that contains the
+    *real* PyPI ``rasterstats`` (i.e. has ``zonal_stats``).
+
+    A QGIS plugin named ``rasterstats`` (under ``.../python/plugins/``) can
+    shadow the real package.  We scan ``sys.path`` for ``rasterstats``
+    directories that live in ``site-packages`` and check for ``zonal_stats.py``
+    or ``zonal_stats`` in the package.
+    """
+    for entry in sys.path:
+        if "site-packages" not in entry:
+            continue
+        candidate = os.path.join(entry, "rasterstats")
+        if not os.path.isdir(candidate):
+            continue
+        # The real package has a zonal_stats sub-module
+        if (os.path.isfile(os.path.join(candidate, "zonal_stats.py"))
+                or os.path.isfile(os.path.join(candidate, "_zonal_stats.py"))
+                or os.path.isfile(os.path.join(candidate, "main.py"))):
+            return entry
+    return None
+
+
 def _rasterstats_probe():
     """Return ``(ok, detail)``.  *detail* is non-empty on failure (for error dialogs).
 
-    Mirrors ``footprints.compute_footprints``: prefer ``from rasterstats import zonal_stats``,
-    then force-load from ``_deps_dir()`` if a QGIS plugin shadows the name.
+    Strategy (mirrors ``footprints.compute_footprints``):
+      1. Normal ``from rasterstats import zonal_stats``.
+      2. If shadowed by a QGIS plugin, find the real package in site-packages,
+         temporarily prioritise that path, purge cached modules, retry.
+      3. Try from ``_deps_dir()`` as last resort.
     """
-    # 1) Try the normal import path
+    # 1) Normal import
     try:
         _try_import_zonal_stats()
         return True, ""
     except Exception as e:
         first = str(e)
 
-    # 2) Try from deps dir with path priority + module cache purge
-    ensure_on_path()
-    d = _deps_dir()
-    if not os.path.isdir(d):
-        return False, f"{first}\n(Deps folder does not exist yet: {d})"
+    # 2) Find the real rasterstats in site-packages (bypasses QGIS plugin shadow)
+    real_dir = _find_real_rasterstats_dir()
+    extra_dirs = [d for d in [real_dir, _deps_dir()] if d and os.path.isdir(d)]
+
+    if not extra_dirs:
+        ensure_on_path()
+        d = _deps_dir()
+        extra_dirs = [d] if os.path.isdir(d) else []
+
+    if not extra_dirs:
+        return False, (
+            f"{first}\n"
+            f"No site-packages rasterstats found and deps folder does not exist yet."
+        )
 
     _saved_path = sys.path[:]
     _saved_mods = {k: sys.modules[k] for k in list(sys.modules)
                    if k == "rasterstats" or k.startswith("rasterstats.")}
+    errors = [first]
     try:
-        sys.path.insert(0, d)
-        for key in list(_saved_mods):
-            del sys.modules[key]
-        importlib.invalidate_caches()
-        _try_import_zonal_stats()
-        return True, ""
-    except ImportError as e:
-        return False, (
-            f"{first}\n"
-            f"Loading from PWTT deps dir also failed: {e}\n"
-            f"Often this means packages were built for a different Python than QGIS uses. "
-            f"The plugin now installs with QGIS's interpreter first — try Install again, "
-            f"or run:\n  \"{sys.executable}\" -m pip install --target \"{d}\" rasterstats"
-        )
-    except Exception as e:
-        return False, f"{first}\nFrom deps dir: {type(e).__name__}: {e}"
+        for d in extra_dirs:
+            _purge_rasterstats_modules()
+            importlib.invalidate_caches()
+            sys.path[:] = [d] + [p for p in _saved_path if p != d]
+            try:
+                _try_import_zonal_stats()
+                return True, ""
+            except Exception as e:
+                errors.append(f"from {d}: {e}")
+                continue
+
+        return False, "\n".join(errors)
     finally:
         sys.path[:] = _saved_path
-        # Restore original module state so we don't leave half-loaded modules
-        for key in list(sys.modules):
-            if key == "rasterstats" or key.startswith("rasterstats."):
-                del sys.modules[key]
+        _purge_rasterstats_modules()
         sys.modules.update(_saved_mods)
 
 
@@ -186,8 +222,11 @@ def _install_into_target(pip_names, target_dir):
 
     attempts = []
 
-    # 1) Interpreters bundled with this QGIS (correct wheels). ``sys.executable``
-    #    is sometimes the QGIS binary on macOS — also try ``sys.prefix/bin/python*``.
+    # 1) Interpreters bundled with this QGIS (correct wheels).
+    #    On macOS ``sys.executable`` is often the QGIS binary itself
+    #    (e.g. /Applications/QGIS.app/Contents/MacOS/QGIS) — running it
+    #    with ``-m pip`` launches a *new* QGIS instance.  We look for the
+    #    actual Python under ``sys.prefix`` and the Frameworks tree first.
     py_candidates = []
     pfx = getattr(sys, "prefix", "") or ""
     if pfx:
@@ -195,9 +234,24 @@ def _install_into_target(pip_names, target_dir):
             p = os.path.join(pfx, name)
             if os.path.isfile(p):
                 py_candidates.append(p)
+    # On macOS QGIS.app the Python lives under Contents/Frameworks/
     ex = getattr(sys, "executable", "") or ""
+    if "/QGIS.app/" in ex:
+        app_root = ex.split("/QGIS.app/")[0] + "/QGIS.app/Contents"
+        for candidate in (
+            f"Frameworks/Python.framework/Versions/{sys.version_info.major}.{sys.version_info.minor}/bin/python3",
+            f"Frameworks/bin/python{sys.version_info.major}.{sys.version_info.minor}",
+            "Frameworks/bin/python3",
+            "MacOS/bin/python3",
+        ):
+            p = os.path.join(app_root, candidate)
+            if os.path.isfile(p) and p not in py_candidates:
+                py_candidates.append(p)
+    # Only add sys.executable if it's actually a Python interpreter, not the QGIS binary
     if ex and os.path.isfile(ex) and ex not in py_candidates:
-        py_candidates.append(ex)
+        basename = os.path.basename(ex).lower()
+        if "python" in basename:
+            py_candidates.append(ex)
 
     pip_tail = ["-m", "pip", "install", "--upgrade", "--target", target_dir] + list(pip_names)
     for py in py_candidates:
