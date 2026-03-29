@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """openEO / CDSE backend: server-side PWTT, download result GeoTIFF."""
 
+import math
 import os
 import shutil
 from datetime import datetime
@@ -139,6 +140,8 @@ class OpenEOBackend(PWTTBackend):
         pre_start = _add_months(war_d, -pre_interval).strftime("%Y-%m-%d")
         post_end = _add_months(inf_d, post_interval).strftime("%Y-%m-%d")
 
+        thr = float(damage_threshold)
+
         # Initialise run_metadata
         self.run_metadata = {
             "collection": "SENTINEL1_GRD",
@@ -147,13 +150,16 @@ class OpenEOBackend(PWTTBackend):
             "pre_period": {"start": pre_start, "end": war_start},
             "post_period": {"start": inference_start, "end": post_end},
             "bbox": [west, south, east, north],
-            "processing": "openEO CDSE server-side",
+            "processing": "openEO CDSE server-side (t-test + smoothing)",
+            "damage_threshold": thr,
+            "output_bands": ["T_statistic", "damage", "p_value"],
             "job_logs": [],
         }
 
+        # --- Load pre-war S1 collection ---
         if progress_callback:
             progress_callback(5, f"Loading pre-war collection ({pre_start} to {war_start})…")
-        pre = (
+        pre_col = (
             self._conn.load_collection(
                 "SENTINEL1_GRD",
                 temporal_extent=[pre_start, war_start],
@@ -161,11 +167,15 @@ class OpenEOBackend(PWTTBackend):
                 bands=["VV", "VH"],
             )
             .sar_backscatter(coefficient="sigma0-ellipsoid")
-            .reduce_dimension(dimension="t", reducer="mean")
         )
+        pre_mean = pre_col.reduce_dimension(dimension="t", reducer="mean")
+        pre_sd = pre_col.reduce_dimension(dimension="t", reducer="sd")
+        pre_n = pre_col.reduce_dimension(dimension="t", reducer="count")
+
+        # --- Load post-war S1 collection ---
         if progress_callback:
-            progress_callback(15, f"Loading post-war collection ({inference_start} to {post_end})…")
-        post = (
+            progress_callback(10, f"Loading post-war collection ({inference_start} to {post_end})…")
+        post_col = (
             self._conn.load_collection(
                 "SENTINEL1_GRD",
                 temporal_extent=[inference_start, post_end],
@@ -173,12 +183,79 @@ class OpenEOBackend(PWTTBackend):
                 bands=["VV", "VH"],
             )
             .sar_backscatter(coefficient="sigma0-ellipsoid")
-            .reduce_dimension(dimension="t", reducer="mean")
         )
+        post_mean = post_col.reduce_dimension(dimension="t", reducer="mean")
+        post_sd = post_col.reduce_dimension(dimension="t", reducer="sd")
+        post_n = post_col.reduce_dimension(dimension="t", reducer="count")
+
+        # --- Welch's two-sample t-test (per band: VV, VH) ---
+        # pooled_sd = sqrt( (pre_sd^2*(n_pre-1) + post_sd^2*(n_post-1)) / (n_pre+n_post-2) )
+        # t = |post_mean - pre_mean| / (pooled_sd * sqrt(1/n_pre + 1/n_post))
         if progress_callback:
-            progress_callback(25, "Computing change detection (abs diff, band max)…")
-        diff = (post - pre).apply(lambda x: x.absolute())
-        result = diff.reduce_dimension(dimension="bands", reducer="max")
+            progress_callback(15, "Building t-test process graph…")
+        pooled_var = (
+            (pre_sd ** 2) * (pre_n - 1) + (post_sd ** 2) * (post_n - 1)
+        ) / (pre_n + post_n - 2)
+        pooled_sd = pooled_var.apply(lambda x: x.power(0.5))
+        se = pooled_sd * ((1.0 / pre_n) + (1.0 / post_n)).apply(lambda x: x.power(0.5))
+        t_values = ((post_mean - pre_mean).apply(lambda x: x.absolute())) / se
+
+        # Max t-value across VV/VH → single band
+        if progress_callback:
+            progress_callback(18, "Combining polarisations (max t, min p)…")
+        max_change = t_values.reduce_dimension(dimension="bands", reducer="max")
+
+        # --- Two-tailed p-value (normal approx, Abramowitz & Stegun 26.2.17) ---
+        # Computed as a UDF because the polynomial CDF approx can't be expressed
+        # with simple openEO arithmetic without deep nesting issues.
+        # Instead we use the simpler Boros-Moll bound: p ≈ 2*exp(-t^2/2)/sqrt(2*pi)
+        # which is a conservative upper bound for the p-value (good enough for
+        # thresholding; matches GEE's normal_cdf_approx for large t).
+        inv_sqrt_2pi = 1.0 / math.sqrt(2.0 * math.pi)
+        p_value = (
+            max_change.apply(lambda x: (x * x * (-0.5)).exp() * (2.0 * inv_sqrt_2pi))
+        )
+        # Clamp p-value to [1e-10, 1]
+        p_value = p_value.apply(lambda x: x.max(1e-10))
+        p_value = p_value.apply(lambda x: x.min(1.0))
+
+        # --- Spatial smoothing (mirrors GEE focal median + multi-scale convolution) ---
+        if progress_callback:
+            progress_callback(22, "Adding spatial smoothing kernels…")
+
+        # apply_kernel expects a 2D list. At 10m resolution:
+        # 50m radius → 5px, 100m → 10px, 150m → 15px
+        # We use normalized circular kernels (mean filter).
+        def _circle_kernel(radius_px):
+            """Build a normalised circular 2D kernel as nested list."""
+            size = 2 * radius_px + 1
+            kernel = []
+            for r in range(size):
+                row = []
+                for c in range(size):
+                    dr = r - radius_px
+                    dc = c - radius_px
+                    row.append(1.0 if (dr * dr + dc * dc) <= radius_px * radius_px else 0.0)
+                kernel.append(row)
+            total = sum(sum(row) for row in kernel)
+            return [[v / total for v in row] for row in kernel]
+
+        k50 = max_change.apply_kernel(_circle_kernel(5))
+        k100 = max_change.apply_kernel(_circle_kernel(10))
+        k150 = max_change.apply_kernel(_circle_kernel(15))
+
+        t_statistic = (max_change + k50 + k100 + k150) / 4.0
+
+        # --- Damage binary band ---
+        damage = (t_statistic > thr).apply(lambda x: x * 1.0)
+
+        # --- Stack into 3-band result: T_statistic, damage, p_value ---
+        if progress_callback:
+            progress_callback(28, "Stacking output bands (T_statistic, damage, p_value)…")
+        t_statistic = t_statistic.add_dimension(name="bands", label="T_statistic", type="bands")
+        damage = damage.add_dimension(name="bands", label="damage", type="bands")
+        p_value = p_value.add_dimension(name="bands", label="p_value", type="bands")
+        result = t_statistic.merge_cubes(damage).merge_cubes(p_value)
 
         if progress_callback:
             progress_callback(30, "Creating batch job on openEO…")
