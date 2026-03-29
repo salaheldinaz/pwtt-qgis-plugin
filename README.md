@@ -67,12 +67,30 @@ Use the same Python that QGIS uses (e.g. from QGIS’s Python environment or OS 
 
 ## Output files
 
-- **pwtt_result.tif** — Two-band GeoTIFF:
-  - Band 1: `T_statistic` — continuous damage score (higher = more likely damaged)
-  - Band 2: `damage` — binary mask (1 where T_statistic > 3)  
-  For the local backend, nodata is set to -9999 where applicable.
+- **pwtt_*.tif** — GeoTIFF (typically **three** bands):
+  - Band 1: `T_statistic` — continuous score (higher = stronger change signal).
+  - Band 2: `damage` — binary mask where the backend applies your **T-statistic threshold** (default 3.3). **GEE and openEO do not threshold the same intermediate surface** — see [HOW_IT_WORKS.md](HOW_IT_WORKS.md#gee-vs-openeo-why-results-differ-for-the-same-aoi).
+  - Band 3: `p_value` — approximate significance (formula differs by backend).  
+  For the **Local** backend, nodata is set to -9999 where applicable.
 
 - **pwtt_footprints.gpkg** (optional) — GeoPackage with building polygons and a `T_statistic` column (mean damage score per building). Created only if **Include building footprints (OSM)** is checked.
+
+### Reading colors on the map
+
+QGIS often opens the GeoTIFF as **multiband color** (band 1 → red, band 2 → green, band 3 → blue). That **RGB blend is not** a single “damage heat map”: it mixes **T-statistic**, **binary damage (0/1)**, and **p-value**, so a given hue does **not** map one-to-one to “how damaged.”
+
+For an intuitive heat-map reading, style **band 1** (`T_statistic`) as **singleband pseudocolor** with a ramp from **cool** (blue / purple) to **hot** (yellow / green), similar to the figures in the [PWTT project README](https://github.com/oballinger/PWTT). **Min/max** (or percentile stretch) in symbology controls how strong a value must be before it looks “yellow”; adjust those if the map looks all one color.
+
+Then you can read the map in simple terms (still a **model of backscatter change**, not a survey of destroyed buildings — see the paper):
+
+| Color | What it means |
+|-------|----------------|
+| 🟡 **Yellow** | **High confidence of damage** — radar backscatter changed a lot. Strongest change signal; often interpreted as severe or certain structural change in PWTT validation settings. |
+| 🟢 **Green** | **Probable damage** — clear change in signal; likely affected. |
+| 🟤 **Dark red / maroon** | **Some change detected**, but weaker — uncertain or partial effect. |
+| 🔵 **Blue / purple** | **Little to no change** — backscatter stayed stable; likely **undamaged** in the sense of “no large pre/post shift.” |
+
+Think of it as a **heat map of destruction (as inferred from SAR change)**: hotter (yellower) pixels mean the statistic is more extreme; cooler (bluer) pixels mean little change. Use **band 2** with **singleband** / two-class symbology if you only want the binary **above/below threshold** mask.
 
 ## Parameters
 
@@ -87,19 +105,11 @@ Use the same Python that QGIS uses (e.g. from QGIS’s Python environment or OS 
 
 **Full pipeline (all backends, jobs, outputs):** [HOW_IT_WORKS.md](HOW_IT_WORKS.md).
 
-Pre/post **months** define **date ranges**, not a dense “one image per day” series. Sentinel-1 **revisits** your AOI on a **repeat cycle**; only **actual GRD acquisitions** in those ranges are used. **openEO** averages all observations in each window into temporal means; **Local** uses at most **three** pre and **three** post scenes; **GEE** uses all matching passes **per orbit**. See [HOW_IT_WORKS.md](HOW_IT_WORKS.md#sentinel-1-grd-what-data-you-actually-get).
+Pre/post **months** define **date ranges**, not a dense “one image per day” series. Sentinel-1 **revisits** your AOI on a **repeat cycle**; only **actual GRD acquisitions** in those ranges are used. **openEO** builds temporal composites (mean / variance / count) for a pooled t-style statistic; **Local** uses at most **three** pre and **three** post scenes; **GEE** uses all matching passes **per orbit**. See [HOW_IT_WORKS.md](HOW_IT_WORKS.md#sentinel-1-grd-what-data-you-actually-get).
 
-PWTT compares Sentinel-1 SAR backscatter (VV/VH) before and after a conflict using a pixel-wise pooled t-test. A high t-statistic indicates statistically significant backscatter change, often due to building damage. The pipeline:
+Conceptually, PWTT compares Sentinel-1 VV/VH **before** and **after** conflict using a **pooled t-test–style** signal plus **spatial smoothing**. **openEO**, **GEE**, and **Local** follow that idea with **different** preprocessing (e.g. Lee + log on GEE/Local vs σ⁰ ellipsoid on openEO), **orbit handling** (GEE per-orbit max vs openEO all-pass composites), **urban masking** (GEE only in this plugin), and **where the damage threshold is applied** (differs between GEE and openEO). See [HOW_IT_WORKS.md](HOW_IT_WORKS.md#gee-vs-openeo-why-results-differ-for-the-same-aoi).
 
-1. Lee speckle filter on GRD imagery  
-2. Log transform  
-3. Pixel-wise t-test (pre vs post), per orbit  
-4. Max across orbits and VV/VH  
-5. Focal median smoothing and multi-scale circular kernel averaging  
-6. Urban mask (e.g. built-up fraction > 0.1)  
-7. Damage threshold at T > 3  
-
-Details: [PWTT paper (arXiv:2405.06323)](https://arxiv.org/pdf/2405.06323).
+Paper and method background: [PWTT paper (arXiv:2405.06323)](https://arxiv.org/pdf/2405.06323).
 
 ## Building a release
 

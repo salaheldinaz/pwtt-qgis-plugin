@@ -1479,7 +1479,7 @@ class PWTTOpenEOJobsDock(QDockWidget):
 
     def __init__(self, parent=None, plugin_dir=None):
         # Short dock title (no PWTT/version suffix); server job title is in the Job ID tooltip.
-        super().__init__("openEO Jobs", parent)
+        super().__init__("PWTT \u2014 openEO Jobs", parent)
         self.setObjectName("PWTTOpenEOJobsDock")
         self.setAllowedAreas(Qt.AllDockWidgetAreas)
         self._conn = None  # openEO connection (set after auth)
