@@ -85,6 +85,10 @@ Use the same Python that QGIS uses (e.g. from QGIS’s Python environment or OS 
 
 ## How it works
 
+**Full pipeline (all backends, jobs, outputs):** [HOW_IT_WORKS.md](HOW_IT_WORKS.md).
+
+Pre/post **months** define **date ranges**, not a dense “one image per day” series. Sentinel-1 **revisits** your AOI on a **repeat cycle**; only **actual GRD acquisitions** in those ranges are used. **openEO** averages all observations in each window into temporal means; **Local** uses at most **three** pre and **three** post scenes; **GEE** uses all matching passes **per orbit**. See [HOW_IT_WORKS.md](HOW_IT_WORKS.md#sentinel-1-grd-what-data-you-actually-get).
+
 PWTT compares Sentinel-1 SAR backscatter (VV/VH) before and after a conflict using a pixel-wise pooled t-test. A high t-statistic indicates statistically significant backscatter change, often due to building damage. The pipeline:
 
 1. Lee speckle filter on GRD imagery  

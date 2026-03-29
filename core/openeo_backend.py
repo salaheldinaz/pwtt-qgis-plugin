@@ -59,8 +59,6 @@ class OpenEOBackend(PWTTBackend):
         footprints_path: Optional[str] = None,
         remote_job_id: Optional[str] = None,
     ) -> str:
-        import time
-
         # If we already have an openEO job id, resume polling it instead of
         # creating a brand-new batch job.
         if remote_job_id:
@@ -80,7 +78,7 @@ class OpenEOBackend(PWTTBackend):
         post_end = _add_months(inf_d, post_interval).strftime("%Y-%m-%d")
 
         if progress_callback:
-            progress_callback(5, "Loading pre-war collection…")
+            progress_callback(5, f"Loading pre-war collection ({pre_start} to {war_start})…")
         pre = (
             self._conn.load_collection(
                 "SENTINEL1_GRD",
@@ -92,7 +90,7 @@ class OpenEOBackend(PWTTBackend):
             .reduce_dimension(dimension="t", reducer="mean")
         )
         if progress_callback:
-            progress_callback(15, "Loading post-war collection…")
+            progress_callback(15, f"Loading post-war collection ({inference_start} to {post_end})…")
         post = (
             self._conn.load_collection(
                 "SENTINEL1_GRD",
@@ -104,20 +102,26 @@ class OpenEOBackend(PWTTBackend):
             .reduce_dimension(dimension="t", reducer="mean")
         )
         if progress_callback:
-            progress_callback(25, "Computing change…")
+            progress_callback(25, "Computing change detection (abs diff, band max)…")
         diff = (post - pre).apply(lambda x: x.absolute())
         result = diff.reduce_dimension(dimension="bands", reducer="max")
 
         if progress_callback:
-            progress_callback(30, "Creating batch job…")
+            progress_callback(30, "Creating batch job on openEO…")
         job = result.create_job(out_format="GTiff", job_options={"driver-memory": "2G"})
 
         # Store the remote job id so the caller can persist it
         self.remote_job_id = job.job_id
 
         if progress_callback:
+            progress_callback(32, f"Batch job created: {job.job_id}")
+
+        # Log initial job metadata
+        self._log_job_describe(job, progress_callback)
+
+        if progress_callback:
             progress_callback(35, f"Starting batch job {job.job_id}…")
-        job.start_job()
+        job.start()
 
         return self._poll_and_download(job.job_id, output_path, progress_callback)
 
@@ -128,59 +132,182 @@ class OpenEOBackend(PWTTBackend):
         self.remote_job_id = job_id
         job = self._conn.job(job_id)
 
-        # Check current status — if already finished, skip straight to download
+        # Get full job metadata via describe()
+        self._log_job_describe(job, progress_callback)
+
         status = job.status()
+        if progress_callback:
+            progress_callback(36, f"Current status: {status}")
+
         if status == "finished":
             if progress_callback:
                 progress_callback(80, f"Batch job {job_id} already finished. Downloading…")
-            job.get_results().download_file(output_path)
-            if progress_callback:
-                progress_callback(95, "Done.")
-            return output_path
+            return self._download_results(job, output_path, progress_callback)
 
         if status == "created":
             if progress_callback:
                 progress_callback(35, f"Starting batch job {job_id}…")
-            job.start_job()
+            job.start()
 
-        if status in ("error",):
+        if status == "error":
+            self._log_job_errors(job, progress_callback)
             raise RuntimeError(self._job_error_msg(job) or "openEO batch job failed.")
         if status in ("canceled", "cancelled"):
             raise RuntimeError("openEO batch job was cancelled.")
 
         # Poll until the server-side job completes
         poll_wait = 10
+        poll_count = 0
         while True:
             time.sleep(poll_wait)
-            status = job.status()
+            poll_count += 1
+
+            try:
+                info = job.describe()
+            except Exception as e:
+                if progress_callback:
+                    progress_callback(40, f"Connection error (will retry): {e}")
+                poll_wait = min(poll_wait + 5, 30)
+                continue
+
+            status = info.get("status", "unknown")
+            progress = info.get("progress")
+
+            # Build a detailed status line
+            parts = [f"Batch job {job_id}: {status}"]
+            if progress is not None:
+                parts.append(f"progress {progress}%")
+            msg = " — ".join(parts)
 
             if status == "finished":
+                if progress_callback:
+                    progress_callback(75, msg)
                 break
             if status == "error":
+                if progress_callback:
+                    progress_callback(40, msg)
+                self._log_job_errors(job, progress_callback)
                 raise RuntimeError(self._job_error_msg(job) or "openEO batch job failed.")
             if status in ("canceled", "cancelled"):
                 raise RuntimeError("openEO batch job was cancelled.")
 
             if progress_callback:
-                progress_callback(40, f"Batch job {job_id}: {status}")
+                # Map openEO progress to our 35-75 range
+                if progress is not None:
+                    mapped = 35 + int(float(progress) * 0.4)
+                else:
+                    mapped = 40
+                progress_callback(mapped, msg)
+
+            # Periodically fetch and show server-side logs
+            if poll_count % 3 == 0:
+                self._log_recent(job, progress_callback)
+
             poll_wait = min(poll_wait + 5, 30)
 
-        if progress_callback:
-            progress_callback(80, "Downloading result…")
-        job.get_results().download_file(output_path)
+        return self._download_results(job, output_path, progress_callback)
+
+    def _download_results(self, job, output_path, progress_callback=None):
+        """Download results and log metadata."""
+        job_id = job.job_id
 
         if progress_callback:
-            progress_callback(95, "Done.")
+            progress_callback(78, "Fetching result metadata…")
+
+        try:
+            results = job.get_results()
+            meta = results.get_metadata()
+            bbox = meta.get("bbox")
+            assets = meta.get("assets", {})
+            asset_names = list(assets.keys())
+            if progress_callback:
+                parts = [f"Result: {len(asset_names)} asset(s)"]
+                if bbox:
+                    parts.append(f"bbox={bbox}")
+                if asset_names:
+                    parts.append(f"files: {', '.join(asset_names)}")
+                progress_callback(80, " — ".join(parts))
+        except Exception as e:
+            if progress_callback:
+                progress_callback(80, f"Could not fetch result metadata: {e}")
+            results = job.get_results()
+
+        if progress_callback:
+            progress_callback(82, f"Downloading result to {output_path}…")
+        results.download_file(output_path)
+
+        if progress_callback:
+            import os
+            size_mb = os.path.getsize(output_path) / (1024 * 1024) if os.path.isfile(output_path) else 0
+            progress_callback(95, f"Download complete ({size_mb:.1f} MB). Job {job_id} done.")
         return output_path
+
+    def _log_job_describe(self, job, progress_callback=None):
+        """Fetch and log full job metadata from describe()."""
+        if not progress_callback:
+            return
+        try:
+            info = job.describe()
+            parts = []
+            for key in ("id", "status", "created", "updated", "title", "progress"):
+                val = info.get(key)
+                if val is not None and val != "":
+                    parts.append(f"{key}={val}")
+            # Show usage/costs if available
+            usage = info.get("usage")
+            if usage:
+                for k, v in usage.items():
+                    parts.append(f"{k}={v}")
+            costs = info.get("costs")
+            if costs is not None:
+                parts.append(f"costs={costs}")
+            if parts:
+                progress_callback(0, f"Job info: {', '.join(parts)}")
+        except Exception:
+            pass
+
+    def _log_job_errors(self, job, progress_callback=None):
+        """Fetch and log error-level entries from job logs."""
+        if not progress_callback:
+            return
+        try:
+            logs = job.logs(level="error")
+            for entry in logs:
+                msg = entry.get("message", "") if isinstance(entry, dict) else str(entry)
+                if msg:
+                    progress_callback(0, f"[openEO error] {msg}")
+        except Exception:
+            pass
+
+    def _log_recent(self, job, progress_callback=None):
+        """Fetch recent info/warning/error log entries from the server."""
+        if not progress_callback:
+            return
+        try:
+            logs = job.logs(level="info")
+            # Show last few entries
+            entries = list(logs)[-5:] if logs else []
+            for entry in entries:
+                if isinstance(entry, dict):
+                    lvl = entry.get("level", "info")
+                    msg = entry.get("message", "")
+                else:
+                    lvl = "info"
+                    msg = str(entry)
+                if msg:
+                    progress_callback(0, f"[openEO {lvl}] {msg}")
+        except Exception:
+            pass
 
     @staticmethod
     def _job_error_msg(job):
         try:
-            logs = job.logs()
-            return "; ".join(
-                e.get("message", "")
-                for e in (logs or [])[-5:]
-                if e.get("level") == "error"
-            )
+            logs = job.logs(level="error")
+            messages = []
+            for e in (list(logs) or [])[-5:]:
+                msg = e.get("message", "") if isinstance(e, dict) else str(e)
+                if msg:
+                    messages.append(msg)
+            return "; ".join(messages)
         except Exception:
             return ""

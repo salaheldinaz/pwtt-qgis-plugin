@@ -536,7 +536,17 @@ class PWTTJobsDock(QDockWidget):
 
         job_id = job["id"]
         self._active_tasks[job_id] = task
-        self._job_logs.setdefault(job_id, []).append("Task started\u2026")
+        bname = {"openeo": "openEO", "gee": "GEE", "local": "Local"}.get(
+            job["backend_id"], job["backend_id"]
+        )
+        remote_id = job.get("remote_job_id")
+        log_parts = [f"Task started — backend: {bname}"]
+        if remote_id:
+            log_parts.append(f"remote job: {remote_id}")
+        log_parts.append(f"dates: {job['war_start']} → {job['inference_start']}")
+        log_parts.append(f"pre: {job['pre_interval']}mo, post: {job['post_interval']}mo")
+        log_parts.append(f"output: {job['output_dir']}")
+        self._job_logs.setdefault(job_id, []).append("<br>".join(log_parts))
         self._job_progress[job_id] = 0
 
         task.taskCompleted.connect(lambda _jid=job_id: self._on_task_completed(_jid))
@@ -572,6 +582,10 @@ class PWTTJobsDock(QDockWidget):
                 existing = job_store.get_job(job_id)
                 if existing and existing.get("remote_job_id") != remote_id:
                     job_store.update_job(job_id, remote_job_id=remote_id)
+                    note = f"Remote job ID saved: {remote_id}"
+                    self._job_logs.setdefault(job_id, []).append(note)
+                    if self._get_selected_job_id() == job_id:
+                        self.log_text.append(note)
                     self._refresh_job_list()
 
     def _on_task_progress(self, job_id, value):
@@ -582,21 +596,35 @@ class PWTTJobsDock(QDockWidget):
     def _on_task_completed(self, job_id):
         from ..core import job_store
         task = self._active_tasks.pop(job_id, None)
+        output_tif = getattr(task, "output_tif", None)
+        footprints = getattr(task, "footprints_gpkg", None)
         update_fields = dict(
             status=job_store.STATUS_COMPLETED,
-            output_tif=getattr(task, "output_tif", None),
-            footprints_gpkg=getattr(task, "footprints_gpkg", None),
+            output_tif=output_tif,
+            footprints_gpkg=footprints,
         )
         remote_id = getattr(task, "remote_job_id", None)
         if remote_id:
             update_fields["remote_job_id"] = remote_id
         job_store.update_job(job_id, **update_fields)
         self._job_progress[job_id] = 100
-        self._job_logs.setdefault(job_id, []).append("Done.")
+        # Rich completion log
+        done_parts = ["<b>Task completed successfully.</b>"]
+        if output_tif:
+            try:
+                size_mb = os.path.getsize(output_tif) / (1024 * 1024)
+                done_parts.append(f"Output: {output_tif} ({size_mb:.1f} MB)")
+            except OSError:
+                done_parts.append(f"Output: {output_tif}")
+        if footprints:
+            done_parts.append(f"Footprints: {footprints}")
+        if remote_id:
+            done_parts.append(f"Remote job: {remote_id}")
+        self._job_logs.setdefault(job_id, []).append("<br>".join(done_parts))
         self._refresh_job_list()
         if self._get_selected_job_id() == job_id:
             self.progress_bar.setValue(100)
-            self.log_text.append("Done.")
+            self.log_text.append("<br>".join(done_parts))
 
     def _on_task_terminated(self, job_id):
         from ..core import job_store
@@ -615,9 +643,13 @@ class PWTTJobsDock(QDockWidget):
                 status=job_store.STATUS_WAITING_ORDERS,
                 offline_product_ids=task.offline_product_ids,
             )
+            ids_str = ", ".join(task.offline_product_ids[:5])
+            if len(task.offline_product_ids) > 5:
+                ids_str += f" (+{len(task.offline_product_ids) - 5} more)"
             self._job_logs.setdefault(job_id, []).append(
-                "Products are being staged from cold storage. "
-                "Will auto-check every 2 min and resume when available."
+                f"<b>Products offline</b> — staging from cold storage.<br>"
+                f"Product IDs: {ids_str}<br>"
+                f"Will auto-check every 2 min and resume when available."
             )
         elif task.isCanceled():
             current = job_store.get_job(job_id)
@@ -625,14 +657,18 @@ class PWTTJobsDock(QDockWidget):
                 job_store.STATUS_STOPPED, job_store.STATUS_CANCELLED
             ):
                 job_store.update_job(job_id, status=job_store.STATUS_CANCELLED)
-            self._job_logs.setdefault(job_id, []).append("Task was cancelled.")
+            msg = "Task was cancelled."
+            if remote_id:
+                msg += f" Remote job: {remote_id}"
+            self._job_logs.setdefault(job_id, []).append(msg)
         elif task.exception:
             job_store.update_job(
                 job_id, status=job_store.STATUS_FAILED, error=str(task.exception)
             )
-            self._job_logs.setdefault(job_id, []).append(
-                f"<b>Task failed:</b> {task.exception}"
-            )
+            err_parts = [f"<b>Task failed:</b> {task.exception}"]
+            if remote_id:
+                err_parts.append(f"Remote job: {remote_id}")
+            self._job_logs.setdefault(job_id, []).append("<br>".join(err_parts))
             if task.error_detail:
                 self._job_logs[job_id].append(f"<pre>{task.error_detail}</pre>")
         else:
@@ -668,12 +704,15 @@ class PWTTJobsDock(QDockWidget):
             QMessageBox.warning(self, "PWTT", str(e))
             return
         remote_id = job.get("remote_job_id")
+        prev_status = job.get("status", "?")
         if remote_id:
             self._job_logs.setdefault(job["id"], []).append(
-                f"Resuming remote job {remote_id}\u2026"
+                f"Resuming (was {prev_status}) — remote job: {remote_id}"
             )
         else:
-            self._job_logs.setdefault(job["id"], []).append("Resuming\u2026")
+            self._job_logs.setdefault(job["id"], []).append(
+                f"Resuming (was {prev_status}) — will create new remote job"
+            )
         self.launch_job(job, backend)
 
     def _stop_selected(self):
@@ -683,9 +722,13 @@ class PWTTJobsDock(QDockWidget):
             return
         task = self._active_tasks.get(job["id"])
         if task:
+            remote_id = getattr(task, "remote_job_id", None) or job.get("remote_job_id")
             job_store.update_job(job["id"], status=job_store.STATUS_STOPPED)
             task.cancel()
-            self._job_logs.setdefault(job["id"], []).append("Stopping\u2026")
+            msg = "Stopping task…"
+            if remote_id:
+                msg += f" (remote job {remote_id} will continue on server)"
+            self._job_logs.setdefault(job["id"], []).append(msg)
         self._refresh_job_list()
 
     def _cancel_selected(self):
@@ -693,11 +736,15 @@ class PWTTJobsDock(QDockWidget):
         job = self._get_selected_job()
         if not job:
             return
+        remote_id = job.get("remote_job_id")
         job_store.update_job(job["id"], status=job_store.STATUS_CANCELLED)
         task = self._active_tasks.pop(job["id"], None)
         if task:
             task.cancel()
-        self._job_logs.setdefault(job["id"], []).append("Cancelled.")
+        msg = "Cancelled."
+        if remote_id:
+            msg += f" Note: remote job {remote_id} may still be running on the server."
+        self._job_logs.setdefault(job["id"], []).append(msg)
         self._refresh_job_list()
         if self._get_selected_job_id() == job["id"]:
             self._on_job_selected()
@@ -819,6 +866,7 @@ class PWTTOpenEOJobsDock(QDockWidget):
     """List openEO batch jobs from the server and download/add results."""
 
     _jobs_loaded = pyqtSignal(list)  # emitted from worker thread
+    _log_signal = pyqtSignal(str)   # thread-safe log append
 
     def __init__(self, parent=None, plugin_dir=None):
         super().__init__(_dock_title("PWTT \u2014 openEO Jobs", plugin_dir), parent)
@@ -828,6 +876,7 @@ class PWTTOpenEOJobsDock(QDockWidget):
         self._remote_jobs = []  # list of job metadata dicts
         self._build_ui()
         self._jobs_loaded.connect(self._populate_table)
+        self._log_signal.connect(self._append_log)
 
     def _build_ui(self):
         w = QWidget()
@@ -847,9 +896,9 @@ class PWTTOpenEOJobsDock(QDockWidget):
         layout.addLayout(top_row)
 
         # Job table
-        self.job_table = QTableWidget(0, 5)
+        self.job_table = QTableWidget(0, 6)
         self.job_table.setHorizontalHeaderLabels(
-            ["Job ID", "Status", "Created", "Updated", "Title"]
+            ["Job ID", "Status", "Progress", "Created", "Updated", "Title"]
         )
         self.job_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.job_table.setSelectionMode(QTableWidget.SingleSelection)
@@ -860,7 +909,8 @@ class PWTTOpenEOJobsDock(QDockWidget):
         hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(4, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(5, QHeaderView.Stretch)
         layout.addWidget(self.job_table)
 
         # Action buttons
@@ -870,6 +920,11 @@ class PWTTOpenEOJobsDock(QDockWidget):
         self.download_btn.setToolTip("Download result GeoTIFF and add as layer")
         self.download_btn.clicked.connect(self._download_selected)
         btn_row.addWidget(self.download_btn)
+        self.logs_btn = QPushButton("Show Logs")
+        self.logs_btn.setEnabled(False)
+        self.logs_btn.setToolTip("Fetch and show server-side logs for selected job")
+        self.logs_btn.clicked.connect(self._show_selected_logs)
+        btn_row.addWidget(self.logs_btn)
         self.delete_remote_btn = QPushButton("Delete Remote Job")
         self.delete_remote_btn.setEnabled(False)
         self.delete_remote_btn.clicked.connect(self._delete_selected)
@@ -879,11 +934,14 @@ class PWTTOpenEOJobsDock(QDockWidget):
         # Log
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setMaximumHeight(100)
+        self.log_text.setMaximumHeight(140)
         layout.addWidget(self.log_text)
 
         self.job_table.itemSelectionChanged.connect(self._on_selection_changed)
         self.setWidget(w)
+
+    def _append_log(self, msg):
+        self.log_text.append(msg)
 
     # ── Auth & refresh ───────────────────────────────────────────────────────
 
@@ -891,7 +949,9 @@ class PWTTOpenEOJobsDock(QDockWidget):
         """Authenticate (if needed) and list all openEO batch jobs."""
         if not self._conn:
             try:
-                self._conn = _create_and_auth_backend("openeo", parent=self)._conn
+                backend = _create_and_auth_backend("openeo", parent=self)
+                self._conn = backend._conn
+                self.log_text.append("Connected to openEO CDSE.")
             except RuntimeError as e:
                 if str(e) != "Authentication cancelled.":
                     QMessageBox.warning(self, "PWTT", str(e))
@@ -902,6 +962,7 @@ class PWTTOpenEOJobsDock(QDockWidget):
 
         self.status_label.setText("Loading jobs\u2026")
         self.refresh_btn.setEnabled(False)
+        self.log_text.append("Fetching job list from server…")
 
         def _worker():
             try:
@@ -914,9 +975,14 @@ class PWTTOpenEOJobsDock(QDockWidget):
                         "created": j.get("created", ""),
                         "updated": j.get("updated", ""),
                         "title": j.get("title", ""),
+                        "progress": j.get("progress"),
+                        "costs": j.get("costs"),
+                        "usage": j.get("usage"),
                     })
+                self._log_signal.emit(f"Received {len(result)} job(s) from server.")
                 self._jobs_loaded.emit(result)
             except Exception as e:
+                self._log_signal.emit(f"Failed to list jobs: {e}")
                 self._jobs_loaded.emit([])
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -940,7 +1006,15 @@ class PWTTOpenEOJobsDock(QDockWidget):
             jid = j["id"]
             display_id = jid[-16:] if len(jid) > 16 else jid
             id_item = QTableWidgetItem(display_id)
-            id_item.setToolTip(jid)
+            # Build rich tooltip
+            tip_parts = [f"ID: {jid}"]
+            if j.get("costs") is not None:
+                tip_parts.append(f"Costs: {j['costs']}")
+            usage = j.get("usage")
+            if usage and isinstance(usage, dict):
+                for k, v in usage.items():
+                    tip_parts.append(f"{k}: {v}")
+            id_item.setToolTip("\n".join(tip_parts))
             id_item.setData(Qt.UserRole, jid)
             self.job_table.setItem(row, 0, id_item)
 
@@ -950,18 +1024,29 @@ class PWTTOpenEOJobsDock(QDockWidget):
             st_item.setForeground(QColor(color))
             self.job_table.setItem(row, 1, st_item)
 
+            # Progress
+            progress = j.get("progress")
+            prog_text = f"{progress}%" if progress is not None else ""
+            self.job_table.setItem(row, 2, QTableWidgetItem(prog_text))
+
             # Created
             created = (j.get("created") or "")[:19].replace("T", " ")
-            self.job_table.setItem(row, 2, QTableWidgetItem(created))
+            self.job_table.setItem(row, 3, QTableWidgetItem(created))
 
             # Updated
             updated = (j.get("updated") or "")[:19].replace("T", " ")
-            self.job_table.setItem(row, 3, QTableWidgetItem(updated))
+            self.job_table.setItem(row, 4, QTableWidgetItem(updated))
 
             # Title
-            self.job_table.setItem(row, 4, QTableWidgetItem(j.get("title") or ""))
+            self.job_table.setItem(row, 5, QTableWidgetItem(j.get("title") or ""))
 
-        self.status_label.setText(f"{len(jobs)} job(s)")
+        # Summary in status bar
+        by_status = {}
+        for j in jobs:
+            st = j.get("status", "?")
+            by_status[st] = by_status.get(st, 0) + 1
+        summary = ", ".join(f"{cnt} {st}" for st, cnt in sorted(by_status.items()))
+        self.status_label.setText(f"{len(jobs)} job(s)" + (f" ({summary})" if summary else ""))
         self.refresh_btn.setEnabled(True)
 
     # ── Selection ────────────────────────────────────────────────────────────
@@ -970,10 +1055,12 @@ class PWTTOpenEOJobsDock(QDockWidget):
         row = self.job_table.currentRow()
         if row < 0 or row >= len(self._remote_jobs):
             self.download_btn.setEnabled(False)
+            self.logs_btn.setEnabled(False)
             self.delete_remote_btn.setEnabled(False)
             return
         j = self._remote_jobs[row]
         self.download_btn.setEnabled(j["status"] == "finished")
+        self.logs_btn.setEnabled(True)
         self.delete_remote_btn.setEnabled(j["status"] not in ("running", "queued"))
 
     def _get_selected_remote_id(self):
@@ -982,6 +1069,72 @@ class PWTTOpenEOJobsDock(QDockWidget):
             return None
         item = self.job_table.item(row, 0)
         return item.data(Qt.UserRole) if item else None
+
+    # ── Show Logs ─────────────────────────────────────────────────────────────
+
+    def _show_selected_logs(self):
+        """Fetch and display server-side logs for the selected openEO job."""
+        job_id = self._get_selected_remote_id()
+        if not job_id or not self._conn:
+            return
+        self.logs_btn.setEnabled(False)
+        self.log_text.append(f"Fetching logs for {job_id}…")
+
+        def _worker():
+            try:
+                job = self._conn.job(job_id)
+                # Also fetch job metadata
+                try:
+                    info = job.describe()
+                    parts = []
+                    for key in ("id", "status", "created", "updated", "progress"):
+                        val = info.get(key)
+                        if val is not None and val != "":
+                            parts.append(f"{key}={val}")
+                    usage = info.get("usage")
+                    if usage and isinstance(usage, dict):
+                        for k, v in usage.items():
+                            parts.append(f"{k}={v}")
+                    costs = info.get("costs")
+                    if costs is not None:
+                        parts.append(f"costs={costs}")
+                    if parts:
+                        self._log_signal.emit(f"<b>Job info:</b> {', '.join(parts)}")
+                except Exception:
+                    pass
+
+                logs = job.logs()
+                entries = list(logs) if logs else []
+                if not entries:
+                    self._log_signal.emit(f"No log entries for {job_id}.")
+                else:
+                    self._log_signal.emit(f"<b>{len(entries)} log entries for {job_id}:</b>")
+                    for entry in entries[-30:]:  # last 30
+                        if isinstance(entry, dict):
+                            lvl = entry.get("level", "info")
+                            msg = entry.get("message", "")
+                            eid = entry.get("id", "")
+                        else:
+                            lvl, msg, eid = "info", str(entry), ""
+                        if not msg:
+                            continue
+                        color = {"error": "#F44336", "warning": "#FF9800"}.get(lvl, "#666")
+                        prefix = f"[{eid}] " if eid else ""
+                        self._log_signal.emit(
+                            f'<span style="color:{color}">[{lvl}]</span> {prefix}{msg}'
+                        )
+            except Exception as e:
+                self._log_signal.emit(f"Failed to fetch logs: {e}")
+
+        def _done():
+            self.logs_btn.setEnabled(True)
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        # Re-enable button after thread finishes
+        _timer = QTimer(self)
+        _timer.timeout.connect(lambda: (not t.is_alive()) and (_timer.stop(), _done()))
+        _timer.start(500)
 
     # ── Download ─────────────────────────────────────────────────────────────
 
@@ -1011,21 +1164,35 @@ class PWTTOpenEOJobsDock(QDockWidget):
                 return
 
         self.download_btn.setEnabled(False)
-        self.log_text.append(f"Downloading {job_id}\u2026")
+        self.log_text.append(f"Downloading {job_id}…")
 
         def _worker():
             try:
                 job = self._conn.job(job_id)
-                job.get_results().download_file(out_path)
-                # Signal via the log (main thread will pick up)
-                self._jobs_loaded.emit(self._remote_jobs)  # trigger UI update
+                results = job.get_results()
+                # Log result metadata
+                try:
+                    meta = results.get_metadata()
+                    bbox = meta.get("bbox")
+                    assets = meta.get("assets", {})
+                    parts = [f"{len(assets)} asset(s)"]
+                    if bbox:
+                        parts.append(f"bbox={bbox}")
+                    for name, info in assets.items():
+                        ftype = info.get("type", "")
+                        parts.append(f"{name} ({ftype})")
+                    self._log_signal.emit(f"Result metadata: {', '.join(parts)}")
+                except Exception:
+                    pass
+                results.download_file(out_path)
+                size_mb = os.path.getsize(out_path) / (1024 * 1024) if os.path.isfile(out_path) else 0
+                self._log_signal.emit(f"Downloaded {size_mb:.1f} MB to {out_path}")
             except Exception as e:
-                pass
+                self._log_signal.emit(f"Download error: {e}")
 
         def _check_done():
             if os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
                 timer.stop()
-                self.log_text.append(f"Saved: {out_path}")
                 self._add_tif_to_map(out_path, job_id)
                 self.download_btn.setEnabled(True)
             elif not t.is_alive():
@@ -1063,10 +1230,13 @@ class PWTTOpenEOJobsDock(QDockWidget):
         if reply != QMessageBox.Yes:
             return
         try:
-            self._conn.job(job_id).delete()
-            self.log_text.append(f"Deleted remote job {job_id}")
+            job = self._conn.job(job_id)
+            status = job.status()
+            job.delete()
+            self.log_text.append(f"Deleted remote job {job_id} (was {status})")
             self._refresh_jobs()
         except Exception as e:
+            self.log_text.append(f"Delete failed: {e}")
             QMessageBox.warning(self, "PWTT", f"Failed to delete: {e}")
 
 
