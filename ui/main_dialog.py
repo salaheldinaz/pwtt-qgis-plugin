@@ -296,7 +296,7 @@ def _auth_with_progress(backend, credentials, backend_id, parent=None):
             dlg.reject()
 
         worker.auth_url_ready.connect(_on_url_ready)
-        worker.finished.connect(dlg.accept)
+        worker.finished.connect(dlg.accept, Qt.QueuedConnection)
         copy_btn.clicked.connect(_on_copy)
         open_btn.clicked.connect(_on_open)
         cancel_btn.clicked.connect(_on_cancel)
@@ -349,7 +349,10 @@ def _auth_with_progress(backend, credentials, backend_id, parent=None):
             prog_cancel_clicked[0] = True
 
         dlg.canceled.connect(_on_progress_dialog_cancel)
-        worker.finished.connect(dlg.close)
+        # QThread.finished fires from the worker thread; dlg.close() must run on
+        # the GUI thread.  Without QueuedConnection the slot is never delivered
+        # while exec_() blocks the main event loop → dialog hangs forever.
+        worker.finished.connect(dlg.close, Qt.QueuedConnection)
         worker.start()
         dlg.exec_()
 
