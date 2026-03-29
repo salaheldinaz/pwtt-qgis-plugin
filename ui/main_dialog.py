@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """PWTT dock panels: controls and jobs."""
 
+import glob
 import os
 import threading
 from qgis.PyQt.QtWidgets import (
@@ -527,18 +528,23 @@ class PWTTJobsDock(QDockWidget):
 
         # Action buttons
         btn_row = QHBoxLayout()
-        self.load_btn = QPushButton("Load")
+        self.load_btn = QPushButton("Load parameters")
+        self.load_local_btn = QPushButton("Load Local")
         self.resume_btn = QPushButton("Resume")
         self.stop_btn = QPushButton("Stop")
         self.cancel_btn = QPushButton("Cancel")
         self.rerun_btn = QPushButton("Rerun")
         self.delete_btn = QPushButton("Delete")
-        for btn in (self.load_btn, self.resume_btn, self.stop_btn, self.cancel_btn,
-                     self.rerun_btn, self.delete_btn):
+        for btn in (self.load_btn, self.load_local_btn, self.resume_btn, self.stop_btn,
+                     self.cancel_btn, self.rerun_btn, self.delete_btn):
             btn.setEnabled(False)
             btn_row.addWidget(btn)
         self.load_btn.setToolTip("Load job AOI to map and parameters to controls panel")
+        self.load_local_btn.setToolTip(
+            "If the result GeoTIFF (and footprints) exist on disk, add them to the map"
+        )
         self.load_btn.clicked.connect(self._load_selected)
+        self.load_local_btn.clicked.connect(self._load_local_selected)
         self.resume_btn.clicked.connect(self._resume_selected)
         self.stop_btn.clicked.connect(self._stop_selected)
         self.cancel_btn.clicked.connect(self._cancel_selected)
@@ -679,7 +685,7 @@ class PWTTJobsDock(QDockWidget):
         from ..core import job_store
         job = self._get_selected_job()
         if not job:
-            for btn in (self.load_btn, self.resume_btn, self.stop_btn,
+            for btn in (self.load_btn, self.load_local_btn, self.resume_btn, self.stop_btn,
                          self.cancel_btn, self.rerun_btn, self.delete_btn):
                 btn.setEnabled(False)
             self.log_text.clear()
@@ -688,6 +694,7 @@ class PWTTJobsDock(QDockWidget):
 
         st = job["status"]
         self.load_btn.setEnabled(True)
+        self.load_local_btn.setEnabled(True)
         self.resume_btn.setEnabled(st in job_store.RESUMABLE_STATUSES)
         self.stop_btn.setEnabled(st == job_store.STATUS_RUNNING)
         self.cancel_btn.setEnabled(
@@ -923,6 +930,100 @@ class PWTTJobsDock(QDockWidget):
         if not self.controls_dock:
             return
         self.controls_dock.load_job_params(job)
+
+    def _load_local_selected(self):
+        """Add on-disk result raster and footprint layers for the selected job, if they exist."""
+        job = self._get_selected_job()
+        if not job:
+            return
+        jid = job["id"]
+        out_dir = (job.get("output_dir") or "").strip()
+
+        tif_path = None
+        for cand in (
+            job.get("output_tif"),
+            os.path.join(out_dir, f"pwtt_{jid}.tif") if out_dir else None,
+        ):
+            if cand and os.path.isfile(cand) and os.path.getsize(cand) > 0:
+                tif_path = cand
+                break
+
+        if not tif_path:
+            hint = os.path.join(out_dir, f"pwtt_{jid}.tif") if out_dir else "(set output folder)"
+            QMessageBox.information(
+                self,
+                "PWTT",
+                "No local result GeoTIFF found for this job.\n\n"
+                "Checked the path stored on the job (if any) and:\n"
+                f"  {hint}",
+            )
+            return
+
+        from qgis.core import QgsRasterLayer, QgsVectorLayer
+
+        from ..core.qgis_layer_tree import (
+            add_map_layer_to_pwtt_job_group,
+            pwtt_damage_layer_name,
+            pwtt_footprints_layer_name,
+        )
+        from ..core.qgis_output_style import (
+            damage_threshold_from_job_meta,
+            style_pwtt_footprints_layer,
+            style_pwtt_raster_layer,
+        )
+
+        backend_id = job.get("backend_id")
+        project = QgsProject.instance()
+        thr = damage_threshold_from_job_meta(
+            tif_path, default=float(job.get("damage_threshold", 3.3))
+        )
+
+        label = pwtt_damage_layer_name(jid, backend_id)
+        rlayer = QgsRasterLayer(tif_path, label, "gdal")
+        if not rlayer.isValid():
+            QMessageBox.warning(
+                self, "PWTT", f"Could not open raster as a QGIS layer:\n{tif_path}"
+            )
+            return
+        style_pwtt_raster_layer(rlayer, damage_threshold=thr)
+        add_map_layer_to_pwtt_job_group(project, rlayer, jid, backend_id)
+        log_parts = [f"Load Local: added {label}"]
+
+        fp_items = []
+        gpkgs = job.get("footprints_gpkgs") or {}
+        if isinstance(gpkgs, dict):
+            for src, pth in gpkgs.items():
+                if pth and os.path.isfile(pth) and os.path.getsize(pth) > 0:
+                    fp_items.append((src, pth))
+        if not fp_items:
+            legacy = job.get("footprints_gpkg")
+            if legacy and os.path.isfile(legacy) and os.path.getsize(legacy) > 0:
+                fp_items.append((None, legacy))
+        if not fp_items and out_dir:
+            prefix = f"pwtt_{jid}_footprints_"
+            suffix_to_source = {"war": "historical_war_start", "infer": "historical_inference_start"}
+            for pth in sorted(glob.glob(os.path.join(glob.escape(out_dir), prefix + "*.gpkg"))):
+                base = os.path.basename(pth)
+                if not base.startswith(prefix) or not base.endswith(".gpkg"):
+                    continue
+                suf = base[len(prefix) : -len(".gpkg")]
+                src = suffix_to_source.get(suf, suf)
+                fp_items.append((src, pth))
+
+        for src, pth in fp_items:
+            fp_label = pwtt_footprints_layer_name(jid, backend_id, src)
+            vl = QgsVectorLayer(pth, fp_label, "ogr")
+            if vl.isValid():
+                style_pwtt_footprints_layer(vl)
+                add_map_layer_to_pwtt_job_group(project, vl, jid, backend_id)
+                log_parts.append(f"Load Local: added {fp_label}")
+            else:
+                log_parts.append(f"Load Local: skipped invalid footprints \u2014 {pth}")
+
+        msg = "<br>".join(log_parts)
+        self._job_logs.setdefault(jid, []).append(msg)
+        if self._get_selected_job_id() == jid:
+            self.log_text.append(msg)
 
     def _resume_selected(self):
         job = self._get_selected_job()
@@ -1970,6 +2071,10 @@ class PWTTControlsDock(QDockWidget):
         cred_group = QGroupBox("Credentials")
         cred_layout = QVBoxLayout(cred_group)
         cred_layout.addWidget(self._hint("Login details for the selected backend."))
+        self.cred_storage_label = QLabel("")
+        self.cred_storage_label.setWordWrap(True)
+        self.cred_storage_label.setStyleSheet("font-size: 0.9em;")
+        cred_layout.addWidget(self.cred_storage_label)
         self.cred_stacked = QStackedWidget()
 
         oe_page = QWidget()
@@ -2211,6 +2316,84 @@ class PWTTControlsDock(QDockWidget):
 
         self.damage_mask_group.setVisible(True)
         self.gee_preview_group.setVisible(backend_id == "gee")
+        self._refresh_cred_storage_indicator()
+
+    @staticmethod
+    def _saved_credentials_snapshot():
+        """Non-secret flags for what is persisted under PWTT/ in QgsSettings."""
+        s = QgsSettings()
+        s.beginGroup("PWTT")
+        cid = (s.value("openeo_client_id", "") or "").strip()
+        csec = (s.value("openeo_client_secret", "") or "").strip()
+        gee = (s.value("gee_project", "") or "").strip()
+        cu = (s.value("cdse_username", "") or "").strip()
+        cp = (s.value("cdse_password", "") or "").strip()
+        s.endGroup()
+        return {
+            "openeo_id": bool(cid),
+            "openeo_secret": bool(csec),
+            "gee_project": bool(gee),
+            "cdse_user": bool(cu),
+            "cdse_pass": bool(cp),
+        }
+
+    def _refresh_cred_storage_indicator(self):
+        """Show whether credentials for the current backend exist in QGIS settings."""
+        if not hasattr(self, "cred_storage_label"):
+            return
+        snap = self._saved_credentials_snapshot()
+        bid = self.backend_combo.currentData()
+        if bid == "openeo":
+            if snap["openeo_id"] and snap["openeo_secret"]:
+                self.cred_storage_label.setText(
+                    "Stored: client ID & secret in QGIS settings (client-credentials flow)."
+                )
+                self.cred_storage_label.setStyleSheet("color: #2e7d32; font-size: 0.9em;")
+            elif snap["openeo_id"] or snap["openeo_secret"]:
+                self.cred_storage_label.setText(
+                    "Stored: incomplete client credentials in settings (need both ID and secret)."
+                )
+                self.cred_storage_label.setStyleSheet("color: #e65100; font-size: 0.9em;")
+            else:
+                self.cred_storage_label.setText(
+                    "Not stored: no client credentials in settings — Run uses browser sign-in (OIDC)."
+                )
+                self.cred_storage_label.setStyleSheet("color: gray; font-size: 0.9em;")
+        elif bid == "gee":
+            if snap["gee_project"]:
+                self.cred_storage_label.setText(
+                    "Stored: GEE project name in QGIS settings."
+                )
+                self.cred_storage_label.setStyleSheet("color: #2e7d32; font-size: 0.9em;")
+            else:
+                self.cred_storage_label.setText(
+                    "Not stored: no GEE project in settings yet."
+                )
+                self.cred_storage_label.setStyleSheet("color: gray; font-size: 0.9em;")
+        elif bid == "local":
+            if snap["cdse_user"] and snap["cdse_pass"]:
+                self.cred_storage_label.setText(
+                    "Stored: CDSE username & password in QGIS settings."
+                )
+                self.cred_storage_label.setStyleSheet("color: #2e7d32; font-size: 0.9em;")
+            elif snap["cdse_user"]:
+                self.cred_storage_label.setText(
+                    "Partial: username in settings; password not saved."
+                )
+                self.cred_storage_label.setStyleSheet("color: #e65100; font-size: 0.9em;")
+            elif snap["cdse_pass"]:
+                self.cred_storage_label.setText(
+                    "Partial: password in settings; username not saved."
+                )
+                self.cred_storage_label.setStyleSheet("color: #e65100; font-size: 0.9em;")
+            else:
+                self.cred_storage_label.setText(
+                    "Not stored: no CDSE credentials in QGIS settings."
+                )
+                self.cred_storage_label.setStyleSheet("color: gray; font-size: 0.9em;")
+        else:
+            self.cred_storage_label.clear()
+            self.cred_storage_label.setStyleSheet("font-size: 0.9em;")
 
     def _install_backend_deps(self):
         """Install missing backend packages via the deps module."""
@@ -2446,6 +2629,7 @@ class PWTTControlsDock(QDockWidget):
             s.value("gee_map_preview", False, type=bool)
         )
         s.endGroup()
+        self._refresh_cred_storage_indicator()
 
     def _save_settings(self):
         s = QgsSettings()
@@ -2460,6 +2644,7 @@ class PWTTControlsDock(QDockWidget):
         s.setValue("damage_threshold", self.damage_threshold_spin.value())
         s.setValue("gee_map_preview", self.gee_map_preview_cb.isChecked())
         s.endGroup()
+        self._refresh_cred_storage_indicator()
 
     def closeEvent(self, event):
         self.cleanup_map_canvas()
