@@ -349,10 +349,18 @@ def _auth_with_progress(backend, credentials, backend_id, parent=None):
             prog_cancel_clicked[0] = True
 
         dlg.canceled.connect(_on_progress_dialog_cancel)
-        # QThread.finished fires from the worker thread; dlg.close() must run on
-        # the GUI thread.  Without QueuedConnection the slot is never delivered
-        # while exec_() blocks the main event loop → dialog hangs forever.
-        worker.finished.connect(dlg.close, Qt.QueuedConnection)
+
+        def _dismiss_auth_progress():
+            # close() often emits canceled() on macOS/Qt; that must not count as
+            # user cancel or _run exits with "Authentication cancelled." silently.
+            try:
+                dlg.canceled.disconnect()
+            except Exception:
+                pass
+            dlg.close()
+
+        # QThread.finished fires from the worker thread; dismiss must run on GUI.
+        worker.finished.connect(_dismiss_auth_progress, Qt.QueuedConnection)
         worker.start()
         dlg.exec_()
 
@@ -2729,6 +2737,10 @@ class PWTTControlsDock(QDockWidget):
         except RuntimeError as e:
             if str(e) != "Authentication cancelled.":
                 QMessageBox.warning(self, "PWTT", str(e))
+            else:
+                self.iface.messageBar().pushMessage(
+                    "PWTT", "Authentication cancelled.", level=Qgis.Info, duration=5,
+                )
             return
         except Exception as e:
             QMessageBox.warning(self, "PWTT", str(e))
