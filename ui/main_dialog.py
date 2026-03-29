@@ -92,6 +92,14 @@ def _dock_title(base, plugin_dir):
     return f"{base} ({v})" if v else base
 
 
+def _is_message_box_yes(reply):
+    """Reliable Yes detection across PyQt5/6 (``QMessageBox.question`` return values)."""
+    try:
+        return (int(reply) & int(QMessageBox.Yes)) != 0
+    except (TypeError, ValueError):
+        return reply == QMessageBox.Yes
+
+
 def _get_backend_class(backend_id):
     try:
         if backend_id == "openeo":
@@ -1757,7 +1765,7 @@ class PWTTControlsDock(QDockWidget):
                 f"Missing packages: {', '.join(pip_names)}\n\nInstall now?",
                 QMessageBox.Yes | QMessageBox.No,
             )
-            if reply == QMessageBox.Yes:
+            if _is_message_box_yes(reply):
                 if not deps.install_with_dialog(pip_names, parent=self):
                     return
                 # Re-check after install
@@ -1780,7 +1788,7 @@ class PWTTControlsDock(QDockWidget):
                     f"Building footprints require: {', '.join(fp_pip)}\n\nInstall now?",
                     QMessageBox.Yes | QMessageBox.No,
                 )
-                if reply == QMessageBox.Yes:
+                if _is_message_box_yes(reply):
                     if not deps.install_with_dialog(fp_pip, parent=self):
                         return
                     fp_missing, _ = deps.footprint_missing()

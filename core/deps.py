@@ -140,31 +140,24 @@ def footprint_missing():
 
 # ── Installation ─────────────────────────────────────────────────────────────
 
-def install(pip_names):
-    """Install *pip_names* into the plugin deps directory.
-
-    Uses ``uv pip install --target`` when *uv* is on PATH (fast, resolves for
-    the correct Python version).  Falls back to ``python3 -m pip install
-    --target``.  Raises `RuntimeError` on failure.
-    """
+def _install_into_target(pip_names, target_dir):
+    """Run pip/uv only (no QGIS/Qt). Safe to call from a ``QThread``."""
     pip_names = list(pip_names)
     if not pip_names:
         raise RuntimeError("No packages specified for install.")
 
-    d = _deps_dir()
-    os.makedirs(d, exist_ok=True)
+    os.makedirs(target_dir, exist_ok=True)
 
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
     uv = shutil.which("uv")
 
     if uv:
         cmd = [uv, "pip", "install",
-               "--target", d,
+               "--target", target_dir,
                "--python-version", py_ver] + list(pip_names)
     else:
-        # System python3 (not QGIS's — that one can't run standalone)
         cmd = ["python3", "-m", "pip", "install",
-               "--target", d] + list(pip_names)
+               "--target", target_dir] + list(pip_names)
 
     try:
         subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=300)
@@ -173,19 +166,37 @@ def install(pip_names):
             f"Failed to install {', '.join(pip_names)}:\n"
             f"{e.output.decode(errors='replace')}"
         ) from e
-    except FileNotFoundError:
+    except FileNotFoundError as e:
         raise RuntimeError(
             "Cannot find uv or pip.  Install packages manually:\n"
-            f"  uv pip install --target \"{d}\" {' '.join(pip_names)}"
-        )
+            f"  uv pip install --target \"{target_dir}\" {' '.join(pip_names)}"
+        ) from e
 
+
+def _finalize_install(pip_names):
+    """Update ``sys.path`` and drop stale *rasterstats* imports (main thread only)."""
     ensure_on_path()
     importlib.invalidate_caches()
+    pip_names = list(pip_names)
     if "rasterstats" in pip_names:
         for key in list(sys.modules):
             if key == "rasterstats" or key.startswith("rasterstats."):
                 del sys.modules[key]
         importlib.invalidate_caches()
+
+
+def install(pip_names):
+    """Install *pip_names* into the plugin deps directory.
+
+    Uses ``uv pip install --target`` when *uv* is on PATH (fast, resolves for
+    the correct Python version).  Falls back to ``python3 -m pip install
+    --target``.  Raises `RuntimeError` on failure.
+
+    Must run on the **Qt main thread** (uses ``QgsApplication`` for paths).
+    """
+    d = _deps_dir()
+    _install_into_target(pip_names, d)
+    _finalize_install(pip_names)
 
 
 def install_with_dialog(pip_names, parent=None):
@@ -202,15 +213,20 @@ def install_with_dialog(pip_names, parent=None):
         )
         return False
 
+    # Resolve install dir on the Qt main thread — never call QgsApplication from QThread.
+    target_dir = _deps_dir()
+    os.makedirs(target_dir, exist_ok=True)
+
     class _Worker(QThread):
-        def __init__(self, names):
+        def __init__(self, names, tdir):
             super().__init__()
             self.names = names
+            self.tdir = tdir
             self.error = None
 
         def run(self):
             try:
-                install(self.names)
+                _install_into_target(self.names, self.tdir)
             except Exception as e:
                 self.error = str(e)
 
@@ -221,8 +237,17 @@ def install_with_dialog(pip_names, parent=None):
     dlg.setWindowModality(Qt.ApplicationModal)
     dlg.setMinimumDuration(0)
 
-    worker = _Worker(pip_names)
-    worker.finished.connect(dlg.close)
+    worker = _Worker(pip_names, target_dir)
+
+    def _on_worker_finished():
+        if dlg.wasCanceled():
+            return
+        if worker.error:
+            dlg.reject()
+        else:
+            dlg.accept()
+
+    worker.finished.connect(_on_worker_finished, Qt.QueuedConnection)
     worker.start()
     dlg.show()
     dlg.raise_()
@@ -230,12 +255,14 @@ def install_with_dialog(pip_names, parent=None):
     QApplication.processEvents()
     dlg.exec_()
 
+    worker.wait(600_000)
+
     if dlg.wasCanceled():
-        worker.wait(5000)
         return False
 
-    worker.wait()
     if worker.error:
         QMessageBox.critical(parent, "PWTT", worker.error)
         return False
+
+    _finalize_install(pip_names)
     return True
