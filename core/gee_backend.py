@@ -79,7 +79,6 @@ class GEEBackend(PWTTBackend):
         if gee_viz:
             self._viz_aoi = aoi
             self._viz_image = image
-            self._viz_threshold = damage_threshold
 
         if progress_callback:
             progress_callback(60, "Requesting download URL…")

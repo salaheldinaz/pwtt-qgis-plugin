@@ -227,11 +227,10 @@ class PWTTRunTask(QgsTask):
             if self.gee_viz:
                 viz_aoi = getattr(self.backend, "_viz_aoi", None)
                 viz_image = getattr(self.backend, "_viz_image", None)
-                viz_thr = getattr(self.backend, "_viz_threshold", self.damage_threshold)
                 if viz_aoi is not None and viz_image is not None:
                     try:
                         from .gee_pwtt import open_geemap_preview
-                        open_geemap_preview(viz_aoi, viz_image, damage_threshold=viz_thr, output_dir=self.output_dir)
+                        open_geemap_preview(viz_aoi, viz_image, output_dir=self.output_dir)
                     except Exception as e:
                         from qgis.core import QgsMessageLog, Qgis
                         QgsMessageLog.logMessage(

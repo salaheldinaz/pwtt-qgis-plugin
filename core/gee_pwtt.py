@@ -10,6 +10,11 @@ import ee
 
 DEFAULT_DAMAGE_THRESHOLD = 3.3
 
+# T_statistic tile/map styling — must match code/pwtt.py detect_damage viz branch.
+T_STATISTIC_VIZ_MIN = 3.0
+T_STATISTIC_VIZ_MAX = 5.0
+T_STATISTIC_VIZ_OPACITY = 0.5
+
 
 def normal_cdf_approx(x_image):
     """Approximate standard normal CDF for positive x using Abramowitz & Stegun 26.2.17.
@@ -120,7 +125,6 @@ def ttest(s1, inference_start, war_start, pre_interval, post_interval):
 def open_geemap_preview(
     aoi,
     image,
-    damage_threshold: float = DEFAULT_DAMAGE_THRESHOLD,
     output_dir: str = None,
 ) -> None:
     """Build a standalone Leaflet map and open it in the default browser (QGIS / desktop use).
@@ -129,14 +133,14 @@ def open_geemap_preview(
     widget dependencies.  CartoDB Positron tiles are used as the basemap to avoid
     the Referer requirement imposed by OpenStreetMap's volunteer-run tile servers.
 
+    T_statistic stretch (min/max/opacity) matches ``code/pwtt.py`` Earth Engine viz.
+
     If *output_dir* is given the HTML is saved there as ``pwtt_gee_preview.html``
     (in addition to being opened in the browser); otherwise a system temp file is used.
     """
-    vmin = float(damage_threshold)
-    vmax = vmin + 2.0
     vis_params = {
-        "min": vmin,
-        "max": vmax,
+        "min": T_STATISTIC_VIZ_MIN,
+        "max": T_STATISTIC_VIZ_MAX,
         "palette": ["yellow", "red", "purple"],
     }
 
@@ -188,7 +192,7 @@ def open_geemap_preview(
       attribution: 'Google Earth Engine',
       maxZoom: 20,
       maxNativeZoom: 14,
-      opacity: 0.7
+      opacity: {T_STATISTIC_VIZ_OPACITY}
     }}
   ).addTo(map);
 
@@ -334,16 +338,19 @@ def detect_damage(
 
             Map = geemap.Map()
             Map.add_basemap("SATELLITE")
-            vmin = float(damage_threshold)
-            vmax = vmin + 2.0
             Map.addLayer(
                 image.select("T_statistic"),
-                {"min": vmin, "max": vmax, "opacity": 0.5, "palette": ["yellow", "red", "purple"]},
+                {
+                    "min": T_STATISTIC_VIZ_MIN,
+                    "max": T_STATISTIC_VIZ_MAX,
+                    "opacity": T_STATISTIC_VIZ_OPACITY,
+                    "palette": ["yellow", "red", "purple"],
+                },
                 "T-test",
             )
             Map.centerObject(aoi)
             return Map
-        open_geemap_preview(aoi, image, damage_threshold=damage_threshold)
+        open_geemap_preview(aoi, image)
 
     if footprints is not None:
         fc = ee.FeatureCollection(footprints).filterBounds(aoi)
