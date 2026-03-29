@@ -52,8 +52,8 @@ BACKEND_DEPS = {
     "openeo": {"import": ["openeo"], "pip": ["openeo"]},
     "gee":    {"import": ["ee"],     "pip": ["earthengine-api"]},
     "local":  {
-        "import": ["numpy", "scipy", "rasterio", "requests"],
-        "pip":    [],  # all QGIS-provided
+        "import": ["numpy", "rasterio", "requests"],
+        "pip":    [],  # all QGIS-provided; scipy not required (numpy-only ops)
     },
 }
 

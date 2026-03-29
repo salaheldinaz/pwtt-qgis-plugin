@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Full-local backend: CDSE download, Lee filter (scipy), t-test (numpy), post-process, rasterio output."""
+"""Full-local backend: CDSE download, Lee filter, t-test (numpy), post-process, rasterio output."""
 
 import os
 from datetime import datetime
@@ -7,6 +7,12 @@ import numpy as np
 from typing import Optional
 from .base_backend import PWTTBackend
 from .downloader import get_token, search_s1_grd, download_product, find_vv_vh_in_safe
+from .local_numpy_ops import (
+    convolve2d_edge,
+    gaussian_filter2d_edge,
+    two_sided_normal_p_value,
+    uniform_filter2d_edge,
+)
 from .utils import wkt_to_bbox
 
 
@@ -20,11 +26,10 @@ def _add_months_dt(d: datetime, months: int) -> datetime:
 
 def _lee_filter(band: np.ndarray, kernel_radius: int = 1, enl: float = 5.0) -> np.ndarray:
     """Lee speckle filter (MMSE). band: 2D float. Returns filtered 2D array."""
-    from scipy.ndimage import uniform_filter
+    ksz = 2 * kernel_radius + 1
     eta = 1.0 / np.sqrt(enl)
-    one = np.ones_like(band)
-    mean = uniform_filter(band, size=2 * kernel_radius + 1, mode="nearest")
-    mean_sq = uniform_filter(band ** 2, size=2 * kernel_radius + 1, mode="nearest")
+    mean = uniform_filter2d_edge(band, ksz)
+    mean_sq = uniform_filter2d_edge(band ** 2, ksz)
     var = mean_sq - mean ** 2
     var = np.maximum(var, 1e-12)
     varx = (var - (mean ** 2) * (eta ** 2)) / (1 + eta ** 2)
@@ -34,9 +39,8 @@ def _lee_filter(band: np.ndarray, kernel_radius: int = 1, enl: float = 5.0) -> n
 
 def _focal_median_gaussian(data: np.ndarray, sigma_m: float, pixel_size: float) -> np.ndarray:
     """Gaussian smoothing approximating focal median in meters. sigma_m in meters."""
-    from scipy.ndimage import gaussian_filter
     sigma_px = max(1.0, sigma_m / pixel_size)
-    return gaussian_filter(data, sigma=sigma_px, mode="nearest")
+    return gaussian_filter2d_edge(data, sigma_px)
 
 
 def _circle_kernel(radius_m: float, pixel_size: float) -> np.ndarray:
@@ -56,11 +60,11 @@ class LocalBackend(PWTTBackend):
         return "local"
 
     def check_dependencies(self):
-        for pkg in ("numpy", "scipy", "rasterio", "requests"):
+        for pkg in ("numpy", "rasterio", "requests"):
             try:
                 __import__(pkg)
             except ImportError:
-                return False, f"Local backend requires: pip install numpy scipy rasterio requests"
+                return False, f"Local backend requires: pip install numpy rasterio requests"
         return True, ""
 
     def authenticate(self, credentials: dict) -> bool:
@@ -95,7 +99,6 @@ class LocalBackend(PWTTBackend):
             raise ValueError("Not authenticated. Call authenticate() first.")
         import rasterio
         from rasterio.warp import reproject, Resampling
-        from scipy.ndimage import convolve
 
         bbox = wkt_to_bbox(aoi_wkt)
         if not bbox:
@@ -271,9 +274,8 @@ class LocalBackend(PWTTBackend):
         max_change = np.maximum(t_vv, t_vh)
 
         # Compute two-tailed p-values (normal approximation, valid for df > 30)
-        from scipy.stats import norm
-        p_vv = 2.0 * norm.sf(t_vv)  # sf = 1 - cdf (survival function)
-        p_vh = 2.0 * norm.sf(t_vh)
+        p_vv = two_sided_normal_p_value(t_vv)
+        p_vh = two_sided_normal_p_value(t_vh)
         p_value = np.minimum(p_vv, p_vh)
         p_value = np.clip(p_value, 1e-10, 1.0)
 
@@ -284,9 +286,9 @@ class LocalBackend(PWTTBackend):
             k = _circle_kernel(radius_m, pixel_size)
             k = k / (k.sum() + 1e-12)
             return k
-        k50 = convolve(max_change, _mean_kernel(50), mode="nearest")
-        k100 = convolve(max_change, _mean_kernel(100), mode="nearest")
-        k150 = convolve(max_change, _mean_kernel(150), mode="nearest")
+        k50 = convolve2d_edge(max_change, _mean_kernel(50))
+        k100 = convolve2d_edge(max_change, _mean_kernel(100))
+        k150 = convolve2d_edge(max_change, _mean_kernel(150))
         t_statistic = (max_change + k50 + k100 + k150) / 4.0
         damage = (t_statistic > float(damage_threshold)).astype(np.float32)
 
