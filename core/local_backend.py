@@ -267,6 +267,13 @@ class LocalBackend(PWTTBackend):
         t_vh = np.abs(post_mean_vh - pre_mean_vh) / denom_vh
         max_change = np.maximum(t_vv, t_vh)
 
+        # Compute two-tailed p-values (normal approximation, valid for df > 30)
+        from scipy.stats import norm
+        p_vv = 2.0 * norm.sf(t_vv)  # sf = 1 - cdf (survival function)
+        p_vh = 2.0 * norm.sf(t_vh)
+        p_value = np.minimum(p_vv, p_vh)
+        p_value = np.clip(p_value, 1e-10, 1.0)
+
         if progress_callback:
             progress_callback(70, "Post-processing…")
         max_change = _focal_median_gaussian(max_change, 10.0, pixel_size)
@@ -278,20 +285,21 @@ class LocalBackend(PWTTBackend):
         k100 = convolve(max_change, _mean_kernel(100), mode="nearest")
         k150 = convolve(max_change, _mean_kernel(150), mode="nearest")
         t_statistic = (max_change + k50 + k100 + k150) / 4.0
-        damage = (t_statistic > 3).astype(np.float32)
+        damage = (t_statistic > 3.3).astype(np.float32)
 
         if progress_callback:
             progress_callback(90, "Writing GeoTIFF…")
         out_profile = ref_profile.copy()
         out_profile.update(
             dtype=rasterio.float32,
-            count=2,
+            count=3,
             compress="lzw",
             nodata=-9999,
         )
         with rasterio.open(output_path, "w", **out_profile) as dst:
             dst.write(t_statistic.astype(np.float32), 1)
             dst.write(damage, 2)
+            dst.write(p_value.astype(np.float32), 3)
 
         # Finalize run_metadata with output details
         self.run_metadata["output_size_bytes"] = os.path.getsize(output_path)
