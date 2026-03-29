@@ -114,6 +114,14 @@ def _dock_title(base, plugin_dir):
     return f"{base} ({v})" if v else base
 
 
+def _job_footprints_sources(job: dict) -> list:
+    """Return footprints_sources for a job, with backwards-compat fallback."""
+    sources = job.get("footprints_sources")
+    if sources:
+        return list(sources)
+    return ["current_osm"] if job.get("include_footprints") else []
+
+
 def _ensure_footprint_dependencies(parent):
     """Prompt to install footprint packages if needed. Return True if ready to run."""
     from ..core import deps
@@ -719,10 +727,7 @@ class PWTTJobsDock(QDockWidget):
         job["error"] = None
         job_store.save_job(job)
 
-        # Backwards compat: old jobs have no footprints_sources
-        fp_sources = job.get("footprints_sources") or (
-            ["current_osm"] if job.get("include_footprints") else []
-        )
+        fp_sources = _job_footprints_sources(job)
         task = PWTTRunTask(
             backend=backend,
             aoi_wkt=job["aoi_wkt"],
@@ -988,9 +993,7 @@ class PWTTJobsDock(QDockWidget):
         except RuntimeError as e:
             QMessageBox.warning(self, "PWTT", str(e))
             return
-        old_fp_sources = old.get("footprints_sources") or (
-            ["current_osm"] if old.get("include_footprints") else []
-        )
+        old_fp_sources = _job_footprints_sources(old)
         from ..core import job_store
         new_job = job_store.create_job(
             backend_id=old["backend_id"],
@@ -2371,9 +2374,7 @@ class PWTTControlsDock(QDockWidget):
         if job.get("post_interval"):
             self.post_interval.setValue(job["post_interval"])
 
-        fp_sources = job.get("footprints_sources") or (
-            ["current_osm"] if job.get("include_footprints") else []
-        )
+        fp_sources = _job_footprints_sources(job)
         self.include_footprints.setChecked(bool(fp_sources))
         self.fp_current_osm.setChecked("current_osm" in fp_sources)
         self.fp_historical_war_start.setChecked("historical_war_start" in fp_sources)

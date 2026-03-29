@@ -73,7 +73,7 @@ def _run_overpass_query(query: str, limit: int = 50000) -> str:
     )
 
 
-def _fetch_osm_buildings(west: float, south: float, east: float, north: float, limit: int = 50000) -> Optional[str]:
+def _fetch_osm_buildings(west: float, south: float, east: float, north: float, limit: int = 50000) -> str:
     """Query Overpass API for current building polygons in bbox. Returns path to temp GeoJSON."""
     query = f"""
     [out:json][timeout:180];
@@ -186,29 +186,20 @@ def compute_footprints(
         progress_callback(0, "Loading building footprints…")
     if footprints_vector_path and os.path.isfile(footprints_vector_path):
         gdf = gpd.read_file(footprints_vector_path, bbox=(west, south, east, north))
-    elif date_iso:
-        if progress_callback:
-            progress_callback(0, f"Fetching historical OSM buildings ({date_iso})…")
-        geojson_path = _fetch_historical_osm_buildings(west, south, east, north, date_iso)
-        if not geojson_path:
-            raise RuntimeError(f"Could not fetch historical building footprints for {date_iso} (Overpass failed).")
-        gdf = gpd.read_file(geojson_path)
-        try:
-            os.remove(geojson_path)
-        except OSError:
-            pass
-        if gdf.crs is None:
-            gdf.set_crs("EPSG:4326", inplace=True)
-        gdf = gdf.to_crs("EPSG:4326")
     else:
-        geojson_path = _fetch_osm_buildings(west, south, east, north)
-        if not geojson_path:
-            raise RuntimeError("Could not fetch building footprints (Overpass failed).")
-        gdf = gpd.read_file(geojson_path)
+        if date_iso:
+            if progress_callback:
+                progress_callback(0, f"Fetching historical OSM buildings ({date_iso})…")
+            geojson_path = _fetch_historical_osm_buildings(west, south, east, north, date_iso)
+        else:
+            geojson_path = _fetch_osm_buildings(west, south, east, north)
         try:
-            os.remove(geojson_path)
-        except OSError:
-            pass
+            gdf = gpd.read_file(geojson_path)
+        finally:
+            try:
+                os.remove(geojson_path)
+            except OSError:
+                pass
         if gdf.crs is None:
             gdf.set_crs("EPSG:4326", inplace=True)
         gdf = gdf.to_crs("EPSG:4326")

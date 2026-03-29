@@ -118,39 +118,78 @@ def ttest(s1, inference_start, war_start, pre_interval, post_interval):
 
 
 def open_geemap_preview(aoi, image, damage_threshold: float = DEFAULT_DAMAGE_THRESHOLD) -> None:
-    """Build a geemap Map and open it in the default browser (QGIS / desktop use)."""
-    try:
-        import geemap
-    except ImportError as e:
-        raise RuntimeError(
-            "Map preview requires the 'geemap' package. Install with: pip install geemap, "
-            "or turn off the preview option."
-        ) from e
+    """Build a standalone Leaflet map and open it in the default browser (QGIS / desktop use).
 
-    m = geemap.Map()
-    m.add_basemap("SATELLITE")
+    Uses Leaflet.js from CDN so the page works as a file:// URL without Jupyter
+    widget dependencies.  CartoDB Positron tiles are used as the basemap to avoid
+    the Referer requirement imposed by OpenStreetMap's volunteer-run tile servers.
+    """
     vmin = float(damage_threshold)
     vmax = vmin + 2.0
-    m.addLayer(
-        image.select("T_statistic"),
-        {"min": vmin, "max": vmax, "opacity": 0.5, "palette": ["yellow", "red", "purple"]},
-        "T-test",
-    )
-    m.centerObject(aoi)
+    vis_params = {
+        "min": vmin,
+        "max": vmax,
+        "palette": ["yellow", "red", "purple"],
+    }
+
+    # Fetch EE tile URL and AOI geometry (both are cheap server-side calls).
+    map_id_dict = image.select("T_statistic").getMapId(vis_params)
+    ee_tile_url = map_id_dict["tile_fetcher"].url_format
+
+    # AOI centroid and bounding box for initial map view.
+    bbox_coords = aoi.bounds(maxError=1).coordinates().getInfo()[0]
+    min_lon = min(c[0] for c in bbox_coords)
+    max_lon = max(c[0] for c in bbox_coords)
+    min_lat = min(c[1] for c in bbox_coords)
+    max_lat = max(c[1] for c in bbox_coords)
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>PWTT Earth Engine Preview</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    html, body {{ margin: 0; padding: 0; height: 100%; }}
+    #map {{ height: 100%; }}
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<script>
+  var map = L.map('map');
+
+  // CartoDB Positron - does not require a Referer header (unlike OSM tiles).
+  L.tileLayer(
+    'https://{{s}}.basemaps.cartocdn.com/light_all/{{z}}/{{x}}/{{y}}{{r}}.png',
+    {{
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+      subdomains: 'abcd',
+      maxZoom: 20
+    }}
+  ).addTo(map);
+
+  // Earth Engine T-statistic overlay.
+  L.tileLayer(
+    '{ee_tile_url}',
+    {{
+      attribution: 'Google Earth Engine',
+      maxZoom: 20,
+      opacity: 0.7
+    }}
+  ).addTo(map);
+
+  map.fitBounds([[{min_lat}, {min_lon}], [{max_lat}, {max_lon}]]);
+</script>
+</body>
+</html>"""
+
     fd, path = tempfile.mkstemp(suffix=".html", prefix="pwtt_gee_preview_")
     os.close(fd)
-    if hasattr(m, "to_html"):
-        try:
-            m.to_html(filename=path, title="PWTT preview", width="100%", height="880px")
-        except TypeError:
-            try:
-                m.to_html(path)
-            except Exception:
-                m.save(path)
-        except Exception:
-            m.save(path)
-    else:
-        m.save(path)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(html)
     webbrowser.open(f"file://{path}")
 
 

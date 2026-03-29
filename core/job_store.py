@@ -84,6 +84,7 @@ def create_job(
         "remote_job_id": None,
         "output_tif": None,
         "footprints_gpkg": None,
+        "footprints_gpkgs": {},
     }
 
 
