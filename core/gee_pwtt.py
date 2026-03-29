@@ -167,7 +167,7 @@ def open_geemap_preview(
 <body>
 <div id="map"></div>
 <script>
-  var map = L.map('map');
+  var map = L.map('map', {{ maxZoom: 20 }});
 
   // CartoDB Positron - does not require a Referer header (unlike OSM tiles).
   L.tileLayer(
@@ -179,12 +179,15 @@ def open_geemap_preview(
     }}
   ).addTo(map);
 
-  // Earth Engine T-statistic overlay.
+  // Earth Engine T-statistic overlay. EE only serves tiles through a native zoom
+  // (~10 m S1 → ~z14 WebMercator); without maxNativeZoom, Leaflet requests
+  // higher z and tiles are empty so the layer looks to "disappear" on zoom-in.
   L.tileLayer(
     '{ee_tile_url}',
     {{
       attribution: 'Google Earth Engine',
       maxZoom: 20,
+      maxNativeZoom: 14,
       opacity: 0.7
     }}
   ).addTo(map);
