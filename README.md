@@ -81,6 +81,8 @@ QGIS often opens the GeoTIFF as **multiband color** (band 1 → red, band 2 → 
 
 For an intuitive heat-map reading, style **band 1** (`T_statistic`) as **singleband pseudocolor** with a ramp from **cool** (blue / purple) to **hot** (yellow / green), similar to the figures in the [PWTT project README](https://github.com/oballinger/PWTT). **Min/max** (or percentile stretch) in symbology controls how strong a value must be before it looks “yellow”; adjust those if the map looks all one color.
 
+**After the layer is added:** Tweaking symbology changes **only the picture**, not the raster values. The plugin’s default pseudocolor on band 1 uses a fixed stretch (about **3–5** on `T_statistic`, same idea as the bundled Earth Engine preview). Narrowing **max** (e.g. 5 → 4) pushes more pixels toward the “hot” colors so change can **look** stronger without editing the file. **Band 2** (`damage`) is fixed for that export at the **threshold used when the job ran**; for a different binary mask, **re-run** with another threshold or use **Raster Calculator** (or similar) on band 1.
+
 Then you can read the map in simple terms (still a **model of backscatter change**, not a survey of destroyed buildings — see the paper):
 
 | Color | What it means |

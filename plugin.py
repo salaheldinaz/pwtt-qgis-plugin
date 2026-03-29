@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Main plugin class: toolbar, menu, dock panels."""
 
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QSize
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
 from qgis.core import Qgis
@@ -21,6 +21,8 @@ class PWTTPlugin:
         self.menu = "PWTT"
         self.toolbar = self.iface.addToolBar("PWTT")
         self.toolbar.setObjectName("PWTT")
+        # Larger than QGIS default (~24) so detailed SVGs read clearly
+        self.toolbar.setIconSize(QSize(36, 36))
         self.controls_dock = None
         self.jobs_dock = None
         self.openeo_dock = None
