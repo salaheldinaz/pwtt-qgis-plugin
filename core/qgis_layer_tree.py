@@ -19,11 +19,21 @@ def pwtt_damage_layer_name(job_id: Optional[str], backend_id: Optional[str]) -> 
     return f"PWTT damage ({bid})"
 
 
-def pwtt_footprints_layer_name(job_id: Optional[str], backend_id: Optional[str]) -> str:
+_FOOTPRINT_SOURCE_LABELS = {
+    "current_osm": "OSM",
+    "historical_war_start": "OSM @ war start",
+    "historical_inference_start": "OSM @ inference start",
+}
+
+
+def pwtt_footprints_layer_name(
+    job_id: Optional[str], backend_id: Optional[str], source: Optional[str] = None
+) -> str:
     bid = (backend_id or "pwtt").lower()
+    src = _FOOTPRINT_SOURCE_LABELS.get(source, source or "OSM")
     if job_id:
-        return f"PWTT footprints ({bid}, {job_id})"
-    return f"PWTT footprints ({bid})"
+        return f"PWTT footprints {src} ({bid}, {job_id})"
+    return f"PWTT footprints {src} ({bid})"
 
 
 def _find_group_by_name(root: QgsLayerTreeNode, name: str) -> Optional[QgsLayerTreeGroup]:

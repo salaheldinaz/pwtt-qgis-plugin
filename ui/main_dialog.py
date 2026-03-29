@@ -719,6 +719,10 @@ class PWTTJobsDock(QDockWidget):
         job["error"] = None
         job_store.save_job(job)
 
+        # Backwards compat: old jobs have no footprints_sources
+        fp_sources = job.get("footprints_sources") or (
+            ["current_osm"] if job.get("include_footprints") else []
+        )
         task = PWTTRunTask(
             backend=backend,
             aoi_wkt=job["aoi_wkt"],
@@ -727,7 +731,8 @@ class PWTTJobsDock(QDockWidget):
             pre_interval=job["pre_interval"],
             post_interval=job["post_interval"],
             output_dir=job["output_dir"],
-            include_footprints=job["include_footprints"],
+            include_footprints=bool(fp_sources),
+            footprints_sources=fp_sources,
             job_id=job["id"],
             remote_job_id=job.get("remote_job_id"),
             damage_threshold=job.get("damage_threshold", 3.3),
@@ -797,11 +802,13 @@ class PWTTJobsDock(QDockWidget):
         from ..core import job_store
         task = self._active_tasks.pop(job_id, None)
         output_tif = getattr(task, "output_tif", None)
-        footprints = getattr(task, "footprints_gpkg", None)
+        footprints = getattr(task, "footprints_gpkg", None)  # backwards compat (first)
+        footprints_gpkgs = getattr(task, "footprints_gpkgs", {}) or {}
         update_fields = dict(
             status=job_store.STATUS_COMPLETED,
             output_tif=output_tif,
             footprints_gpkg=footprints,
+            footprints_gpkgs=footprints_gpkgs,
             offline_product_ids=[],
             offline_products=[],
         )
@@ -818,8 +825,8 @@ class PWTTJobsDock(QDockWidget):
                 done_parts.append(f"Output: {output_tif} ({size_mb:.1f} MB)")
             except OSError:
                 done_parts.append(f"Output: {output_tif}")
-        if footprints:
-            done_parts.append(f"Footprints: {footprints}")
+        for src, fp_path in footprints_gpkgs.items():
+            done_parts.append(f"Footprints ({src}): {fp_path}")
         if remote_id:
             done_parts.append(f"Remote job: {remote_id}")
         self._job_logs.setdefault(job_id, []).append("<br>".join(done_parts))
@@ -981,6 +988,9 @@ class PWTTJobsDock(QDockWidget):
         except RuntimeError as e:
             QMessageBox.warning(self, "PWTT", str(e))
             return
+        old_fp_sources = old.get("footprints_sources") or (
+            ["current_osm"] if old.get("include_footprints") else []
+        )
         from ..core import job_store
         new_job = job_store.create_job(
             backend_id=old["backend_id"],
@@ -990,7 +1000,8 @@ class PWTTJobsDock(QDockWidget):
             pre_interval=old["pre_interval"],
             post_interval=old["post_interval"],
             output_dir="",  # set below
-            include_footprints=old["include_footprints"],
+            include_footprints=bool(old_fp_sources),
+            footprints_sources=old_fp_sources,
             damage_threshold=old.get("damage_threshold", 3.3),
             gee_viz=old.get("gee_viz", False),
         )
@@ -2085,9 +2096,31 @@ class PWTTControlsDock(QDockWidget):
             "1\u20132 months is typical; longer windows capture more passes but may mix damage events."
         ))
 
-        self.include_footprints = QCheckBox("Include building footprints (OSM)")
+        self.include_footprints = QCheckBox("Include building footprints")
         self.include_footprints.setChecked(False)
         params_layout.addRow(self.include_footprints)
+
+        # Sub-options: which OSM snapshot(s) to fetch
+        self._fp_options_widget = QWidget()
+        _fp_opts_layout = QVBoxLayout(self._fp_options_widget)
+        _fp_opts_layout.setContentsMargins(20, 2, 0, 2)
+        _fp_opts_layout.setSpacing(2)
+        self.fp_current_osm = QCheckBox("Current OSM buildings")
+        self.fp_current_osm.setChecked(True)
+        self.fp_historical_war_start = QCheckBox("Historical OSM at war start date")
+        self.fp_historical_war_start.setChecked(False)
+        self.fp_historical_inference_start = QCheckBox("Historical OSM at inference start date")
+        self.fp_historical_inference_start.setChecked(False)
+        _fp_opts_layout.addWidget(self.fp_current_osm)
+        _fp_opts_layout.addWidget(self.fp_historical_war_start)
+        _fp_opts_layout.addWidget(self.fp_historical_inference_start)
+        _fp_opts_layout.addWidget(self._hint(
+            "Each selected source is added as a separate layer. "
+            "Historical snapshots use Overpass API with a date filter."
+        ))
+        self._fp_options_widget.setVisible(False)
+        params_layout.addRow(self._fp_options_widget)
+        self.include_footprints.toggled.connect(self._fp_options_widget.setVisible)
         params_layout.addRow(self._hint(
             "Overlay OpenStreetMap building footprints on the result to assess per-building damage."
         ))
@@ -2338,7 +2371,13 @@ class PWTTControlsDock(QDockWidget):
         if job.get("post_interval"):
             self.post_interval.setValue(job["post_interval"])
 
-        self.include_footprints.setChecked(job.get("include_footprints", False))
+        fp_sources = job.get("footprints_sources") or (
+            ["current_osm"] if job.get("include_footprints") else []
+        )
+        self.include_footprints.setChecked(bool(fp_sources))
+        self.fp_current_osm.setChecked("current_osm" in fp_sources)
+        self.fp_historical_war_start.setChecked("historical_war_start" in fp_sources)
+        self.fp_historical_inference_start.setChecked("historical_inference_start" in fp_sources)
 
         self.damage_threshold_spin.setValue(float(job.get("damage_threshold", 3.3)))
         self.gee_map_preview_cb.setChecked(job.get("gee_viz", False))
@@ -2507,6 +2546,17 @@ class PWTTControlsDock(QDockWidget):
             base_dir = proj_path if proj_path else os.path.expanduser("~/PWTT")
             self.output_dir.setFilePath(base_dir)
 
+        fp_sources = []
+        if self.include_footprints.isChecked():
+            if self.fp_current_osm.isChecked():
+                fp_sources.append("current_osm")
+            if self.fp_historical_war_start.isChecked():
+                fp_sources.append("historical_war_start")
+            if self.fp_historical_inference_start.isChecked():
+                fp_sources.append("historical_inference_start")
+            if not fp_sources:
+                fp_sources = ["current_osm"]
+
         from ..core import job_store
         job = job_store.create_job(
             backend_id=backend_id,
@@ -2516,7 +2566,8 @@ class PWTTControlsDock(QDockWidget):
             pre_interval=self.pre_interval.value(),
             post_interval=self.post_interval.value(),
             output_dir="",  # will be set below
-            include_footprints=self.include_footprints.isChecked(),
+            include_footprints=bool(fp_sources),
+            footprints_sources=fp_sources,
             damage_threshold=self.damage_threshold_spin.value(),
             gee_viz=self.gee_map_preview_cb.isChecked() if backend_id == "gee" else False,
         )

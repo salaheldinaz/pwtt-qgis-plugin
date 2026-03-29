@@ -55,10 +55,13 @@ def create_job(
     post_interval: int,
     output_dir: str,
     include_footprints: bool,
+    footprints_sources=None,
     damage_threshold: float = 3.3,
     gee_viz: bool = False,
 ) -> dict:
     now = datetime.now().isoformat(timespec="seconds")
+    if footprints_sources is None:
+        footprints_sources = ["current_osm"] if include_footprints else []
     return {
         "id": uuid.uuid4().hex[:8],
         "backend_id": backend_id,
@@ -69,6 +72,7 @@ def create_job(
         "post_interval": post_interval,
         "output_dir": output_dir,
         "include_footprints": include_footprints,
+        "footprints_sources": list(footprints_sources),
         "damage_threshold": float(damage_threshold),
         "gee_viz": bool(gee_viz),
         "status": STATUS_PENDING,

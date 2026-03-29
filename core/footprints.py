@@ -17,18 +17,11 @@ _OVERPASS_ENDPOINTS = [
 ]
 
 
-def _fetch_osm_buildings(west: float, south: float, east: float, north: float, limit: int = 50000) -> Optional[str]:
-    """Query Overpass API for building polygons in bbox. Returns path to temp GeoJSON.
+def _run_overpass_query(query: str, limit: int = 50000) -> str:
+    """Execute an Overpass QL query against known mirrors. Returns path to temp GeoJSON.
 
     Retries up to 3 times with exponential back-off and falls back to
     alternative Overpass mirrors when the primary endpoint times out.
-    """
-    query = f"""
-    [out:json][timeout:180];
-    (
-      way["building"]({south},{west},{north},{east});
-    );
-    out body geom;
     """
     last_err = None
     for endpoint in _OVERPASS_ENDPOINTS:
@@ -36,8 +29,7 @@ def _fetch_osm_buildings(west: float, south: float, east: float, north: float, l
             try:
                 r = requests.post(endpoint, data={"data": query}, timeout=180)
                 if r.status_code == 429:
-                    wait = 10 * (attempt + 1)
-                    time.sleep(wait)
+                    time.sleep(10 * (attempt + 1))
                     continue
                 r.raise_for_status()
                 data = r.json()
@@ -81,11 +73,43 @@ def _fetch_osm_buildings(west: float, south: float, east: float, north: float, l
     )
 
 
+def _fetch_osm_buildings(west: float, south: float, east: float, north: float, limit: int = 50000) -> Optional[str]:
+    """Query Overpass API for current building polygons in bbox. Returns path to temp GeoJSON."""
+    query = f"""
+    [out:json][timeout:180];
+    (
+      way["building"]({south},{west},{north},{east});
+    );
+    out body geom;
+    """
+    return _run_overpass_query(query, limit)
+
+
+def _fetch_historical_osm_buildings(
+    west: float, south: float, east: float, north: float,
+    date_iso: str, limit: int = 50000,
+) -> str:
+    """Query Overpass API for building polygons as they existed on date_iso (YYYY-MM-DD).
+
+    Uses the Overpass [date:"..."] filter to retrieve a historical snapshot of OSM.
+    Returns path to temp GeoJSON.
+    """
+    query = f"""
+    [out:json][timeout:180][date:"{date_iso}T00:00:00Z"];
+    (
+      way["building"]({south},{west},{north},{east});
+    );
+    out body geom;
+    """
+    return _run_overpass_query(query, limit)
+
+
 def compute_footprints(
     raster_path: str,
     aoi_wkt: str,
     output_gpkg_path: str,
     footprints_vector_path: Optional[str] = None,
+    date_iso: Optional[str] = None,
     progress_callback=None,
 ) -> str:
     """
@@ -93,6 +117,8 @@ def compute_footprints(
 
     If footprints_vector_path is set, use that vector (GeoJSON/GPKG) clipped to AOI.
     Otherwise fetch buildings from OSM (Overpass) for the AOI bbox.
+    If date_iso (YYYY-MM-DD) is provided, fetch the historical OSM snapshot for that date
+    instead of the current OSM data.
     """
     try:
         import geopandas as gpd
@@ -160,6 +186,20 @@ def compute_footprints(
         progress_callback(0, "Loading building footprints…")
     if footprints_vector_path and os.path.isfile(footprints_vector_path):
         gdf = gpd.read_file(footprints_vector_path, bbox=(west, south, east, north))
+    elif date_iso:
+        if progress_callback:
+            progress_callback(0, f"Fetching historical OSM buildings ({date_iso})…")
+        geojson_path = _fetch_historical_osm_buildings(west, south, east, north, date_iso)
+        if not geojson_path:
+            raise RuntimeError(f"Could not fetch historical building footprints for {date_iso} (Overpass failed).")
+        gdf = gpd.read_file(geojson_path)
+        try:
+            os.remove(geojson_path)
+        except OSError:
+            pass
+        if gdf.crs is None:
+            gdf.set_crs("EPSG:4326", inplace=True)
+        gdf = gdf.to_crs("EPSG:4326")
     else:
         geojson_path = _fetch_osm_buildings(west, south, east, north)
         if not geojson_path:

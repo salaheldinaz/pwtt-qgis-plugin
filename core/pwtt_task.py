@@ -23,6 +23,7 @@ class PWTTRunTask(QgsTask):
         post_interval,
         output_dir,
         include_footprints=False,
+        footprints_sources=None,
         job_id=None,
         remote_job_id=None,
         damage_threshold=3.3,
@@ -37,12 +38,20 @@ class PWTTRunTask(QgsTask):
         self.post_interval = post_interval
         self.output_dir = output_dir
         self.include_footprints = include_footprints
+        # footprints_sources: list of "current_osm", "historical_war_start", "historical_inference_start"
+        if footprints_sources is not None:
+            self.footprints_sources = list(footprints_sources)
+        elif include_footprints:
+            self.footprints_sources = ["current_osm"]
+        else:
+            self.footprints_sources = []
         self.job_id = job_id
         self.remote_job_id = remote_job_id  # openEO job id for resume
         self.damage_threshold = float(damage_threshold)
         self.gee_viz = bool(gee_viz)
         self.output_tif = None
-        self.footprints_gpkg = None
+        self.footprints_gpkg = None  # kept for backwards compat (first source)
+        self.footprints_gpkgs = {}   # source -> gpkg path
         self.exception = None
         self.error_detail = ""
         self.products_offline = False
@@ -75,8 +84,6 @@ class PWTTRunTask(QgsTask):
         tif_name = f"pwtt_{self.job_id}.tif" if self.job_id else "pwtt_result.tif"
         out_tif = os.path.join(self.output_dir, tif_name)
         ensure_output_dir(out_tif)
-        fp_name = f"pwtt_{self.job_id}_footprints.gpkg" if self.job_id else "pwtt_footprints.gpkg"
-        footprints_path = os.path.join(self.output_dir, fp_name) if self.include_footprints else None
 
         def progress(percent, msg):
             self.setProgress(percent)
@@ -149,21 +156,42 @@ class PWTTRunTask(QgsTask):
         except Exception:
             pass  # metadata is best-effort
 
-        if self.include_footprints and footprints_path:
-            try:
-                from .footprints import compute_footprints
-                compute_footprints(
-                    result_path,
-                    self.aoi_wkt,
-                    footprints_path,
-                    progress_callback=progress,
+        if self.footprints_sources:
+            _source_date = {
+                "current_osm": None,
+                "historical_war_start": self.war_start,
+                "historical_inference_start": self.inference_start,
+            }
+            _source_suffix = {
+                "current_osm": "current",
+                "historical_war_start": "war_start",
+                "historical_inference_start": "infer_start",
+            }
+            from .footprints import compute_footprints
+            for source in self.footprints_sources:
+                suffix = _source_suffix.get(source, source)
+                fp_name = (
+                    f"pwtt_{self.job_id}_footprints_{suffix}.gpkg"
+                    if self.job_id else f"pwtt_footprints_{suffix}.gpkg"
                 )
-                if os.path.isfile(footprints_path):
-                    self.footprints_gpkg = footprints_path
-            except Exception as e:
-                self.exception = e
-                self.error_detail = traceback.format_exc()
-                return False
+                fp_path = os.path.join(self.output_dir, fp_name)
+                date_iso = _source_date.get(source)
+                try:
+                    compute_footprints(
+                        result_path,
+                        self.aoi_wkt,
+                        fp_path,
+                        date_iso=date_iso,
+                        progress_callback=progress,
+                    )
+                    if os.path.isfile(fp_path):
+                        self.footprints_gpkgs[source] = fp_path
+                        if self.footprints_gpkg is None:
+                            self.footprints_gpkg = fp_path  # backwards compat
+                except Exception as e:
+                    self.exception = e
+                    self.error_detail = traceback.format_exc()
+                    return False
         return True
 
     def finished(self, success):
@@ -182,12 +210,13 @@ class PWTTRunTask(QgsTask):
             if layer.isValid():
                 style_pwtt_raster_layer(layer, damage_threshold=self.damage_threshold)
                 add_map_layer_to_pwtt_job_group(project, layer, self.job_id, backend_id)
-            if self.footprints_gpkg and os.path.isfile(self.footprints_gpkg):
-                fp_label = pwtt_footprints_layer_name(self.job_id, backend_id)
-                vl = QgsVectorLayer(self.footprints_gpkg, fp_label, "ogr")
-                if vl.isValid():
-                    style_pwtt_footprints_layer(vl)
-                    add_map_layer_to_pwtt_job_group(project, vl, self.job_id, backend_id)
+            for source, fp_path in self.footprints_gpkgs.items():
+                if os.path.isfile(fp_path):
+                    fp_label = pwtt_footprints_layer_name(self.job_id, backend_id, source)
+                    vl = QgsVectorLayer(fp_path, fp_label, "ogr")
+                    if vl.isValid():
+                        style_pwtt_footprints_layer(vl)
+                        add_map_layer_to_pwtt_job_group(project, vl, self.job_id, backend_id)
             # GEE map preview must run on the main thread (webbrowser.open)
             if self.gee_viz:
                 viz_aoi = getattr(self.backend, "_viz_aoi", None)
