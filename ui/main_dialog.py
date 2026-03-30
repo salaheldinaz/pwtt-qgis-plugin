@@ -132,7 +132,11 @@ class PWTTControlsDock(QDockWidget):
         # Credentials stacked by backend
         cred_group = QGroupBox("Credentials")
         cred_layout = QVBoxLayout(cred_group)
-        cred_layout.addWidget(self._hint("Login details for the selected backend."))
+        cred_layout.addWidget(self._hint(
+            "Login details for the selected backend. "
+            "Credentials are stored in QGIS settings (not encrypted). "
+            "Clear them after use on shared machines."
+        ))
         self.cred_storage_label = QLabel("")
         self.cred_storage_label.setWordWrap(True)
         self.cred_storage_label.setStyleSheet("font-size: 0.9em;")

@@ -108,8 +108,6 @@ def download_product(
     Handles offline products: triggers order and polls, or returns None if wait_for_offline=False
     and product is not available.
     """
-    session = requests.Session()
-    session.headers["Authorization"] = f"Bearer {access_token}"
     os.makedirs(out_dir, exist_ok=True)
     zip_path = os.path.join(out_dir, product_name + ".zip")
     if os.path.isfile(zip_path):
@@ -118,50 +116,49 @@ def download_product(
         if os.path.isdir(extract_dir):
             return extract_dir
 
-    url = f"{DOWNLOAD_URL}/Products('{product_id}')/$value"
-
-    # Follow redirects manually to handle auth on each hop
-    r = session.get(url, allow_redirects=False, timeout=60)
-    while r.status_code in (301, 302, 303, 307):
-        url = r.headers["Location"]
-        r = session.get(url, allow_redirects=False, timeout=60)
-
-    # 202 = order accepted (product being staged from cold storage)
-    # 422 = product offline, not yet ordered or still staging
-    if r.status_code in (202, 422):
-        # Always trigger the order so CDSE starts staging it for future attempts
-        _trigger_order(session, product_id)
-        if not wait_for_offline:
-            return None
-        # Poll until online
-        waited = 0
-        while waited < MAX_ORDER_WAIT_S:
-            time.sleep(ORDER_POLL_INTERVAL_S)
-            waited += ORDER_POLL_INTERVAL_S
-            if _is_product_online(access_token, product_id):
-                break
-        else:
-            raise RuntimeError(
-                f"Product '{product_name}' is offline and did not become available "
-                f"after {MAX_ORDER_WAIT_S}s. Try again later or use a different date range."
-            )
-        # Re-request after product is online
+    with requests.Session() as session:
+        session.headers["Authorization"] = f"Bearer {access_token}"
         url = f"{DOWNLOAD_URL}/Products('{product_id}')/$value"
+
+        # Follow redirects manually to handle auth on each hop
         r = session.get(url, allow_redirects=False, timeout=60)
         while r.status_code in (301, 302, 303, 307):
             url = r.headers["Location"]
             r = session.get(url, allow_redirects=False, timeout=60)
 
-    # Stream download
-    if not r.ok:
-        r = session.get(url, stream=True, timeout=600)
-    else:
-        # Re-request as stream (first request wasn't streamed)
-        r = session.get(url, stream=True, timeout=600)
-    r.raise_for_status()
-    with open(zip_path, "wb") as f:
-        for chunk in r.iter_content(chunk_size=65536):
-            f.write(chunk)
+        # 202 = order accepted (product being staged from cold storage)
+        # 422 = product offline, not yet ordered or still staging
+        if r.status_code in (202, 422):
+            # Always trigger the order so CDSE starts staging it for future attempts
+            _trigger_order(session, product_id)
+            if not wait_for_offline:
+                return None
+            # Poll until online
+            waited = 0
+            while waited < MAX_ORDER_WAIT_S:
+                time.sleep(ORDER_POLL_INTERVAL_S)
+                waited += ORDER_POLL_INTERVAL_S
+                if _is_product_online(access_token, product_id):
+                    break
+            else:
+                raise RuntimeError(
+                    f"Product '{product_name}' is offline and did not become available "
+                    f"after {MAX_ORDER_WAIT_S}s. Try again later or use a different date range."
+                )
+            # Re-request after product is online
+            url = f"{DOWNLOAD_URL}/Products('{product_id}')/$value"
+            r = session.get(url, allow_redirects=False, timeout=60)
+            while r.status_code in (301, 302, 303, 307):
+                url = r.headers["Location"]
+                r = session.get(url, allow_redirects=False, timeout=60)
+
+        # Re-request as a stream (the redirect-following request above wasn't streamed)
+        r.close()
+        r = session.get(url, stream=True, timeout=(30, 600))
+        r.raise_for_status()
+        with open(zip_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=65536):
+                f.write(chunk)
 
     safe_name = product_name + ".SAFE" if not product_name.endswith(".SAFE") else product_name
     extract_dir = os.path.join(out_dir, safe_name)

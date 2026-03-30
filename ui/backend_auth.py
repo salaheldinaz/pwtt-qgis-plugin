@@ -200,10 +200,24 @@ def auth_with_progress(backend, credentials, backend_id, parent=None):
             worker.start()
             dlg.exec_()
         finally:
-            _wb.open = _orig_open
-            _wb.open_new = _orig_open_new
-            _wb.open_new_tab = _orig_open_tab
-            _wb.get = _orig_get
+            # Restore each function individually so a failure in one
+            # doesn't prevent the others from being restored.
+            try:
+                _wb.open = _orig_open
+            except Exception:
+                pass
+            try:
+                _wb.open_new = _orig_open_new
+            except Exception:
+                pass
+            try:
+                _wb.open_new_tab = _orig_open_tab
+            except Exception:
+                pass
+            try:
+                _wb.get = _orig_get
+            except Exception:
+                pass
 
         if canceled[0]:
             worker.wait(2000)
@@ -342,6 +356,21 @@ def create_and_auth_backend(
 
     if backend_id == "openeo":
         creds = merge_openeo_creds_from_controls_dock(creds, controls_dock)
+        # SSL bypass: require explicit user confirmation before proceeding
+        if not creds.get("verify_ssl", True):
+            reply = QMessageBox.warning(
+                parent,
+                "PWTT — Security Warning",
+                "TLS certificate verification is DISABLED.\n\n"
+                "This makes your connection vulnerable to interception. "
+                "Only disable this if you understand the risk (e.g. a corporate proxy "
+                "with a custom CA certificate).\n\n"
+                "Proceed without TLS verification?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if not is_message_box_yes(reply):
+                raise RuntimeError("Authentication cancelled.")
+            creds["_ssl_bypass_confirmed"] = True
     elif backend_id == "local":
         creds = merge_local_creds_from_controls_dock(creds, controls_dock)
         if local_data_source in ("cdse", "asf", "pc"):

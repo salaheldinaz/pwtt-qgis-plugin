@@ -83,9 +83,19 @@ class OpenEOBackend(PWTTBackend):
                 verify_ssl = True
             session = None
             if not verify_ssl:
+                if not credentials.get("_ssl_bypass_confirmed"):
+                    raise RuntimeError(
+                        "SSL verification is disabled but user has not confirmed the risk. "
+                        "Enable 'Verify TLS certificates' or confirm the bypass in the UI."
+                    )
                 import urllib3
                 import requests
+                import logging
 
+                logging.getLogger("pwtt").warning(
+                    "TLS certificate verification DISABLED for openEO connection. "
+                    "Traffic is vulnerable to interception."
+                )
                 session = requests.Session()
                 session.verify = False
                 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)

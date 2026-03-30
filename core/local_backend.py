@@ -2,6 +2,8 @@
 """Full-local backend: GRD from CDSE / ASF / Planetary Computer, Lee filter, t-test, rasterio output."""
 
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import numpy as np
 from typing import Optional
@@ -21,6 +23,10 @@ from .utils import wkt_to_bbox
 LOCAL_SOURCE_CDSE = "cdse"
 LOCAL_SOURCE_ASF = "asf"
 LOCAL_SOURCE_PC = "pc"
+
+# Maximum number of Sentinel-1 scenes to download per period (pre/post).
+# More scenes improve t-test accuracy but increase download time and memory.
+MAX_SCENES_PER_PERIOD = 3
 
 
 def _add_months_dt(d: datetime, months: int) -> datetime:
@@ -261,14 +267,29 @@ class LocalBackend(PWTTBackend):
         self.run_metadata["pre_scenes_found"] = [_scene_summary(p) for p in pre_products]
         self.run_metadata["post_scenes_found"] = [_scene_summary(p) for p in post_products]
 
-        max_per_period = 3
+        max_per_period = MAX_SCENES_PER_PERIOD
         pre_arrays = []
         post_arrays = []
-        triggered_orders = 0
+        triggered_orders = [0]  # mutable container for thread-safe increment
         offline_product_ids = []
+        download_failures = []
+        _lock = threading.Lock()
+
+        def _read_vv_vh(vv_path, vh_path):
+            """Read VV/VH rasters, return tuple or None on failure."""
+            try:
+                with rasterio.open(vv_path) as src:
+                    vv = src.read(1)
+                    profile = src.profile.copy()
+                    transform = src.transform
+                    crs = src.crs
+                with rasterio.open(vh_path) as src:
+                    vh = src.read(1)
+                return vv.astype(np.float32), vh.astype(np.float32), profile, transform, crs
+            except Exception:
+                return None
 
         def load_products_safe(products, arrays_list, label, used_key):
-            nonlocal triggered_orders
             loaded = 0
             for prod in products:
                 if loaded >= max_per_period:
@@ -284,11 +305,12 @@ class LocalBackend(PWTTBackend):
                         self._token, pid, name, cache_dir, wait_for_offline=False
                     )
                     if safe_dir is None:
-                        triggered_orders += 1
-                        offline_product_ids.append(pid)
-                        self.run_metadata["offline_scenes"].append(
-                            {"id": pid, "name": name, "date": scene_date}
-                        )
+                        with _lock:
+                            triggered_orders[0] += 1
+                            offline_product_ids.append(pid)
+                            self.run_metadata["offline_scenes"].append(
+                                {"id": pid, "name": name, "date": scene_date}
+                            )
                         if progress_callback:
                             progress_callback(
                                 0,
@@ -298,7 +320,12 @@ class LocalBackend(PWTTBackend):
                 else:
                     from .asf_downloader import download_product_asf
 
-                    safe_dir = download_product_asf(self._asf_session, prod, cache_dir)
+                    try:
+                        safe_dir = download_product_asf(self._asf_session, prod, cache_dir)
+                    except Exception as dl_err:
+                        safe_dir = None
+                        with _lock:
+                            download_failures.append({"name": name, "error": str(dl_err)})
                     if not safe_dir:
                         if progress_callback:
                             progress_callback(0, f"{label}: skip {name} (download failed)…")
@@ -307,17 +334,14 @@ class LocalBackend(PWTTBackend):
                 vv_path, vh_path = find_vv_vh_in_safe(safe_dir)
                 if not vv_path or not vh_path:
                     continue
-                with rasterio.open(vv_path) as src:
-                    vv = src.read(1)
-                    profile = src.profile.copy()
-                    transform = src.transform
-                    crs = src.crs
-                with rasterio.open(vh_path) as src:
-                    vh = src.read(1)
-                arrays_list.append(
-                    (vv.astype(np.float32), vh.astype(np.float32), profile, transform, crs)
-                )
-                self.run_metadata[used_key].append({"id": pid, "name": name, "date": scene_date})
+                result = _read_vv_vh(vv_path, vh_path)
+                if result is None:
+                    if progress_callback:
+                        progress_callback(0, f"{label}: skip {name} (failed to read raster)…")
+                    continue
+                arrays_list.append(result)
+                with _lock:
+                    self.run_metadata[used_key].append({"id": pid, "name": name, "date": scene_date})
                 loaded += 1
 
         def load_products_pc(products, arrays_list, label, used_key):
@@ -333,58 +357,72 @@ class LocalBackend(PWTTBackend):
                 cd = prod.get("ContentDate") or {}
                 scene_date = (cd.get("Start") or "")[:19]
                 subdir = os.path.join(cache_dir, "pc_" + "".join(c if c.isalnum() else "_" for c in pid)[:120])
-                vv_path, vh_path = download_pc_vv_vh(prod, subdir)
+                try:
+                    vv_path, vh_path = download_pc_vv_vh(prod, subdir)
+                except Exception as dl_err:
+                    vv_path, vh_path = None, None
+                    with _lock:
+                        download_failures.append({"name": name, "error": str(dl_err)})
                 if not vv_path or not vh_path:
                     if progress_callback:
                         progress_callback(0, f"{label}: skip {name} (no VV/VH assets)…")
                     continue
-                with rasterio.open(vv_path) as src:
-                    vv = src.read(1)
-                    profile = src.profile.copy()
-                    transform = src.transform
-                    crs = src.crs
-                with rasterio.open(vh_path) as src:
-                    vh = src.read(1)
-                arrays_list.append(
-                    (vv.astype(np.float32), vh.astype(np.float32), profile, transform, crs)
-                )
-                self.run_metadata[used_key].append({"id": pid, "name": name, "date": scene_date})
+                result = _read_vv_vh(vv_path, vh_path)
+                if result is None:
+                    if progress_callback:
+                        progress_callback(0, f"{label}: skip {name} (failed to read raster)…")
+                    continue
+                arrays_list.append(result)
+                with _lock:
+                    self.run_metadata[used_key].append({"id": pid, "name": name, "date": scene_date})
                 loaded += 1
 
         if progress_callback:
-            progress_callback(12, "Downloading pre-war scenes…")
-        if source == LOCAL_SOURCE_PC:
-            load_products_pc(pre_products, pre_arrays, "Pre", "pre_scenes_used")
-        else:
-            load_products_safe(pre_products, pre_arrays, "Pre", "pre_scenes_used")
+            progress_callback(12, "Downloading pre- and post-war scenes…")
 
-        if progress_callback:
-            progress_callback(35, "Downloading post-war scenes…")
-        if source == LOCAL_SOURCE_PC:
-            load_products_pc(post_products, post_arrays, "Post", "post_scenes_used")
-        else:
-            load_products_safe(post_products, post_arrays, "Post", "post_scenes_used")
+        loader = load_products_pc if source == LOCAL_SOURCE_PC else load_products_safe
+
+        # Download pre and post periods concurrently to halve wall-clock time.
+        # Each thread writes to its own arrays_list (pre_arrays / post_arrays);
+        # shared state (run_metadata, offline_product_ids, etc.) is protected by _lock.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pre_fut = pool.submit(loader, pre_products, pre_arrays, "Pre", "pre_scenes_used")
+            post_fut = pool.submit(loader, post_products, post_arrays, "Post", "post_scenes_used")
+            pre_fut.result()
+            post_fut.result()
 
         if not pre_arrays or not post_arrays:
-            if source == LOCAL_SOURCE_CDSE and triggered_orders > 0:
+            if source == LOCAL_SOURCE_CDSE and triggered_orders[0] > 0:
                 from .base_backend import ProductsOfflineError
 
                 raise ProductsOfflineError(
                     f"All available products are in cold storage. "
-                    f"Staging orders have been triggered for {triggered_orders} product(s). "
+                    f"Staging orders have been triggered for {triggered_orders[0]} product(s). "
                     f"Will auto-check and resume when products become available.",
                     product_ids=offline_product_ids,
                     offline_scenes=list(self.run_metadata.get("offline_scenes", [])),
                 )
             if source == LOCAL_SOURCE_ASF:
+                detail = ""
+                if download_failures:
+                    detail = " Errors: " + "; ".join(
+                        f"{f['name']}: {f['error']}" for f in download_failures[:3]
+                    )
                 raise RuntimeError(
                     "Could not load VV/VH data from ASF products. "
                     "Try a different date range or verify Earthdata/ASF access."
+                    + detail
                 )
             if source == LOCAL_SOURCE_PC:
+                detail = ""
+                if download_failures:
+                    detail = " Errors: " + "; ".join(
+                        f"{f['name']}: {f['error']}" for f in download_failures[:3]
+                    )
                 raise RuntimeError(
                     "Could not load VV/VH assets from Planetary Computer STAC items. "
                     "Try a different date range or switch source."
+                    + detail
                 )
             raise RuntimeError(
                 "Could not load VV/VH data from any CDSE product. "
@@ -453,11 +491,13 @@ class LocalBackend(PWTTBackend):
         post_mean_vh = np.nanmean(post_vh, axis=0)
         post_sd_vh = np.nanstd(post_vh, axis=0)
         eps = 1e-12
+        # Degrees of freedom; eps prevents division by zero when pre_n + post_n == 2
+        df = max(pre_n + post_n - 2, 1)
         pooled_vv = np.sqrt(
-            (pre_sd_vv ** 2 * (pre_n - 1) + post_sd_vv ** 2 * (post_n - 1)) / (pre_n + post_n - 2) + eps
+            (pre_sd_vv ** 2 * (pre_n - 1) + post_sd_vv ** 2 * (post_n - 1)) / df + eps
         )
         pooled_vh = np.sqrt(
-            (pre_sd_vh ** 2 * (pre_n - 1) + post_sd_vh ** 2 * (post_n - 1)) / (pre_n + post_n - 2) + eps
+            (pre_sd_vh ** 2 * (pre_n - 1) + post_sd_vh ** 2 * (post_n - 1)) / df + eps
         )
         denom_vv = pooled_vv * np.sqrt(1.0 / pre_n + 1.0 / post_n) + eps
         denom_vh = pooled_vh * np.sqrt(1.0 / pre_n + 1.0 / post_n) + eps

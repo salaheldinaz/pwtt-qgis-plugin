@@ -8,6 +8,15 @@ from typing import Optional, Tuple
 
 def wkt_to_bbox(wkt: str) -> Optional[Tuple[float, float, float, float]]:
     """Extract (west, south, east, north) from WKT polygon (EPSG:4326). Returns None if invalid."""
+    # Prefer shapely for robust parsing of complex geometries
+    try:
+        from shapely import wkt as shapely_wkt
+        geom = shapely_wkt.loads(wkt)
+        west, south, east, north = geom.bounds
+        return west, south, east, north
+    except Exception:
+        pass
+    # Fallback: regex extraction for simple polygons (e.g. QGIS bbox output)
     numbers = re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", wkt)
     if len(numbers) < 4:
         return None

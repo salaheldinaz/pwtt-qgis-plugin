@@ -155,8 +155,13 @@ class PWTTRunTask(QgsTask):
             meta_path = os.path.join(self.output_dir, "job_info.json")
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(meta, f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass  # metadata is best-effort
+        except Exception as meta_err:
+            from qgis.core import QgsMessageLog, Qgis
+            QgsMessageLog.logMessage(
+                f"Failed to write job metadata: {meta_err}",
+                "PWTT",
+                level=Qgis.Warning,
+            )
 
         if self.footprints_sources:
             _source_date = {

@@ -128,16 +128,21 @@ def download_pc_vv_vh(product: dict, out_dir: str) -> Tuple[Optional[str], Optio
     if os.path.isfile(vv_path) and os.path.isfile(vh_path):
         return vv_path, vh_path
 
+    def _stream_download(session, url, dest):
+        """Download *url* to *dest*, removing partial file on failure."""
+        try:
+            r = session.get(url, stream=True, timeout=(30, 600))
+            r.raise_for_status()
+            with open(dest, "wb") as f:
+                for chunk in r.iter_content(chunk_size=65536):
+                    f.write(chunk)
+        except Exception:
+            if os.path.isfile(dest):
+                os.remove(dest)
+            raise
+
     with requests.Session() as s:
-        r = s.get(vv_h, stream=True, timeout=600)
-        r.raise_for_status()
-        with open(vv_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=65536):
-                f.write(chunk)
-        r = s.get(vh_h, stream=True, timeout=600)
-        r.raise_for_status()
-        with open(vh_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=65536):
-                f.write(chunk)
+        _stream_download(s, vv_h, vv_path)
+        _stream_download(s, vh_h, vh_path)
 
     return vv_path, vh_path

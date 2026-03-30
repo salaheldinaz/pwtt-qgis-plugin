@@ -76,6 +76,8 @@ def create_job(
         "footprints_sources": list(footprints_sources),
         "damage_threshold": float(damage_threshold),
         "gee_viz": bool(gee_viz),
+        # Added in v0.1.44; older jobs.json entries lack this field.
+        # Callers use .get("data_source") or "cdse" for backward compatibility.
         "data_source": (data_source or "cdse").strip().lower()
         if backend_id == "local"
         else "cdse",

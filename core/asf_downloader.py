@@ -2,8 +2,12 @@
 """ASF / Earthdata: search and download Sentinel-1 IW GRD (hot archive)."""
 
 import os
+import time
 import zipfile
 from typing import List, Optional
+
+_DOWNLOAD_RETRIES = 3
+_RETRY_BACKOFF_S = 5
 
 
 def authenticate_asf(username: str, password: str):
@@ -121,7 +125,20 @@ def download_product_asf(
         return extract_dir
 
     before = set(os.listdir(out_dir))
-    pobj.download(path=out_dir, session=session)
+    last_err = None
+    for attempt in range(1, _DOWNLOAD_RETRIES + 1):
+        try:
+            pobj.download(path=out_dir, session=session)
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            if attempt < _DOWNLOAD_RETRIES:
+                time.sleep(_RETRY_BACKOFF_S * attempt)
+    if last_err is not None:
+        raise RuntimeError(
+            f"ASF download failed after {_DOWNLOAD_RETRIES} attempts: {last_err}"
+        ) from last_err
     after = set(os.listdir(out_dir))
     new_files = sorted(after - before, key=lambda fn: os.path.getmtime(os.path.join(out_dir, fn)), reverse=True)
 
