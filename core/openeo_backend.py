@@ -68,11 +68,12 @@ class OpenEOBackend(PWTTBackend):
         return "openeo"
 
     def check_dependencies(self):
-        try:
-            import openeo
-            return True, ""
-        except ImportError:
-            return False, "openEO backend requires the 'openeo' package. Install with: pip install openeo"
+        from . import deps
+        deps.ensure_on_path()
+        missing, pip = deps.backend_missing("openeo")
+        if missing:
+            return False, f"openEO backend requires: pip install {' '.join(pip)}"
+        return True, ""
 
     def authenticate(self, credentials: dict) -> bool:
         try:

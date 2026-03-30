@@ -52,6 +52,58 @@ def _log_warn(message):
         _log(message)
 
 
+_system_info_logged = False
+
+
+def _log_system_info():
+    """Log system info once per session for debugging install issues."""
+    global _system_info_logged
+    if _system_info_logged:
+        return
+    _system_info_logged = True
+    import platform
+    try:
+        from qgis.core import Qgis
+        qv = Qgis.QGIS_VERSION
+    except Exception:
+        qv = "?"
+    lines = [
+        "=" * 50,
+        "PWTT Environment:",
+        f"  OS: {sys.platform} ({platform.system()} {platform.release()})",
+        f"  Arch: {platform.machine()}",
+        f"  Python: {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        f"  QGIS: {qv}",
+        f"  sys.executable: {getattr(sys, 'executable', '?')}",
+        f"  sys.prefix: {getattr(sys, 'prefix', '?')}",
+        f"  deps dir: {_deps_dir()}",
+    ]
+    try:
+        from ._uv_manager import uv_exists, get_uv_path
+        lines.append(f"  uv: {get_uv_path() if uv_exists() else shutil.which('uv') or 'not found'}")
+    except Exception:
+        pass
+    lines.append("=" * 50)
+    for line in lines:
+        _log(line)
+
+
+# ── Cache management ─────────────────────────────────────────────────────────
+
+def cleanup_deps():
+    """Remove the entire deps directory (e.g. before a clean reinstall)."""
+    d = _deps_dir()
+    if os.path.isdir(d):
+        shutil.rmtree(d, ignore_errors=True)
+        _log(f"Cleaned deps dir: {d}")
+    hf = _deps_hash_file()
+    if os.path.isfile(hf):
+        try:
+            os.unlink(hf)
+        except OSError:
+            pass
+
+
 # ── sys.path management ─────────────────────────────────────────────────────
 
 _macos_bundle_site_injected = False
@@ -824,6 +876,23 @@ def _install_into_target(pip_names, target_dir,
                 )
                 if rc2 == 0:
                     _log("SSL retry succeeded")
+                    return
+                last_output = (stdout2 + "\n" + stderr2).strip()
+
+            # Transient network error → retry once with backoff
+            if _is_network_error(combined):
+                _log("Transient network error, retrying after 5 s…")
+                if progress_callback:
+                    progress_callback(p_start, "Network error, retrying…")
+                time.sleep(5)
+                rc2, stdout2, stderr2 = _run_install_command(
+                    cmd, timeout=300, label=label,
+                    progress_start=p_start, progress_end=p_end,
+                    progress_callback=progress_callback,
+                    cancel_check=cancel_check,
+                )
+                if rc2 == 0:
+                    _log("Network retry succeeded")
                     return
                 last_output = (stdout2 + "\n" + stderr2).strip()
 

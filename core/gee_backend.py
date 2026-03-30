@@ -17,11 +17,12 @@ class GEEBackend(PWTTBackend):
         return "gee"
 
     def check_dependencies(self):
-        try:
-            import ee
-            return True, ""
-        except ImportError:
-            return False, "GEE backend requires the 'earthengine-api' package. Install with: pip install earthengine-api"
+        from . import deps
+        deps.ensure_on_path()
+        missing, pip = deps.backend_missing("gee")
+        if missing:
+            return False, f"GEE backend requires: pip install {' '.join(pip)}"
+        return True, ""
 
     def authenticate(self, credentials: dict) -> bool:
         import ee

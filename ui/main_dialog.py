@@ -584,6 +584,19 @@ class PWTTControlsDock(QDockWidget):
             return
         if deps.install_with_dialog(names, parent=self):
             self._on_backend_changed(self.backend_combo.currentIndex())
+            # Re-check: if still missing, show diagnostic
+            backend_id = self.backend_combo.currentData()
+            local_src = self._local_data_source_id() if backend_id == "local" else None
+            still_missing, _ = deps.backend_missing(backend_id, local_src)
+            if still_missing:
+                QMessageBox.information(
+                    self, "PWTT",
+                    f"Packages were installed but {', '.join(still_missing)} "
+                    f"still cannot be imported.\n\n"
+                    f"This can happen if QGIS needs to be restarted for "
+                    f"new packages to become visible.\n\n"
+                    f"Try restarting QGIS.",
+                )
 
     def _get_credentials(self, backend_id):
         if backend_id == "openeo":
