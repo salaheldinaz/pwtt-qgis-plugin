@@ -1,19 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <defs>
-    <linearGradient id="mainFoot" x1="32" y1="6" x2="32" y2="58" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#000000" stop-opacity="0.2"/>
-      <stop offset="50%" stop-color="#dc2626" stop-opacity="0.45"/>
-      <stop offset="100%" stop-color="#991b1b" stop-opacity="0.85"/>
-    </linearGradient>
-    <radialGradient id="mainHot" cx="32" cy="46" r="16" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#fca5a5"/>
-      <stop offset="0.5" stop-color="#dc2626"/>
-      <stop offset="1" stop-color="#450a0a"/>
-    </radialGradient>
-  </defs>
-  <path d="M32 7 L54 52 H10 Z" fill="url(#mainFoot)" stroke="#000000" stroke-width="2.25" stroke-linejoin="round"/>
-  <circle cx="32" cy="46" r="11" fill="url(#mainHot)" stroke="#000000" stroke-width="1.25"/>
-  <circle cx="32" cy="46" r="15" fill="none" stroke="#000000" stroke-width="1.5" opacity="0.55" stroke-dasharray="4 3"/>
-  <rect x="25" y="3" width="14" height="11" rx="2.5" fill="#000000" stroke="#dc2626" stroke-width="1.5"/>
-  <rect x="27" y="5" width="10" height="3" rx="0.8" fill="#7f1d1d"/>
+  <!-- Radar screen background -->
+  <circle cx="32" cy="32" r="27" fill="#EFF6FF" stroke="#2563EB" stroke-width="2.5"/>
+  <!-- Grid crosshair -->
+  <line x1="32" y1="5" x2="32" y2="59" stroke="#BFDBFE" stroke-width="1"/>
+  <line x1="5" y1="32" x2="59" y2="32" stroke="#BFDBFE" stroke-width="1"/>
+  <!-- Range rings -->
+  <circle cx="32" cy="32" r="10" fill="none" stroke="#BFDBFE" stroke-width="1"/>
+  <circle cx="32" cy="32" r="19" fill="none" stroke="#BFDBFE" stroke-width="1"/>
+  <!-- Radar sweep cone -->
+  <path d="M32 32 L46 12 A27 27 0 0 0 32 5 Z" fill="#2563EB" opacity="0.18"/>
+  <!-- Sweep line -->
+  <line x1="32" y1="32" x2="46" y2="12" stroke="#2563EB" stroke-width="2.5" stroke-linecap="round"/>
+  <!-- Detection blip (damage detected!) -->
+  <circle cx="42" cy="20" r="4.5" fill="#EF4444"/>
+  <circle cx="42" cy="20" r="7" fill="none" stroke="#EF4444" stroke-width="1.5" opacity="0.35"/>
+  <!-- Center dot -->
+  <circle cx="32" cy="32" r="3" fill="#2563EB"/>
 </svg>

@@ -1,15 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <defs>
-    <linearGradient id="aoiCorner" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#ef4444"/>
-      <stop offset="100%" stop-color="#000000"/>
-    </linearGradient>
-  </defs>
-  <rect x="14" y="14" width="36" height="36" rx="2" fill="#140000" stroke="#000000" stroke-width="2.25" stroke-dasharray="5 4"/>
-  <rect x="10" y="10" width="8" height="8" rx="1.5" fill="url(#aoiCorner)" stroke="#000000" stroke-width="1.25"/>
-  <rect x="46" y="10" width="8" height="8" rx="1.5" fill="url(#aoiCorner)" stroke="#000000" stroke-width="1.25"/>
-  <rect x="46" y="46" width="8" height="8" rx="1.5" fill="url(#aoiCorner)" stroke="#000000" stroke-width="1.25"/>
-  <rect x="10" y="46" width="8" height="8" rx="1.5" fill="url(#aoiCorner)" stroke="#000000" stroke-width="1.25"/>
-  <circle cx="32" cy="32" r="4" fill="#dc2626" stroke="#000000" stroke-width="1.5"/>
-  <path d="M32 24v4M32 36v4M24 32h4M36 32h4" stroke="#000000" stroke-width="1.75" stroke-linecap="round"/>
+  <!-- Selection rectangle -->
+  <rect x="12" y="12" width="40" height="40" rx="1.5" fill="#DBEAFE" fill-opacity="0.35" stroke="#2563EB" stroke-width="2" stroke-dasharray="6 4"/>
+  <!-- Corner handles -->
+  <rect x="7" y="7" width="10" height="10" rx="2" fill="#2563EB"/>
+  <rect x="47" y="7" width="10" height="10" rx="2" fill="#2563EB"/>
+  <rect x="47" y="47" width="10" height="10" rx="2" fill="#2563EB"/>
+  <rect x="7" y="47" width="10" height="10" rx="2" fill="#2563EB"/>
+  <!-- Crosshair target -->
+  <circle cx="32" cy="32" r="7" fill="none" stroke="#EF4444" stroke-width="2"/>
+  <line x1="32" y1="22" x2="32" y2="27" stroke="#EF4444" stroke-width="2" stroke-linecap="round"/>
+  <line x1="32" y1="37" x2="32" y2="42" stroke="#EF4444" stroke-width="2" stroke-linecap="round"/>
+  <line x1="22" y1="32" x2="27" y2="32" stroke="#EF4444" stroke-width="2" stroke-linecap="round"/>
+  <line x1="37" y1="32" x2="42" y2="32" stroke="#EF4444" stroke-width="2" stroke-linecap="round"/>
 </svg>

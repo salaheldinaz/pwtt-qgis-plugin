@@ -1,22 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <defs>
-    <linearGradient id="runBar1" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%" stop-color="#000000"/>
-      <stop offset="100%" stop-color="#1f0000"/>
-    </linearGradient>
-    <linearGradient id="runBar2" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%" stop-color="#7f1d1d"/>
-      <stop offset="100%" stop-color="#b91c1c"/>
-    </linearGradient>
-    <linearGradient id="runBar3" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%" stop-color="#dc2626"/>
-      <stop offset="100%" stop-color="#ef4444"/>
-    </linearGradient>
-  </defs>
-  <rect x="10" y="10" width="44" height="14" rx="3.5" fill="url(#runBar1)" stroke="#000000" stroke-width="2"/>
-  <rect x="10" y="25" width="44" height="14" rx="3.5" fill="url(#runBar2)" stroke="#000000" stroke-width="2"/>
-  <rect x="10" y="40" width="44" height="14" rx="3.5" fill="url(#runBar3)" stroke="#000000" stroke-width="2"/>
-  <path d="M16 17l3 3 6-6" fill="none" stroke="#fca5a5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="17" cy="32" r="2.5" fill="#000000" stroke="#fca5a5" stroke-width="1"/>
-  <path d="M15 46.5 L15 51.5 L21 49 Z" fill="#000000" stroke="#000000" stroke-width="1" stroke-linejoin="round"/>
+  <!-- Card background -->
+  <rect x="9" y="5" width="46" height="54" rx="5" fill="#F8FAFC" stroke="#64748B" stroke-width="2"/>
+  <!-- Row 1: completed -->
+  <circle cx="21" cy="19" r="5.5" fill="#10B981"/>
+  <path d="M18 19l2 2.5 4.5-5" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="31" y1="19" x2="47" y2="19" stroke="#CBD5E1" stroke-width="3" stroke-linecap="round"/>
+  <!-- Row 2: running -->
+  <circle cx="21" cy="33" r="5.5" fill="#3B82F6"/>
+  <path d="M19 30l5 3-5 3z" fill="#fff"/>
+  <line x1="31" y1="33" x2="43" y2="33" stroke="#CBD5E1" stroke-width="3" stroke-linecap="round"/>
+  <!-- Row 3: pending -->
+  <circle cx="21" cy="47" r="5.5" fill="none" stroke="#94A3B8" stroke-width="2"/>
+  <circle cx="21" cy="47" r="1.5" fill="#94A3B8"/>
+  <line x1="31" y1="47" x2="45" y2="47" stroke="#CBD5E1" stroke-width="3" stroke-linecap="round"/>
 </svg>
