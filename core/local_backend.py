@@ -203,9 +203,18 @@ class LocalBackend(PWTTBackend):
         cache_dir = os.path.join(os.path.dirname(output_path), ".pwtt_cache")
         os.makedirs(cache_dir, exist_ok=True)
 
+        # QgsTask progress must not be reset to 0 on every log line (search/download are noisy).
+        _progress = [0]
+
+        def emit(pct: int, msg: str = ""):
+            pct = max(0, min(100, int(pct)))
+            _progress[0] = max(_progress[0], pct)
+            if progress_callback:
+                progress_callback(_progress[0], msg)
+
         def job_log(msg: str):
             if progress_callback:
-                progress_callback(0, msg)
+                progress_callback(_progress[0], msg)
 
         job_log(
             f"Local processing: source={source}, cache_dir={cache_dir}, "
@@ -233,8 +242,7 @@ class LocalBackend(PWTTBackend):
             "offline_scenes": [],
         }
 
-        if progress_callback:
-            progress_callback(5, "Searching pre-war products…")
+        emit(5, "Searching pre-war products…")
 
         if source == LOCAL_SOURCE_CDSE:
             pre_products = search_s1_grd(
@@ -245,8 +253,7 @@ class LocalBackend(PWTTBackend):
                 max_results=20,
                 log=job_log,
             )
-            if progress_callback:
-                progress_callback(10, "Searching post-war products…")
+            emit(10, "Searching post-war products…")
             post_products = search_s1_grd(
                 self._token,
                 aoi_wkt,
@@ -258,6 +265,7 @@ class LocalBackend(PWTTBackend):
         elif source == LOCAL_SOURCE_ASF:
             from .asf_downloader import search_s1_grd_asf
 
+            emit(5, "Searching pre-war products…")
             pre_products = search_s1_grd_asf(
                 self._asf_session,
                 aoi_wkt,
@@ -266,8 +274,7 @@ class LocalBackend(PWTTBackend):
                 max_results=20,
                 log=job_log,
             )
-            if progress_callback:
-                progress_callback(10, "Searching post-war products…")
+            emit(10, "Searching post-war products…")
             post_products = search_s1_grd_asf(
                 self._asf_session,
                 aoi_wkt,
@@ -279,6 +286,7 @@ class LocalBackend(PWTTBackend):
         else:
             from .pc_downloader import search_s1_grd_pc
 
+            emit(5, "Searching pre-war products…")
             pre_products = search_s1_grd_pc(
                 self._pc_client,
                 aoi_wkt,
@@ -287,8 +295,7 @@ class LocalBackend(PWTTBackend):
                 max_results=20,
                 log=job_log,
             )
-            if progress_callback:
-                progress_callback(10, "Searching post-war products…")
+            emit(10, "Searching post-war products…")
             post_products = search_s1_grd_pc(
                 self._pc_client,
                 aoi_wkt,
@@ -367,8 +374,10 @@ class LocalBackend(PWTTBackend):
             for prod in products:
                 if loaded >= max_per_period:
                     break
-                if progress_callback:
-                    progress_callback(0, f"{label} {loaded + 1}/{max_per_period}…")
+                emit(
+                    min(54, 12 + int(42 * (loaded + 1) / max_per_period)),
+                    f"{label} {loaded + 1}/{max_per_period}…",
+                )
                 pid, name = prod["Id"], prod["Name"]
                 cd = prod.get("ContentDate") or {}
                 scene_date = (cd.get("Start") or "")[:19]
@@ -389,11 +398,7 @@ class LocalBackend(PWTTBackend):
                             self.run_metadata["offline_scenes"].append(
                                 {"id": pid, "name": name, "date": scene_date}
                             )
-                        if progress_callback:
-                            progress_callback(
-                                0,
-                                f"{label}: {name} is offline, staging order triggered…",
-                            )
+                        job_log(f"{label}: {name} is offline, staging order triggered…")
                         continue
                 else:
                     from .asf_downloader import download_product_asf
@@ -414,8 +419,7 @@ class LocalBackend(PWTTBackend):
                             with _lock:
                                 download_failures.append({"name": name, "error": err_msg})
                         detail = _short_progress_error(err_msg)
-                        if progress_callback:
-                            progress_callback(0, f"{label}: skip {name} — {detail}")
+                        job_log(f"{label}: skip {name} — {detail}")
                         continue
 
                 vv_path, vh_path = find_vv_vh_in_safe(safe_dir)
@@ -430,8 +434,7 @@ class LocalBackend(PWTTBackend):
                 )
                 result = _read_vv_vh(vv_path, vh_path)
                 if result is None:
-                    if progress_callback:
-                        progress_callback(0, f"{label}: skip {name} (failed to read raster)…")
+                    job_log(f"{label}: skip {name} (failed to read raster)…")
                     continue
                 arrays_list.append(result)
                 with _lock:
@@ -449,8 +452,10 @@ class LocalBackend(PWTTBackend):
             for prod in products:
                 if loaded >= max_per_period:
                     break
-                if progress_callback:
-                    progress_callback(0, f"{label} {loaded + 1}/{max_per_period}…")
+                emit(
+                    min(54, 12 + int(42 * (loaded + 1) / max_per_period)),
+                    f"{label} {loaded + 1}/{max_per_period}…",
+                )
                 pid, name = prod["Id"], prod["Name"]
                 cd = prod.get("ContentDate") or {}
                 scene_date = (cd.get("Start") or "")[:19]
@@ -464,22 +469,16 @@ class LocalBackend(PWTTBackend):
                     with _lock:
                         download_failures.append({"name": name, "error": str(dl_err)})
                 if not vv_path or not vh_path:
-                    if progress_callback:
-                        if dl_err is not None:
-                            detail = _short_progress_error(str(dl_err))
-                            progress_callback(
-                                0, f"{label}: skip {name} — {detail}"
-                            )
-                        else:
-                            progress_callback(
-                                0, f"{label}: skip {name} (no VV/VH assets)…"
-                            )
+                    if dl_err is not None:
+                        detail = _short_progress_error(str(dl_err))
+                        job_log(f"{label}: skip {name} — {detail}")
+                    else:
+                        job_log(f"{label}: skip {name} (no VV/VH assets)…")
                     continue
                 job_log(f"{label}: PC COGs ready — {vv_path} | {vh_path}")
                 result = _read_vv_vh(vv_path, vh_path)
                 if result is None:
-                    if progress_callback:
-                        progress_callback(0, f"{label}: skip {name} (failed to read raster)…")
+                    job_log(f"{label}: skip {name} (failed to read raster)…")
                     continue
                 arrays_list.append(result)
                 with _lock:
@@ -490,8 +489,7 @@ class LocalBackend(PWTTBackend):
                     f"[{loaded}/{max_per_period}]"
                 )
 
-        if progress_callback:
-            progress_callback(12, "Downloading pre- and post-war scenes…")
+        emit(12, "Downloading pre- and post-war scenes…")
 
         loader = load_products_pc if source == LOCAL_SOURCE_PC else load_products_safe
 
@@ -601,8 +599,7 @@ class LocalBackend(PWTTBackend):
             "Local: per-scene reproject (if needed), Lee filter, log-amplitude — "
             f"pre {len(pre_vv_list)} layers, post {len(post_vv_list)} layers"
         )
-        if progress_callback:
-            progress_callback(55, "Computing t-test…")
+        emit(55, "Computing t-test…")
         pre_vv = np.stack(pre_vv_list, axis=0)
         pre_vh = np.stack(pre_vh_list, axis=0)
         post_vv = np.stack(post_vv_list, axis=0)
@@ -640,8 +637,7 @@ class LocalBackend(PWTTBackend):
         p_value = np.minimum(p_vv, p_vh)
         p_value = np.clip(p_value, 1e-10, 1.0)
 
-        if progress_callback:
-            progress_callback(70, "Post-processing…")
+        emit(70, "Post-processing…")
         job_log("Local: 10 m Gaussian on max |t|, then 50/100/150 m ring means (equal weight)")
         max_change = _focal_median_gaussian(max_change, 10.0, pixel_size)
 
@@ -656,8 +652,7 @@ class LocalBackend(PWTTBackend):
         t_statistic = (max_change + k50 + k100 + k150) / 4.0
         damage = (t_statistic > float(damage_threshold)).astype(np.float32)
 
-        if progress_callback:
-            progress_callback(90, "Writing GeoTIFF…")
+        emit(90, "Writing GeoTIFF…")
         job_log(
             f"Local: write GeoTIFF bands (1=t, 2=damage mask, 3=p-value) LZW → {output_path}"
         )
@@ -680,6 +675,5 @@ class LocalBackend(PWTTBackend):
         self.run_metadata["pre_scenes_count"] = len(pre_arrays)
         self.run_metadata["post_scenes_count"] = len(post_arrays)
 
-        if progress_callback:
-            progress_callback(95, "Done.")
+        emit(95, "Done.")
         return output_path
