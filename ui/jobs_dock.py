@@ -2,6 +2,7 @@
 """Jobs dock: job list, actions, progress, log, order polling."""
 
 import glob
+import html
 import os
 import shutil
 import threading
@@ -23,7 +24,7 @@ from qgis.PyQt.QtWidgets import (
     QDialogButtonBox,
 )
 from qgis.PyQt.QtCore import Qt, QUrl, pyqtSignal, QTimer, QSize
-from qgis.PyQt.QtGui import QColor, QDesktopServices, QIcon
+from qgis.PyQt.QtGui import QColor, QDesktopServices, QIcon, QPalette
 from qgis.core import QgsApplication, QgsProject, QgsSettings
 
 from .backend_auth import create_and_auth_backend, ensure_footprint_dependencies
@@ -425,6 +426,138 @@ class PWTTJobsDock(QDockWidget):
                 job_store.update_job(jid, activity_log=list(entries))
         self._activity_log_dirty_jobs.clear()
 
+    def _job_log_theme_colors(self):
+        """Hex colors tuned for light vs dark QTextEdit backgrounds."""
+        base = self.log_text.palette().color(QPalette.ColorRole.Base)
+        dark = base.lightness() < 140
+        if dark:
+            return {
+                "default": "#b0bec5",
+                "hdr": "#ffe082",
+                "success": "#69f0ae",
+                "error": "#ff8a80",
+                "err_soft": "#ffcc80",
+                "warn": "#ffd54f",
+                "cdse": "#90caf9",
+                "asf": "#ce93d8",
+                "pc": "#80deea",
+                "local": "#fff59d",
+                "pre": "#a5d6a7",
+                "post": "#90caf9",
+                "info": "#80cbc4",
+                "ui": "#b39ddb",
+            }
+        return {
+            "default": "#37474f",
+            "hdr": "#e65100",
+            "success": "#1b5e20",
+            "error": "#b71c1c",
+            "err_soft": "#e65100",
+            "warn": "#f57c00",
+            "cdse": "#0d47a1",
+            "asf": "#4a148c",
+            "pc": "#006064",
+            "local": "#827717",
+            "pre": "#2e7d32",
+            "post": "#1565c0",
+            "info": "#00695c",
+            "ui": "#4527a0",
+        }
+
+    @staticmethod
+    def _log_entry_is_rich_html(msg: str) -> bool:
+        s = msg.strip()
+        low = s.lower()
+        if "<br" in low:
+            return True
+        if not s.startswith("<"):
+            return False
+        return any(
+            x in s
+            for x in ("<b>", "<pre", "<div", "<i>", "<a ", "</")
+        )
+
+    def _pick_job_log_color(self, msg: str, c: dict) -> str:
+        low = msg.lower()
+        stripped = msg.lstrip()
+        sl = stripped.lower()
+
+        if "<pre>" in low:
+            return c["error"]
+        if "task failed" in low:
+            return c["error"]
+        if "task completed successfully" in low:
+            return c["success"]
+        if "products offline" in low or "staging from cold" in low:
+            return c["warn"]
+        if "cancelled" in low or "canceled" in low:
+            return c["warn"]
+        if "terminated unexpectedly" in low:
+            return c["error"]
+        if "download failed" in low or ("skip" in sl and "failed" in sl):
+            return c["err_soft"]
+        if "failed to" in low or "footprints error" in low:
+            return c["error"]
+        if sl.startswith("pre:"):
+            return c["pre"]
+        if sl.startswith("post:"):
+            return c["post"]
+        if sl.startswith("local:") or low.startswith("local processing"):
+            return c["local"]
+        if sl.startswith("cdse") or "cdse api" in low or sl.startswith("cdse:"):
+            return c["cdse"]
+        if sl.startswith("asf") or "asf api" in low or sl.startswith("asf:"):
+            return c["asf"]
+        if sl.startswith("pc ") or "pc api" in low or "pc get" in low[:24]:
+            return c["pc"]
+        if "task started" in low:
+            return c["hdr"]
+        if "remote job id saved" in low:
+            return c["info"]
+        if "openeo" in low:
+            return c["cdse"]
+        if "earth engine" in low:
+            return c["asf"]
+        if (
+            "load local" in low
+            or "apply styling" in low
+            or "layer added" in low
+            or "footprints" in low
+        ):
+            return c["ui"]
+        return c["default"]
+
+    def _format_job_log_entry_html(self, msg: str) -> str:
+        c = self._job_log_theme_colors()
+        color = self._pick_job_log_color(msg, c)
+        margin = "margin:3px 0;line-height:1.4;"
+        if self._log_entry_is_rich_html(msg):
+            inner = msg
+            if "<pre>" in msg:
+                inner = msg.replace(
+                    "<pre>",
+                    "<pre style='opacity:0.95;white-space:pre-wrap;word-break:break-word;'>",
+                    1,
+                )
+            return f'<div style="{margin}color:{color};">{inner}</div>'
+        safe = html.escape(msg, quote=False).replace("\n", "<br/>")
+        return f'<p style="{margin}color:{color};margin-block:3px;">{safe}</p>'
+
+    def _job_log_document_html(self, entries):
+        parts = [self._format_job_log_entry_html(m) for m in entries]
+        bg = self.log_text.palette().color(QPalette.ColorRole.Base).name()
+        return (
+            "<html><head><meta charset=\"utf-8\"/></head>"
+            f"<body style=\"background-color:{bg};font-family:system-ui,-apple-system,"
+            'Segoe UI,sans-serif;font-size:12px;\">'
+            + "".join(parts)
+            + "</body></html>"
+        )
+
+    def _append_job_log(self, msg: str):
+        """Append one log line/block with PWTT color coding (raw *msg* stays in _job_logs)."""
+        self.log_text.append(self._format_job_log_entry_html(msg))
+
     def _get_selected_job_id(self):
         row = self.job_table.currentRow()
         if row < 0:
@@ -518,10 +651,11 @@ class PWTTJobsDock(QDockWidget):
             "Check && Resume" if st == job_store.STATUS_WAITING_ORDERS else "Resume"
         )
 
-        # Log
+        # Log (colorized HTML; raw lines remain in _job_logs for JSON persist)
         self.log_text.clear()
-        for msg in self._job_logs.get(job["id"], []):
-            self.log_text.append(msg)
+        entries = self._job_logs.get(job["id"], [])
+        if entries:
+            self.log_text.setHtml(self._job_log_document_html(entries))
 
         # Progress
         if st == job_store.STATUS_COMPLETED:
@@ -601,13 +735,13 @@ class PWTTJobsDock(QDockWidget):
         self._job_logs.setdefault(job_id, []).append(msg)
         self._schedule_activity_log_persist(job_id)
         if self._get_selected_job_id() == job_id:
-            self.log_text.append(msg)
+            self._append_job_log(msg)
 
     def _handle_status_message(self, job_id, msg):
         self._job_logs.setdefault(job_id, []).append(msg)
         self._schedule_activity_log_persist(job_id)
         if self._get_selected_job_id() == job_id:
-            self.log_text.append(msg)
+            self._append_job_log(msg)
 
         # Persist remote job id as soon as the backend sets it
         task = self._active_tasks.get(job_id)
@@ -622,7 +756,7 @@ class PWTTJobsDock(QDockWidget):
                     self._job_logs.setdefault(job_id, []).append(note)
                     self._schedule_activity_log_persist(job_id)
                     if self._get_selected_job_id() == job_id:
-                        self.log_text.append(note)
+                        self._append_job_log(note)
                     self._refresh_job_list()
 
     def _on_task_progress(self, job_id, value):
@@ -712,7 +846,7 @@ class PWTTJobsDock(QDockWidget):
         self._refresh_job_list()
         if self._get_selected_job_id() == job_id:
             self.progress_bar.setValue(100)
-            self.log_text.append("<br>".join(done_parts))
+            self._append_job_log("<br>".join(done_parts))
 
     def _on_task_terminated(self, job_id):
         from ..core import job_store
@@ -743,12 +877,16 @@ class PWTTJobsDock(QDockWidget):
             else:
                 job_store.update_job(job_id, activity_log=log_snapshot)
         elif task.exception:
-            err_parts = [f"<b>Task failed:</b> {task.exception}"]
+            err_parts = [
+                f"<b>Task failed:</b> {html.escape(str(task.exception), quote=False)}"
+            ]
             if remote_id:
-                err_parts.append(f"Remote job: {remote_id}")
+                err_parts.append(html.escape(f"Remote job: {remote_id}", quote=False))
             self._job_logs.setdefault(job_id, []).append("<br>".join(err_parts))
             if task.error_detail:
-                self._job_logs[job_id].append(f"<pre>{task.error_detail}</pre>")
+                self._job_logs[job_id].append(
+                    f"<pre>{html.escape(task.error_detail, quote=False)}</pre>"
+                )
             job_store.update_job(
                 job_id,
                 status=job_store.STATUS_FAILED,
@@ -810,7 +948,7 @@ class PWTTJobsDock(QDockWidget):
         v = QVBoxLayout(dlg)
         te = QTextEdit(dlg)
         te.setReadOnly(True)
-        te.setHtml("<br>".join(entries))
+        te.setHtml(self._job_log_document_html(entries))
         v.addWidget(te)
         bb = QDialogButtonBox(QDialogButtonBox.Close)
         bb.rejected.connect(dlg.reject)
@@ -909,7 +1047,7 @@ class PWTTJobsDock(QDockWidget):
         msg = "<br>".join(log_parts)
         self._job_logs.setdefault(jid, []).append(msg)
         if self._get_selected_job_id() == jid:
-            self.log_text.append(msg)
+            self._append_job_log(msg)
 
     @staticmethod
     def _raster_source_paths_resolved(layer):
@@ -993,7 +1131,7 @@ class PWTTJobsDock(QDockWidget):
         msg = "Apply styling: updated " + ", ".join(matched)
         self._job_logs.setdefault(jid, []).append(msg)
         if self._get_selected_job_id() == jid:
-            self.log_text.append(msg)
+            self._append_job_log(msg)
         try:
             from qgis.utils import iface as qgis_iface
 
@@ -1100,7 +1238,7 @@ class PWTTJobsDock(QDockWidget):
                 note = f"Footprints saved: {gpkg_path}"
                 self._job_logs.setdefault(jid, []).append(note)
                 if self._get_selected_job_id() == jid:
-                    self.log_text.append(note)
+                    self._append_job_log(note)
                 self._add_local_footprints_layer(gpkg_path, jid, job.get("backend_id"))
             else:
                 self._status_signal.emit(jid, "Footprints step finished but output file is missing.")
@@ -1135,12 +1273,12 @@ class PWTTJobsDock(QDockWidget):
             msg = f"Layer added: {label}"
             self._job_logs.setdefault(job_id, []).append(msg)
             if self._get_selected_job_id() == job_id:
-                self.log_text.append(msg)
+                self._append_job_log(msg)
         else:
             msg = "Failed to load footprints GeoPackage."
             self._job_logs.setdefault(job_id, []).append(msg)
             if self._get_selected_job_id() == job_id:
-                self.log_text.append(msg)
+                self._append_job_log(msg)
 
     def _resume_selected(self):
         job = self._get_selected_job()
