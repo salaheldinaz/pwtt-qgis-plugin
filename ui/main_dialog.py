@@ -749,11 +749,6 @@ class PWTTControlsDock(QDockWidget):
         self.damage_threshold_spin.setValue(float(job.get("damage_threshold", 3.3)))
         self.gee_map_preview_cb.setChecked(job.get("gee_viz", False))
 
-        # Output directory
-        out = job.get("output_dir", "")
-        if out:
-            self.output_dir.setFilePath(out)
-
         # AOI — parse WKT, set rubber band, zoom
         aoi_wkt = job.get("aoi_wkt")
         if aoi_wkt:

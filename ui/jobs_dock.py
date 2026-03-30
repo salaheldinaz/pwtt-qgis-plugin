@@ -19,8 +19,8 @@ from qgis.PyQt.QtWidgets import (
     QHeaderView,
     QWidget,
 )
-from qgis.PyQt.QtCore import Qt, pyqtSignal, QTimer
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtCore import Qt, QUrl, pyqtSignal, QTimer
+from qgis.PyQt.QtGui import QColor, QDesktopServices
 from qgis.core import QgsApplication, QgsProject, QgsSettings
 
 from .backend_auth import create_and_auth_backend, ensure_footprint_dependencies
@@ -97,6 +97,7 @@ class PWTTJobsDock(QDockWidget):
         # Action buttons
         btn_row = QHBoxLayout()
         self.load_btn = QPushButton("Load parameters")
+        self.open_output_btn = QPushButton("Open output folder")
         self.load_local_btn = QPushButton("Load Local")
         self.apply_style_btn = QPushButton("Apply styling")
         self.footprints_btn = QPushButton("Per-building (OSM)")
@@ -105,11 +106,12 @@ class PWTTJobsDock(QDockWidget):
         self.cancel_btn = QPushButton("Cancel")
         self.rerun_btn = QPushButton("Rerun")
         self.delete_btn = QPushButton("Delete")
-        for btn in (self.load_btn, self.load_local_btn, self.apply_style_btn, self.footprints_btn, self.resume_btn, self.stop_btn,
+        for btn in (self.load_btn, self.open_output_btn, self.load_local_btn, self.apply_style_btn, self.footprints_btn, self.resume_btn, self.stop_btn,
                      self.cancel_btn, self.rerun_btn, self.delete_btn):
             btn.setEnabled(False)
             btn_row.addWidget(btn)
-        self.load_btn.setToolTip("Load job AOI to map and parameters to controls panel")
+        self.load_btn.setToolTip("Load job AOI to map and parameters to controls panel (output folder unchanged)")
+        self.open_output_btn.setToolTip("Open this job\u2019s output folder in the file manager (if it exists on disk)")
         self.load_local_btn.setToolTip(
             "If the result GeoTIFF (and footprints) exist on disk, add them to the map"
         )
@@ -121,6 +123,7 @@ class PWTTJobsDock(QDockWidget):
             "Fetch OSM buildings and mean damage (T-stat) per polygon using the job\u2019s result GeoTIFF"
         )
         self.load_btn.clicked.connect(self._load_selected)
+        self.open_output_btn.clicked.connect(self._open_output_folder)
         self.load_local_btn.clicked.connect(self._load_local_selected)
         self.apply_style_btn.clicked.connect(self._apply_styling_to_result_selected)
         self.footprints_btn.clicked.connect(self._footprints_for_local_selected)
@@ -278,7 +281,7 @@ class PWTTJobsDock(QDockWidget):
         from ..core import job_store
         job = self._get_selected_job()
         if not job:
-            for btn in (self.load_btn, self.load_local_btn, self.apply_style_btn, self.footprints_btn, self.resume_btn, self.stop_btn,
+            for btn in (self.load_btn, self.open_output_btn, self.load_local_btn, self.apply_style_btn, self.footprints_btn, self.resume_btn, self.stop_btn,
                          self.cancel_btn, self.rerun_btn, self.delete_btn):
                 btn.setEnabled(False)
             self.log_text.clear()
@@ -287,6 +290,8 @@ class PWTTJobsDock(QDockWidget):
 
         st = job["status"]
         self.load_btn.setEnabled(True)
+        out_dir = (job.get("output_dir") or "").strip()
+        self.open_output_btn.setEnabled(bool(out_dir and os.path.isdir(out_dir)))
         self.load_local_btn.setEnabled(True)
         self.apply_style_btn.setEnabled(True)
         self.footprints_btn.setEnabled(self._local_result_tif_path(job) is not None)
@@ -543,6 +548,20 @@ class PWTTJobsDock(QDockWidget):
         if not self.controls_dock:
             return
         self.controls_dock.load_job_params(job)
+
+    def _open_output_folder(self):
+        job = self._get_selected_job()
+        if not job:
+            return
+        out_dir = (job.get("output_dir") or "").strip()
+        if not out_dir or not os.path.isdir(out_dir):
+            QMessageBox.information(
+                self,
+                "PWTT",
+                "Output folder does not exist or is not set for this job.",
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(out_dir))
 
     def _load_local_selected(self):
         """Add on-disk result raster and footprint layers for the selected job, if they exist."""
