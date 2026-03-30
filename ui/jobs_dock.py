@@ -21,12 +21,29 @@ from qgis.PyQt.QtWidgets import (
     QDialog,
     QDialogButtonBox,
 )
-from qgis.PyQt.QtCore import Qt, QUrl, pyqtSignal, QTimer
-from qgis.PyQt.QtGui import QColor, QDesktopServices
+from qgis.PyQt.QtCore import Qt, QUrl, pyqtSignal, QTimer, QSize
+from qgis.PyQt.QtGui import QColor, QDesktopServices, QIcon
 from qgis.core import QgsApplication, QgsProject, QgsSettings
 
 from .backend_auth import create_and_auth_backend, ensure_footprint_dependencies
 from .dock_common import STATUS_COLORS, STATUS_LABELS, dock_title, job_footprints_sources
+
+
+def _jobs_dock_btn_icon(*theme_paths: str, resource_fallback: str = None) -> QIcon:
+    """QGIS theme icon if available, else optional ``:/pwtt/...`` resource."""
+    for p in theme_paths:
+        ic = QgsApplication.getThemeIcon(p)
+        if not ic.isNull():
+            return ic
+    if resource_fallback:
+        ic = QIcon(resource_fallback)
+        if not ic.isNull():
+            return ic
+    return QIcon()
+
+
+_JOBS_BTN_ICON_SIZE = QSize(18, 18)
+
 
 class PWTTJobsDock(QDockWidget):
     """Dockable jobs panel: job table, action buttons, progress bar, and log."""
@@ -115,9 +132,63 @@ class PWTTJobsDock(QDockWidget):
         self.cancel_btn = QPushButton("Cancel")
         self.rerun_btn = QPushButton("Rerun")
         self.delete_btn = QPushButton("Delete")
+
+        self.load_btn.setIcon(
+            _jobs_dock_btn_icon(
+                "/mActionProjectProperties.svg",
+                "/mActionOptions.svg",
+            )
+        )
+        self.open_output_btn.setIcon(
+            _jobs_dock_btn_icon("/mActionFileOpen.svg", "/mIconFolder.svg")
+        )
+        self.view_logs_btn.setIcon(
+            _jobs_dock_btn_icon(
+                "/mMessageLog.svg",
+                "/mIconConsole.svg",
+                "/mActionEditHelpContent.svg",
+            )
+        )
+        self.load_local_btn.setIcon(
+            _jobs_dock_btn_icon(
+                "/mActionAddRasterLayer.svg",
+                "/mActionAddLayer.svg",
+                resource_fallback=":/pwtt/icon_grd.svg",
+            )
+        )
+        self.apply_style_btn.setIcon(
+            _jobs_dock_btn_icon("/mActionStyleManager.svg", "/mActionEditSymbol.svg")
+        )
+        self.footprints_btn.setIcon(
+            _jobs_dock_btn_icon(
+                "/mIconPolygonLayer.svg",
+                "/mActionAddOgrLayer.svg",
+            )
+        )
+        self.resume_btn.setIcon(
+            _jobs_dock_btn_icon(
+                "/mMediaPlay.svg",
+                "/mActionStart.svg",
+                resource_fallback=":/pwtt/icon_run.svg",
+            )
+        )
+        self.stop_btn.setIcon(_jobs_dock_btn_icon("/mActionStop.svg"))
+        self.cancel_btn.setIcon(
+            _jobs_dock_btn_icon("/mTaskCancel.svg", "/mActionCancel.svg")
+        )
+        self.rerun_btn.setIcon(
+            _jobs_dock_btn_icon(
+                "/mActionRepeat.svg",
+                "/mActionRefresh.svg",
+                resource_fallback=":/pwtt/icon_run.svg",
+            )
+        )
+        self.delete_btn.setIcon(_jobs_dock_btn_icon("/mActionDeleteSelected.svg"))
+
         for btn in (self.load_btn, self.open_output_btn, self.view_logs_btn, self.load_local_btn, self.apply_style_btn, self.footprints_btn, self.resume_btn, self.stop_btn,
                      self.cancel_btn, self.rerun_btn, self.delete_btn):
             btn.setEnabled(False)
+            btn.setIconSize(_JOBS_BTN_ICON_SIZE)
             btn_row.addWidget(btn)
         self.load_btn.setToolTip("Load job AOI to map and parameters to controls panel (output folder unchanged)")
         self.open_output_btn.setToolTip("Open this job\u2019s output folder in the file manager (if it exists on disk)")
