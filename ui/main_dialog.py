@@ -595,10 +595,11 @@ class PWTTControlsDock(QDockWidget):
                     f"Packages were installed but {', '.join(still_missing)} "
                     f"still cannot be imported.\n\n"
                     f"Technical detail:\n{detail}\n\n"
-                    f"If you see pydantic/pystac/version errors, try "
-                    f"Plugins → PWTT → Install Dependencies again after this update. "
-                    f"You can also remove the folder\n{deps.plugin_deps_dir()}\n"
-                    f"and reinstall dependencies for a clean tree.",
+                    f"Retry: open the PWTT **Damage Detection** panel "
+                    f"(toolbar or Plugins menu), then press **Install Dependencies** "
+                    f"under Processing backend (orange “Missing” state).\n\n"
+                    f"Or delete the folder for a clean reinstall:\n"
+                    f"{deps.plugin_deps_dir()}",
                 )
 
     def _get_credentials(self, backend_id):

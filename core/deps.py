@@ -205,6 +205,27 @@ DEPS_PRIORITY_IMPORTS = frozenset({
 })
 
 
+def _purge_stale_typing_extensions():
+    """Remove ``typing_extensions`` from the import cache when PWTT deps ship a copy.
+
+    QGIS often loads its bundled ``typing_extensions`` (no ``Sentinel``, etc.) at
+    startup before PWTT runs.  That module stays in ``sys.modules``, so even with
+    deps first on ``sys.path``, ``import typing_extensions`` keeps returning the
+    stale object and ``planetary_computer`` / ``pydantic`` fail.
+    """
+    d = _deps_dir()
+    if not os.path.isdir(d):
+        return
+    te_py = os.path.join(d, "typing_extensions.py")
+    te_pkg = os.path.join(d, "typing_extensions", "__init__.py")
+    if not (os.path.isfile(te_py) or os.path.isfile(te_pkg)):
+        return
+    for key in list(sys.modules):
+        if key == "typing_extensions" or key.startswith("typing_extensions."):
+            sys.modules.pop(key, None)
+    importlib.invalidate_caches()
+
+
 @contextmanager
 def deps_priority():
     """Put the PWTT deps directory *first* on ``sys.path`` for this block.
@@ -224,6 +245,7 @@ def deps_priority():
         path = [p for p in sys.path if os.path.normpath(os.path.abspath(p)) != d_norm]
         sys.path[:] = [d] + path
         importlib.invalidate_caches()
+        _purge_stale_typing_extensions()
         yield
     finally:
         sys.path[:] = saved
