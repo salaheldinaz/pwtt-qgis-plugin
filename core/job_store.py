@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 """Persistent job store: save, load, update PWTT analysis jobs."""
 
+import copy
 import json
 import os
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
+
+PWTT_JOBS_EXPORT_FORMAT = "pwtt_jobs_export"
+PWTT_JOBS_EXPORT_VERSION = 1
 
 from qgis.core import QgsApplication
 
@@ -145,3 +149,73 @@ def recover_stale_jobs():
             changed = True
     if changed:
         _write(jobs)
+
+
+def _jobs_list_from_parsed_json(data: Any) -> List[dict]:
+    """Resolve a jobs list from export payload or a raw JSON array."""
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    if isinstance(data, dict):
+        if data.get("format") == PWTT_JOBS_EXPORT_FORMAT and isinstance(data.get("jobs"), list):
+            return [x for x in data["jobs"] if isinstance(x, dict)]
+        if isinstance(data.get("jobs"), list):
+            return [x for x in data["jobs"] if isinstance(x, dict)]
+    raise ValueError("Unrecognized jobs file (expected PWTT export or a JSON array of job objects).")
+
+
+def export_jobs_to_file(path: str) -> int:
+    """Write all stored jobs to *path* as PWTT export JSON. Returns job count."""
+    jobs = _read_raw()
+    payload = {
+        "format": PWTT_JOBS_EXPORT_FORMAT,
+        "version": PWTT_JOBS_EXPORT_VERSION,
+        "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "jobs": jobs,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    return len(jobs)
+
+
+def merge_jobs_from_file(path: str) -> Dict[str, int]:
+    """Append jobs from an export or legacy jobs.json array; avoid id collisions.
+
+    Returns counts: added, skipped_invalid, ids_rewritten.
+    """
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    incoming = _jobs_list_from_parsed_json(data)
+
+    existing = _read_raw()
+    used_ids = {j["id"] for j in existing if j.get("id")}
+    added = 0
+    skipped_invalid = 0
+    ids_rewritten = 0
+
+    for raw in incoming:
+        if not raw.get("backend_id"):
+            skipped_invalid += 1
+            continue
+        job = copy.deepcopy(raw)
+        oid = job.get("id")
+        if not oid or not isinstance(oid, str):
+            job["id"] = uuid.uuid4().hex[:8]
+        while job["id"] in used_ids:
+            job["id"] = uuid.uuid4().hex[:8]
+            ids_rewritten += 1
+        used_ids.add(job["id"])
+        if job.get("status") == STATUS_RUNNING:
+            job["status"] = STATUS_STOPPED
+            job["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        if not isinstance(job.get("activity_log"), list):
+            job["activity_log"] = list(job.get("activity_log") or [])
+        existing.insert(0, job)
+        added += 1
+
+    if added:
+        _write(existing)
+    return {
+        "added": added,
+        "skipped_invalid": skipped_invalid,
+        "ids_rewritten": ids_rewritten,
+    }

@@ -3,6 +3,7 @@
 
 import glob
 import html
+import json
 import os
 import re
 import shutil
@@ -24,6 +25,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
 )
 from qgis.PyQt.QtCore import Qt, QUrl, pyqtSignal, QTimer, QSize
 from qgis.PyQt.QtGui import QColor, QDesktopServices, QIcon, QPalette
@@ -38,6 +40,12 @@ from .dock_common import STATUS_COLORS, STATUS_LABELS, dock_title, job_footprint
 
 # Leading "[YYYY-mm-dd HH:MM:SS] " on persisted activity lines (for color rules after strip).
 _PWTT_LOG_TS_PREFIX_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s*")
+
+_JOBS_IO_FILES_HINT = (
+    "Copy the job output folders and any related project files if you want to restore local "
+    "result files or check logs on another machine. If you do not copy those files, you will "
+    "only have the job parameters."
+)
 
 
 def pwtt_activity_ts_prefix() -> str:
@@ -326,6 +334,29 @@ class PWTTJobsDock(QDockWidget):
         self.rerun_btn.clicked.connect(self._rerun_selected)
         self.delete_btn.clicked.connect(self._delete_selected)
         layout.addLayout(btn_row)
+
+        io_row = QHBoxLayout()
+        self.export_jobs_btn = QPushButton("Export jobs…")
+        self.import_jobs_btn = QPushButton("Import jobs…")
+        self.export_jobs_btn.setIcon(
+            _jobs_dock_btn_icon("/mActionFileSave.svg", "/mActionSaveEdits.svg")
+        )
+        self.import_jobs_btn.setIcon(
+            _jobs_dock_btn_icon("/mActionFileOpen.svg", "/mActionAddOgrLayer.svg")
+        )
+        for btn in (self.export_jobs_btn, self.import_jobs_btn):
+            btn.setIconSize(_JOBS_BTN_ICON_SIZE)
+            io_row.addWidget(btn)
+        io_row.addStretch(1)
+        self.export_jobs_btn.setToolTip(
+            "Save all jobs to a JSON file (parameters and saved activity log text, not rasters)"
+        )
+        self.import_jobs_btn.setToolTip(
+            "Add jobs from a JSON export or another machine\u2019s jobs list (merge into this profile)"
+        )
+        self.export_jobs_btn.clicked.connect(self._export_jobs)
+        self.import_jobs_btn.clicked.connect(self._import_jobs)
+        layout.addLayout(io_row)
 
         # Progress bar
         self.progress_bar = QProgressBar()
@@ -1452,6 +1483,82 @@ class PWTTJobsDock(QDockWidget):
         os.makedirs(new_job["output_dir"], exist_ok=True)
         job_store.save_job(new_job)
         self.launch_job(new_job, backend)
+
+    def _export_jobs(self):
+        from ..core import job_store
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export PWTT jobs",
+            "",
+            "JSON (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        try:
+            n = job_store.export_jobs_to_file(path)
+        except OSError as e:
+            QMessageBox.critical(self, "Export jobs", str(e))
+            return
+        QMessageBox.information(
+            self,
+            "Jobs exported",
+            f"Exported {n} job(s) to:\n{path}\n\n{_JOBS_IO_FILES_HINT}",
+        )
+
+    def _import_jobs(self):
+        from ..core import job_store
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import PWTT jobs",
+            "",
+            "JSON (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            stats = job_store.merge_jobs_from_file(path)
+        except ValueError as e:
+            QMessageBox.critical(self, "Import jobs", str(e))
+            return
+        except json.JSONDecodeError as e:
+            QMessageBox.critical(self, "Import jobs", f"Invalid JSON:\n{e}")
+            return
+        except OSError as e:
+            QMessageBox.critical(self, "Import jobs", str(e))
+            return
+
+        added = stats["added"]
+        if added == 0:
+            msg = (
+                "No jobs were added (file empty, invalid entries, or nothing to merge).\n\n"
+                f"{_JOBS_IO_FILES_HINT}"
+            )
+            if stats["skipped_invalid"]:
+                msg = (
+                    f"No valid jobs found ({stats['skipped_invalid']} skipped).\n\n"
+                    f"{_JOBS_IO_FILES_HINT}"
+                )
+            QMessageBox.warning(self, "Import jobs", msg)
+            return
+
+        self._refresh_job_list()
+        lines = [
+            f"Added {added} job(s) from:\n{path}",
+        ]
+        if stats["skipped_invalid"]:
+            lines.append(f"Skipped {stats['skipped_invalid']} invalid entr(y/ies).")
+        if stats["ids_rewritten"]:
+            lines.append(
+                f"Local job id(s) were changed for {stats['ids_rewritten']} job(s) "
+                "because those id(s) were already in use."
+            )
+        lines.append("")
+        lines.append(_JOBS_IO_FILES_HINT)
+        QMessageBox.information(self, "Jobs imported", "\n".join(lines))
 
     def _delete_selected(self):
         from ..core import job_store
