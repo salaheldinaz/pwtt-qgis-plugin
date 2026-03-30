@@ -4,8 +4,10 @@
 import glob
 import html
 import os
+import re
 import shutil
 import threading
+from datetime import datetime
 
 from qgis.PyQt.QtWidgets import (
     QDockWidget,
@@ -33,6 +35,14 @@ from .backend_auth import (
     ensure_footprint_dependencies,
 )
 from .dock_common import STATUS_COLORS, STATUS_LABELS, dock_title, job_footprints_sources
+
+# Leading "[YYYY-mm-dd HH:MM:SS] " on persisted activity lines (for color rules after strip).
+_PWTT_LOG_TS_PREFIX_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s*")
+
+
+def pwtt_activity_ts_prefix() -> str:
+    """Local-time bracket prefix for Jobs / activity log lines."""
+    return datetime.now().strftime("[%Y-%m-%d %H:%M:%S] ")
 
 
 def _jobs_dock_btn_icon(*theme_paths: str, resource_fallback: str = None) -> QIcon:
@@ -470,7 +480,7 @@ class PWTTJobsDock(QDockWidget):
 
     @staticmethod
     def _log_entry_is_rich_html(msg: str) -> bool:
-        s = msg.strip()
+        s = _PWTT_LOG_TS_PREFIX_RE.sub("", (msg or "").strip(), count=1)
         low = s.lower()
         if "<br" in low:
             return True
@@ -482,9 +492,9 @@ class PWTTJobsDock(QDockWidget):
         )
 
     def _pick_job_log_color(self, msg: str, c: dict) -> str:
-        low = msg.lower()
-        stripped = msg.lstrip()
-        sl = stripped.lower()
+        body = _PWTT_LOG_TS_PREFIX_RE.sub("", (msg or "").strip(), count=1)
+        low = body.strip().lower()
+        sl = low
 
         if "<pre>" in low:
             return c["error"]
@@ -561,6 +571,22 @@ class PWTTJobsDock(QDockWidget):
     def _append_job_log(self, msg: str):
         """Append one log line/block with PWTT color coding (raw *msg* stays in _job_logs)."""
         self.log_text.append(self._format_job_log_entry_html(msg))
+
+    def _stamp_activity(self, message: str) -> str:
+        """Prefix *message* with a timestamp (avoid double-stamping)."""
+        s = (message or "").strip()
+        if _PWTT_LOG_TS_PREFIX_RE.match(s):
+            return message
+        return pwtt_activity_ts_prefix() + message
+
+    def _refresh_job_log_panel_if_selected(self, job_id: str):
+        """Rebuild the log QTextEdit when the same row stays selected (no selectionChanged)."""
+        if self._get_selected_job_id() != job_id:
+            return
+        entries = self._job_logs.get(job_id, [])
+        self.log_text.clear()
+        if entries:
+            self.log_text.setHtml(self._job_log_document_html(entries))
 
     def _get_selected_job_id(self):
         row = self.job_table.currentRow()
@@ -673,7 +699,14 @@ class PWTTJobsDock(QDockWidget):
 
     def launch_job(self, job, backend):
         """Start a task for the given job. Called from controls dock or resume."""
-        if job["id"] in self._active_tasks:
+        job_id = job["id"]
+        if job_id in self._active_tasks:
+            note = self._stamp_activity(
+                "Ignored: this job is already running (duplicate start/resume)."
+            )
+            self._job_logs.setdefault(job_id, []).append(note)
+            self._schedule_activity_log_persist(job_id)
+            self._refresh_job_log_panel_if_selected(job_id)
             return
         from ..core.pwtt_task import PWTTRunTask
         from ..core import job_store
@@ -699,7 +732,6 @@ class PWTTJobsDock(QDockWidget):
             gee_viz=job.get("gee_viz", False),
         )
 
-        job_id = job["id"]
         self._ensure_job_log_loaded(job)
         self._active_tasks[job_id] = task
         bname = {"openeo": "openEO", "gee": "GEE", "local": "Local"}.get(
@@ -712,7 +744,9 @@ class PWTTJobsDock(QDockWidget):
         log_parts.append(f"dates: {job['war_start']} → {job['inference_start']}")
         log_parts.append(f"pre: {job['pre_interval']}mo, post: {job['post_interval']}mo")
         log_parts.append(f"output: {job['output_dir']}")
-        self._job_logs.setdefault(job_id, []).append("<br>".join(log_parts))
+        self._job_logs.setdefault(job_id, []).append(
+            self._stamp_activity("<br>".join(log_parts))
+        )
         self._job_progress[job_id] = 0
         self._schedule_activity_log_persist(job_id)
 
@@ -730,22 +764,26 @@ class PWTTJobsDock(QDockWidget):
 
         self._refresh_job_list()
         self._select_job(job_id)
+        # Same-row reselection does not fire itemSelectionChanged — refresh log + buttons.
+        self._on_job_selected()
         self.show()
         self.raise_()
 
     # ── Task callbacks (main thread) ──────────────────────────────────────────
 
     def _append_order_poll_log(self, job_id, msg):
-        self._job_logs.setdefault(job_id, []).append(msg)
+        line = self._stamp_activity(msg)
+        self._job_logs.setdefault(job_id, []).append(line)
         self._schedule_activity_log_persist(job_id)
         if self._get_selected_job_id() == job_id:
-            self._append_job_log(msg)
+            self._append_job_log(line)
 
     def _handle_status_message(self, job_id, msg):
-        self._job_logs.setdefault(job_id, []).append(msg)
+        line = self._stamp_activity(msg)
+        self._job_logs.setdefault(job_id, []).append(line)
         self._schedule_activity_log_persist(job_id)
         if self._get_selected_job_id() == job_id:
-            self._append_job_log(msg)
+            self._append_job_log(line)
 
         # Persist remote job id as soon as the backend sets it
         task = self._active_tasks.get(job_id)
@@ -756,7 +794,7 @@ class PWTTJobsDock(QDockWidget):
                 existing = job_store.get_job(job_id)
                 if existing and existing.get("remote_job_id") != remote_id:
                     job_store.update_job(job_id, remote_job_id=remote_id)
-                    note = f"Remote job ID saved: {remote_id}"
+                    note = self._stamp_activity(f"Remote job ID saved: {remote_id}")
                     self._job_logs.setdefault(job_id, []).append(note)
                     self._schedule_activity_log_persist(job_id)
                     if self._get_selected_job_id() == job_id:
@@ -796,9 +834,11 @@ class PWTTJobsDock(QDockWidget):
             if len(ids) > 5:
                 ids_str += f" (+{len(ids) - 5} more)"
             self._job_logs.setdefault(job_id, []).append(
-                f"<b>Products offline</b> — staging from cold storage.<br>"
-                f"Product IDs: {ids_str}<br>"
-                f"Will auto-check every 2 min and resume when available."
+                self._stamp_activity(
+                    f"<b>Products offline</b> — staging from cold storage.<br>"
+                    f"Product IDs: {ids_str}<br>"
+                    f"Will auto-check every 2 min and resume when available."
+                )
             )
             ow_fields = dict(
                 status=job_store.STATUS_WAITING_ORDERS,
@@ -842,7 +882,8 @@ class PWTTJobsDock(QDockWidget):
             done_parts.append(f"Footprints ({src}): {fp_path}")
         if remote_id:
             done_parts.append(f"Remote job: {remote_id}")
-        self._job_logs.setdefault(job_id, []).append("<br>".join(done_parts))
+        done_line = self._stamp_activity("<br>".join(done_parts))
+        self._job_logs.setdefault(job_id, []).append(done_line)
         update_fields["activity_log"] = list(self._job_logs[job_id])
         job_store.update_job(job_id, **update_fields)
         self._job_progress[job_id] = 100
@@ -850,7 +891,7 @@ class PWTTJobsDock(QDockWidget):
         self._refresh_job_list()
         if self._get_selected_job_id() == job_id:
             self.progress_bar.setValue(100)
-            self._append_job_log("<br>".join(done_parts))
+            self._append_job_log(done_line)
 
     def _on_task_terminated(self, job_id):
         from ..core import job_store
@@ -868,7 +909,7 @@ class PWTTJobsDock(QDockWidget):
             msg = "Task was cancelled."
             if remote_id:
                 msg += f" Remote job: {remote_id}"
-            self._job_logs.setdefault(job_id, []).append(msg)
+            self._job_logs.setdefault(job_id, []).append(self._stamp_activity(msg))
             log_snapshot = list(self._job_logs[job_id])
             if current and current["status"] not in (
                 job_store.STATUS_STOPPED, job_store.STATUS_CANCELLED
@@ -886,10 +927,14 @@ class PWTTJobsDock(QDockWidget):
             ]
             if remote_id:
                 err_parts.append(html.escape(f"Remote job: {remote_id}", quote=False))
-            self._job_logs.setdefault(job_id, []).append("<br>".join(err_parts))
+            self._job_logs.setdefault(job_id, []).append(
+                self._stamp_activity("<br>".join(err_parts))
+            )
             if task.error_detail:
                 self._job_logs[job_id].append(
-                    f"<pre>{html.escape(task.error_detail, quote=False)}</pre>"
+                    self._stamp_activity(
+                        f"<pre>{html.escape(task.error_detail, quote=False)}</pre>"
+                    )
                 )
             job_store.update_job(
                 job_id,
@@ -899,7 +944,7 @@ class PWTTJobsDock(QDockWidget):
             )
         else:
             self._job_logs.setdefault(job_id, []).append(
-                "Task terminated unexpectedly."
+                self._stamp_activity("Task terminated unexpectedly.")
             )
             job_store.update_job(
                 job_id,
@@ -1048,8 +1093,9 @@ class PWTTJobsDock(QDockWidget):
             else:
                 log_parts.append(f"Load Local: skipped invalid footprints \u2014 {pth}")
 
-        msg = "<br>".join(log_parts)
+        msg = self._stamp_activity("<br>".join(log_parts))
         self._job_logs.setdefault(jid, []).append(msg)
+        self._schedule_activity_log_persist(jid)
         if self._get_selected_job_id() == jid:
             self._append_job_log(msg)
 
@@ -1132,8 +1178,9 @@ class PWTTJobsDock(QDockWidget):
             )
             return
 
-        msg = "Apply styling: updated " + ", ".join(matched)
+        msg = self._stamp_activity("Apply styling: updated " + ", ".join(matched))
         self._job_logs.setdefault(jid, []).append(msg)
+        self._schedule_activity_log_persist(jid)
         if self._get_selected_job_id() == jid:
             self._append_job_log(msg)
         try:
@@ -1239,8 +1286,9 @@ class PWTTJobsDock(QDockWidget):
                     footprints_gpkg=legacy,
                 )
                 self._refresh_job_list()
-                note = f"Footprints saved: {gpkg_path}"
+                note = self._stamp_activity(f"Footprints saved: {gpkg_path}")
                 self._job_logs.setdefault(jid, []).append(note)
+                self._schedule_activity_log_persist(jid)
                 if self._get_selected_job_id() == jid:
                     self._append_job_log(note)
                 self._add_local_footprints_layer(gpkg_path, jid, job.get("backend_id"))
@@ -1274,13 +1322,15 @@ class PWTTJobsDock(QDockWidget):
         if layer.isValid():
             style_pwtt_footprints_layer(layer)
             add_map_layer_to_pwtt_job_group(QgsProject.instance(), layer, job_id, backend_id)
-            msg = f"Layer added: {label}"
+            msg = self._stamp_activity(f"Layer added: {label}")
             self._job_logs.setdefault(job_id, []).append(msg)
+            self._schedule_activity_log_persist(job_id)
             if self._get_selected_job_id() == job_id:
                 self._append_job_log(msg)
         else:
-            msg = "Failed to load footprints GeoPackage."
+            msg = self._stamp_activity("Failed to load footprints GeoPackage.")
             self._job_logs.setdefault(job_id, []).append(msg)
+            self._schedule_activity_log_persist(job_id)
             if self._get_selected_job_id() == job_id:
                 self._append_job_log(msg)
 
@@ -1304,14 +1354,21 @@ class PWTTJobsDock(QDockWidget):
             return
         remote_id = job.get("remote_job_id")
         prev_status = job.get("status", "?")
+        jid = job["id"]
         if remote_id:
-            self._job_logs.setdefault(job["id"], []).append(
-                f"Resuming (was {prev_status}) — remote job: {remote_id}"
+            self._job_logs.setdefault(jid, []).append(
+                self._stamp_activity(
+                    f"Resuming (was {prev_status}) — remote job: {remote_id}"
+                )
             )
         else:
-            self._job_logs.setdefault(job["id"], []).append(
-                f"Resuming (was {prev_status}) — will create new remote job"
+            self._job_logs.setdefault(jid, []).append(
+                self._stamp_activity(
+                    f"Resuming (was {prev_status}) — no remote job id (full re-run)"
+                )
             )
+        self._schedule_activity_log_persist(jid)
+        self._refresh_job_log_panel_if_selected(jid)
         self.launch_job(job, backend)
 
     def _stop_selected(self):
@@ -1327,7 +1384,9 @@ class PWTTJobsDock(QDockWidget):
             msg = "Stopping task…"
             if remote_id:
                 msg += f" (remote job {remote_id} will continue on server)"
-            self._job_logs.setdefault(job["id"], []).append(msg)
+            self._job_logs.setdefault(job["id"], []).append(self._stamp_activity(msg))
+            self._schedule_activity_log_persist(job["id"])
+            self._refresh_job_log_panel_if_selected(job["id"])
         self._refresh_job_list()
 
     def _cancel_selected(self):
@@ -1343,7 +1402,8 @@ class PWTTJobsDock(QDockWidget):
         msg = "Cancelled."
         if remote_id:
             msg += f" Note: remote job {remote_id} may still be running on the server."
-        self._job_logs.setdefault(job["id"], []).append(msg)
+        self._job_logs.setdefault(job["id"], []).append(self._stamp_activity(msg))
+        self._schedule_activity_log_persist(job["id"])
         self._refresh_job_list()
         if self._get_selected_job_id() == job["id"]:
             self._on_job_selected()
@@ -1478,13 +1538,10 @@ class PWTTJobsDock(QDockWidget):
         ).start()
 
     def _poll_orders_worker(self, username, password, waiting_jobs):
-        from datetime import datetime
-
         try:
             from ..core.downloader import get_token, _is_product_online
 
             token = get_token(username, password)
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             for job in waiting_jobs:
                 jid = job["id"]
                 pids = job["offline_product_ids"]
@@ -1495,20 +1552,19 @@ class PWTTJobsDock(QDockWidget):
                 if online_n >= n:
                     self._order_poll_log.emit(
                         jid,
-                        f"[{ts}] Auto-check CDSE API: all {n} product(s) online — resuming.",
+                        f"Auto-check CDSE API: all {n} product(s) online — resuming.",
                     )
                     self._auto_resume_signal.emit(jid)
                 else:
                     self._order_poll_log.emit(
                         jid,
-                        f"[{ts}] Auto-check CDSE API: {online_n}/{n} product(s) online; still waiting.",
+                        f"Auto-check CDSE API: {online_n}/{n} product(s) online; still waiting.",
                     )
         except Exception as e:
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             for job in waiting_jobs:
                 self._order_poll_log.emit(
                     job["id"],
-                    f"[{ts}] Auto-check CDSE API failed (will retry on next timer): {e}",
+                    f"Auto-check CDSE API failed (will retry on next timer): {e}",
                 )
         finally:
             self._poll_running = False
@@ -1532,8 +1588,10 @@ class PWTTJobsDock(QDockWidget):
         except Exception:
             return
         self._job_logs.setdefault(job_id, []).append(
-            "Products now available \u2014 auto-resuming\u2026"
+            self._stamp_activity("Products now available — auto-resuming…")
         )
+        self._schedule_activity_log_persist(job_id)
+        self._refresh_job_log_panel_if_selected(job_id)
         self.launch_job(job, backend)
 
     # ── Cleanup ───────────────────────────────────────────────────────────────
