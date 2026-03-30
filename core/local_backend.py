@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """Full-local backend: GRD from CDSE / ASF / Planetary Computer, Lee filter, t-test, rasterio output."""
 
+import math
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import numpy as np
-from typing import Optional
+from typing import Optional, Tuple
 
 from qgis.core import QgsSettings
 
@@ -28,8 +28,113 @@ LOCAL_SOURCE_PC = "pc"
 # More scenes improve t-test accuracy but increase download time and memory.
 MAX_SCENES_PER_PERIOD = 3
 
+# Default ground-range pixel spacing for AOI warp (~Sentinel-1 GRD IW).
+_AOI_RESOLUTION_M = 10.0
+# Expand AOI in projected metres so edge pixels are not clipped by reprojection.
+_AOI_MARGIN_M = 40.0
+
 # Keep progress lines readable in the Jobs dock (full text still in exceptions / job log).
 _PROGRESS_ERR_MAX_LEN = 200
+
+
+def _is_identity_pixel_transform(t) -> bool:
+    """True when *t* is the default 1×1 pixel grid (no real geotransform)."""
+    return (
+        abs(t.a - 1.0) < 1e-9
+        and abs(t.e - 1.0) < 1e-9
+        and abs(t.b) < 1e-12
+        and abs(t.d) < 1e-12
+        and abs(t.c) < 1e-12
+        and abs(t.f) < 1e-12
+    )
+
+
+def _aoi_utm_grid(
+    west: float,
+    south: float,
+    east: float,
+    north: float,
+    resolution_m: float = _AOI_RESOLUTION_M,
+    margin_m: float = _AOI_MARGIN_M,
+) -> Tuple[object, object, int, int]:
+    """Build a UTM raster grid covering the WGS84 bounding box.
+
+    Returns ``(dst_crs, dst_transform, height, width)`` suitable for warping all scenes
+    to a common pixel grid (avoids full-frame loads and fixes GCP-only products).
+    """
+    from rasterio.crs import CRS
+    from rasterio.transform import from_bounds
+    from rasterio.warp import transform_bounds
+
+    lon_c = (west + east) / 2.0
+    lat_c = (south + north) / 2.0
+    zone = int((lon_c + 180.0) // 6) + 1
+    epsg = (32600 if lat_c >= 0 else 32700) + zone
+    dst_crs = CRS.from_epsg(epsg)
+    left, bottom, right, top = transform_bounds(
+        "EPSG:4326", dst_crs, west, south, east, north, densify_pts=21
+    )
+    left -= margin_m
+    right += margin_m
+    bottom -= margin_m
+    top += margin_m
+    width = max(1, int(math.ceil((right - left) / resolution_m)))
+    height = max(1, int(math.ceil((top - bottom) / resolution_m)))
+    dst_transform = from_bounds(left, bottom, right, top, width, height)
+    return dst_crs, dst_transform, height, width
+
+
+def _effective_src_geo(src) -> Tuple[object, object]:
+    """Affine + CRS for ``rasterio.warp.reproject`` (handles GCP-only GRD COGs)."""
+    from rasterio.transform import from_gcps
+
+    if src.crs is not None and not _is_identity_pixel_transform(src.transform):
+        return src.transform, src.crs
+    gcps, gcrs = src.gcps
+    if gcps and gcrs is not None:
+        return from_gcps(gcps), gcrs
+    if src.crs is not None:
+        return src.transform, src.crs
+    raise ValueError("Raster has no usable georeferencing (affine+CRS or GCPs).")
+
+
+def _warp_band_to_aoi_grid(
+    path: str,
+    dst_crs,
+    dst_transform,
+    dst_height: int,
+    dst_width: int,
+    resampling,
+) -> np.ndarray:
+    """Warp one band onto the AOI UTM grid as ``float32`` (COG-friendly when georef is affine)."""
+    import rasterio
+    from rasterio.vrt import WarpedVRT
+    from rasterio.warp import reproject
+
+    with rasterio.open(path) as src:
+        if src.crs is not None and not _is_identity_pixel_transform(src.transform):
+            with WarpedVRT(
+                src,
+                crs=dst_crs,
+                transform=dst_transform,
+                width=dst_width,
+                height=dst_height,
+                resampling=resampling,
+            ) as vrt:
+                return vrt.read(1).astype(np.float32, copy=False)
+        src_transform, src_crs = _effective_src_geo(src)
+        arr = src.read(1).astype(np.float32, copy=False)
+    out = np.empty((dst_height, dst_width), dtype=np.float32)
+    reproject(
+        arr,
+        out,
+        src_transform=src_transform,
+        src_crs=src_crs,
+        dst_transform=dst_transform,
+        dst_crs=dst_crs,
+        resampling=resampling,
+    )
+    return out
 
 
 def _short_progress_error(msg: str) -> str:
@@ -39,6 +144,40 @@ def _short_progress_error(msg: str) -> str:
     if len(one_line) <= _PROGRESS_ERR_MAX_LEN:
         return one_line
     return one_line[: _PROGRESS_ERR_MAX_LEN - 1] + "…"
+
+
+def _read_warp_vv_vh_pair(
+    vv_path: str,
+    vh_path: str,
+    dst_crs,
+    dst_transform,
+    dst_height: int,
+    dst_width: int,
+    resampling,
+    log,
+) -> Optional[Tuple[np.ndarray, np.ndarray, dict, object, object]]:
+    """Warp VV/VH to the AOI grid. Log errors and return ``None`` on failure."""
+    try:
+        vv = _warp_band_to_aoi_grid(
+            vv_path, dst_crs, dst_transform, dst_height, dst_width, resampling
+        )
+        vh = _warp_band_to_aoi_grid(
+            vh_path, dst_crs, dst_transform, dst_height, dst_width, resampling
+        )
+    except Exception as e:
+        if log:
+            log(f"warp VV/VH failed — {_short_progress_error(repr(e))}")
+        return None
+    profile = {
+        "driver": "GTiff",
+        "dtype": "float32",
+        "width": dst_width,
+        "height": dst_height,
+        "count": 1,
+        "crs": dst_crs,
+        "transform": dst_transform,
+    }
+    return vv, vh, profile, dst_transform, dst_crs
 
 
 def _add_months_dt(d: datetime, months: int) -> datetime:
@@ -189,12 +328,15 @@ class LocalBackend(PWTTBackend):
             raise ValueError("Not authenticated. Call authenticate() first.")
 
         import rasterio
-        from rasterio.warp import reproject, Resampling
+        from rasterio.warp import Resampling
 
         bbox = wkt_to_bbox(aoi_wkt)
         if not bbox:
             raise ValueError("Invalid AOI WKT")
         west, south, east, north = bbox
+        dst_crs, dst_transform, dst_height, dst_width = _aoi_utm_grid(
+            west, south, east, north
+        )
         war_d = datetime.strptime(war_start[:10], "%Y-%m-%d")
         inf_d = datetime.strptime(inference_start[:10], "%Y-%m-%d")
         pre_start = _add_months_dt(war_d, -pre_interval).strftime("%Y-%m-%d")
@@ -223,6 +365,10 @@ class LocalBackend(PWTTBackend):
         job_log(
             f"Local: AOI WGS84 bbox west={west:.5f} south={south:.5f} "
             f"east={east:.5f} north={north:.5f}"
+        )
+        job_log(
+            f"Local: AOI warp ~{_AOI_RESOLUTION_M} m UTM, {dst_width}×{dst_height} px, "
+            f"CRS {dst_crs} (per-scene warp; pre/post loaded sequentially)"
         )
         job_log(
             f"Local: pre window {pre_start} … {war_start[:10]}, "
@@ -344,7 +490,7 @@ class LocalBackend(PWTTBackend):
         job_log(f"Local: post search — {_preview_names(post_products)}")
         job_log(
             f"Local: will try up to {MAX_SCENES_PER_PERIOD} pre + "
-            f"{MAX_SCENES_PER_PERIOD} post scenes (parallel download)"
+            f"{MAX_SCENES_PER_PERIOD} post scenes (pre period, then post; AOI warp per scene)"
         )
 
         max_per_period = MAX_SCENES_PER_PERIOD
@@ -354,20 +500,6 @@ class LocalBackend(PWTTBackend):
         offline_product_ids = []
         download_failures = []
         _lock = threading.Lock()
-
-        def _read_vv_vh(vv_path, vh_path):
-            """Read VV/VH rasters, return tuple or None on failure."""
-            try:
-                with rasterio.open(vv_path) as src:
-                    vv = src.read(1)
-                    profile = src.profile.copy()
-                    transform = src.transform
-                    crs = src.crs
-                with rasterio.open(vh_path) as src:
-                    vh = src.read(1)
-                return vv.astype(np.float32), vh.astype(np.float32), profile, transform, crs
-            except Exception:
-                return None
 
         def load_products_safe(products, arrays_list, label, used_key):
             loaded = 0
@@ -432,9 +564,18 @@ class LocalBackend(PWTTBackend):
                 job_log(
                     f"{label}: VV/VH rasters — {vv_path} | {vh_path}"
                 )
-                result = _read_vv_vh(vv_path, vh_path)
+                result = _read_warp_vv_vh_pair(
+                    vv_path,
+                    vh_path,
+                    dst_crs,
+                    dst_transform,
+                    dst_height,
+                    dst_width,
+                    Resampling.bilinear,
+                    job_log,
+                )
                 if result is None:
-                    job_log(f"{label}: skip {name} (failed to read raster)…")
+                    job_log(f"{label}: skip {name} (AOI warp failed)…")
                     continue
                 if source == LOCAL_SOURCE_CDSE:
                     from .downloader import remove_product_zip
@@ -484,9 +625,18 @@ class LocalBackend(PWTTBackend):
                         job_log(f"{label}: skip {name} (no VV/VH assets)…")
                     continue
                 job_log(f"{label}: PC COGs ready — {vv_path} | {vh_path}")
-                result = _read_vv_vh(vv_path, vh_path)
+                result = _read_warp_vv_vh_pair(
+                    vv_path,
+                    vh_path,
+                    dst_crs,
+                    dst_transform,
+                    dst_height,
+                    dst_width,
+                    Resampling.bilinear,
+                    job_log,
+                )
                 if result is None:
-                    job_log(f"{label}: skip {name} (failed to read raster)…")
+                    job_log(f"{label}: skip {name} (AOI warp failed)…")
                     continue
                 arrays_list.append(result)
                 with _lock:
@@ -501,14 +651,10 @@ class LocalBackend(PWTTBackend):
 
         loader = load_products_pc if source == LOCAL_SOURCE_PC else load_products_safe
 
-        # Download pre and post periods concurrently to halve wall-clock time.
-        # Each thread writes to its own arrays_list (pre_arrays / post_arrays);
-        # shared state (run_metadata, offline_product_ids, etc.) is protected by _lock.
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            pre_fut = pool.submit(loader, pre_products, pre_arrays, "Pre", "pre_scenes_used")
-            post_fut = pool.submit(loader, post_products, post_arrays, "Post", "post_scenes_used")
-            pre_fut.result()
-            post_fut.result()
+        # Serial pre/post: each scene warp peaks at ~1–2 full GRD bands + small AOI;
+        # parallel load previously paired with MemoryError / GDAL thread issues in QGIS.
+        loader(pre_products, pre_arrays, "Pre", "pre_scenes_used")
+        loader(post_products, post_arrays, "Post", "post_scenes_used")
 
         job_log(
             f"Local: downloads finished — pre stacks={len(pre_arrays)}, "
@@ -561,51 +707,24 @@ class LocalBackend(PWTTBackend):
             f"~{pixel_size:.2f} m, CRS {ref_crs}"
         )
 
-        def to_ref(vv, vh, profile, transform, crs):
-            if crs == ref_crs and transform == ref_transform:
-                return vv, vh
-            out_vv = np.empty((height, width), dtype=np.float32)
-            out_vh = np.empty((height, width), dtype=np.float32)
-            reproject(
-                vv,
-                out_vv,
-                src_transform=transform,
-                src_crs=crs,
-                dst_transform=ref_transform,
-                dst_crs=ref_crs,
-                resampling=Resampling.bilinear,
-            )
-            reproject(
-                vh,
-                out_vh,
-                src_transform=transform,
-                src_crs=crs,
-                dst_transform=ref_transform,
-                dst_crs=ref_crs,
-                resampling=Resampling.bilinear,
-            )
-            return out_vv, out_vh
-
         pre_vv_list = []
         pre_vh_list = []
         for vv, vh, prof, tr, crs in pre_arrays:
-            vv_r, vh_r = to_ref(vv, vh, prof, tr, crs)
-            vv_f = _lee_filter(vv_r)
-            vh_f = _lee_filter(vh_r)
+            vv_f = _lee_filter(vv)
+            vh_f = _lee_filter(vh)
             pre_vv_list.append(np.log(np.maximum(vv_f, 1e-12)))
             pre_vh_list.append(np.log(np.maximum(vh_f, 1e-12)))
         post_vv_list = []
         post_vh_list = []
         for vv, vh, prof, tr, crs in post_arrays:
-            vv_r, vh_r = to_ref(vv, vh, prof, tr, crs)
-            vv_f = _lee_filter(vv_r)
-            vh_f = _lee_filter(vh_r)
+            vv_f = _lee_filter(vv)
+            vh_f = _lee_filter(vh)
             post_vv_list.append(np.log(np.maximum(vv_f, 1e-12)))
             post_vh_list.append(np.log(np.maximum(vh_f, 1e-12)))
 
         job_log(
-            "Local: per-scene reproject (if needed), Lee filter, log-amplitude — "
-            f"pre {len(pre_vv_list)} layers, post {len(post_vv_list)} layers"
+            "Local: Lee filter + log-amplitude — "
+            f"pre {len(pre_vv_list)} layers, post {len(post_vh_list)} layers"
         )
         emit(55, "Computing t-test…")
         pre_vv = np.stack(pre_vv_list, axis=0)
