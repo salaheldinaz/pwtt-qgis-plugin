@@ -5,5 +5,6 @@
     <file>icon_run.svg</file>
     <file>icon_openeo.svg</file>
     <file>icon_grd.svg</file>
+    <file>icon_job_log.svg</file>
   </qresource>
 </RCC>

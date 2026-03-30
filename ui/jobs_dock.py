@@ -31,7 +31,7 @@ from qgis.PyQt.QtWidgets import (
     QSizePolicy,
 )
 from qgis.PyQt.QtCore import Qt, QUrl, pyqtSignal, QTimer, QSize
-from qgis.PyQt.QtGui import QColor, QDesktopServices, QFont, QIcon, QPalette
+from qgis.PyQt.QtGui import QColor, QDesktopServices, QIcon, QPalette
 from qgis.core import QgsApplication, QgsProject, QgsSettings
 
 from .backend_auth import (
@@ -156,7 +156,7 @@ def _remove_job_output_from_disk(job: dict) -> None:
 
 
 class PWTTJobsDock(QDockWidget):
-    """Dockable jobs panel: job table, action buttons, progress bar, and log."""
+    """Dockable jobs panel: job table, action buttons, and progress bar (log: PWTTJobLogDock)."""
 
     # Thread-safe bridge for status messages from background tasks
     _status_signal = pyqtSignal(str, str)   # (job_id, message)
@@ -167,7 +167,7 @@ class PWTTJobsDock(QDockWidget):
     # Emitted after the job table is refreshed (e.g. GRD staging dock sync)
     jobs_changed = pyqtSignal()
 
-    def __init__(self, parent=None, plugin_dir=None):
+    def __init__(self, parent=None, plugin_dir=None, job_log_dock=None):
         super().__init__(dock_title("PWTT \u2014 Jobs", plugin_dir), parent)
         self.setObjectName("PWTTJobsDock")
         self.setAllowedAreas(Qt.AllDockWidgetAreas)
@@ -177,6 +177,8 @@ class PWTTJobsDock(QDockWidget):
         self._job_progress = {}    # job_id -> int (0-100)
         self._poll_running = False
         self.controls_dock = None  # set after construction by plugin
+        self.job_log_dock = job_log_dock
+        self.log_text = job_log_dock.log_text if job_log_dock else None
 
         self._activity_log_dirty_jobs = set()
         self._activity_log_flush_timer = QTimer(self)
@@ -411,7 +413,7 @@ class PWTTJobsDock(QDockWidget):
         row_manage.addStretch(1)
         layout.addWidget(g_manage)
 
-        prog_box = QGroupBox("Progress && log")
+        prog_box = QGroupBox("Progress")
         prog_layout = QVBoxLayout(prog_box)
         prog_layout.setContentsMargins(8, 10, 8, 8)
         prog_layout.setSpacing(8)
@@ -423,22 +425,8 @@ class PWTTJobsDock(QDockWidget):
         self.progress_bar.setFixedHeight(22)
         prog_layout.addWidget(self.progress_bar)
 
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setLineWrapMode(QTextEdit.WidgetWidth)
-        self.log_text.setMinimumHeight(120)
-        self.log_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        lf = QFont(self.font())
-        lf.setStyleHint(QFont.Monospace)
-        lf.setFixedPitch(True)
-        pt = lf.pointSize()
-        if pt <= 0:
-            pt = 10
-        lf.setPointSize(max(pt, 10))
-        self.log_text.setFont(lf)
-        prog_layout.addWidget(self.log_text, 1)
-
-        layout.addWidget(prog_box, 1)
+        layout.addWidget(prog_box)
+        layout.addStretch(1)
 
         self.setWidget(w)
 

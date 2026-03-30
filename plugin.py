@@ -4,8 +4,6 @@
 from qgis.PyQt.QtCore import Qt, QSize
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
-from qgis.core import Qgis
-
 import os
 from . import resources_rc  # noqa: F401  compiled Qt resources
 
@@ -32,8 +30,10 @@ class PWTTPlugin:
         self.jobs_dock = None
         self.openeo_dock = None
         self.grd_dock = None
+        self.job_log_dock = None
         self._action_controls = None
         self._action_jobs = None
+        self._action_job_log = None
         self._action_openeo = None
         self._action_grd = None
 
@@ -65,6 +65,12 @@ class PWTTPlugin:
             self._toggle_jobs,
             checkable=True,
         )
+        self._action_job_log = self.add_action(
+            QIcon(":/pwtt/icon_job_log.svg"),
+            "PWTT \u2014 Job log",
+            self._toggle_job_log,
+            checkable=True,
+        )
         self._action_openeo = self.add_action(
             QIcon(":/pwtt/icon_openeo.svg"),
             "PWTT \u2014 openEO Jobs",
@@ -82,14 +88,20 @@ class PWTTPlugin:
         if self.controls_dock is not None:
             return
         from .ui.grd_staging_dock import PWTTGrdStagingDock
+        from .ui.job_log_dock import PWTTJobLogDock
         from .ui.jobs_dock import PWTTJobsDock
         from .ui.main_dialog import PWTTControlsDock
         from .ui.openeo_jobs_dock import PWTTOpenEOJobsDock
         mw = self.iface.mainWindow()
 
-        self.jobs_dock = PWTTJobsDock(mw, self.plugin_dir)
+        self.job_log_dock = PWTTJobLogDock(mw, self.plugin_dir)
+        mw.addDockWidget(Qt.BottomDockWidgetArea, self.job_log_dock)
+        self.job_log_dock.hide()
+
+        self.jobs_dock = PWTTJobsDock(mw, self.plugin_dir, self.job_log_dock)
         mw.addDockWidget(Qt.BottomDockWidgetArea, self.jobs_dock)
         self.jobs_dock.hide()
+        mw.tabifyDockWidget(self.jobs_dock, self.job_log_dock)
 
         self.controls_dock = PWTTControlsDock(self.iface, self.plugin_dir, self.jobs_dock, mw)
         mw.addDockWidget(Qt.RightDockWidgetArea, self.controls_dock)
@@ -115,6 +127,7 @@ class PWTTPlugin:
         # Keep toolbar button check state in sync with dock visibility
         self.controls_dock.visibilityChanged.connect(self._action_controls.setChecked)
         self.jobs_dock.visibilityChanged.connect(self._action_jobs.setChecked)
+        self.job_log_dock.visibilityChanged.connect(self._action_job_log.setChecked)
         self.openeo_dock.visibilityChanged.connect(self._action_openeo.setChecked)
         self.grd_dock.visibilityChanged.connect(self._action_grd.setChecked)
 
@@ -133,6 +146,14 @@ class PWTTPlugin:
             self.jobs_dock.raise_()
         else:
             self.jobs_dock.hide()
+
+    def _toggle_job_log(self, checked=False):
+        self._ensure_docks()
+        if checked:
+            self.job_log_dock.show()
+            self.job_log_dock.raise_()
+        else:
+            self.job_log_dock.hide()
 
     def _toggle_openeo(self, checked=False):
         self._ensure_docks()
@@ -175,6 +196,10 @@ class PWTTPlugin:
             mw.removeDockWidget(self.jobs_dock)
             self.jobs_dock.deleteLater()
             self.jobs_dock = None
+        if self.job_log_dock:
+            mw.removeDockWidget(self.job_log_dock)
+            self.job_log_dock.deleteLater()
+            self.job_log_dock = None
         if self.openeo_dock:
             mw.removeDockWidget(self.openeo_dock)
             self.openeo_dock.deleteLater()
