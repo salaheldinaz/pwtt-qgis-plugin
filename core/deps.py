@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 
 
 # ── Paths ────────────────────────────────────────────────────────────────────
@@ -30,6 +31,11 @@ def _base_dir():
 
 def _deps_dir():
     return os.path.join(_base_dir(), "deps")
+
+
+def plugin_deps_dir():
+    """Absolute path to the PWTT ``pip install --target`` directory."""
+    return _deps_dir()
 
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -186,6 +192,44 @@ def ensure_on_path():
         sys.path.append(d)
 
 
+# Top-level modules installed under ``--target`` whose transitive deps
+# (pydantic, pystac, …) must resolve from that same tree.  If we only
+# *append* deps, ``import planetary_computer`` loads from deps but
+# ``import pydantic`` still hits QGIS's older copy first → import fails
+# even though pip installed everything correctly.
+DEPS_PRIORITY_IMPORTS = frozenset({
+    "planetary_computer",
+    "pystac_client",
+    "pystac",
+    "asf_search",
+})
+
+
+@contextmanager
+def deps_priority():
+    """Put the PWTT deps directory *first* on ``sys.path`` for this block.
+
+    Use when importing packages from ``DEPS_PRIORITY_IMPORTS`` so their
+    dependencies match the versions in the ``--target`` install.  Restores
+    ``sys.path`` afterwards (modules stay in ``sys.modules``).
+    """
+    ensure_on_path()
+    d = _deps_dir()
+    if not os.path.isdir(d):
+        yield
+        return
+    d_norm = os.path.normpath(os.path.abspath(d))
+    saved = sys.path[:]
+    try:
+        path = [p for p in sys.path if os.path.normpath(os.path.abspath(p)) != d_norm]
+        sys.path[:] = [d] + path
+        importlib.invalidate_caches()
+        yield
+    finally:
+        sys.path[:] = saved
+        importlib.invalidate_caches()
+
+
 # ── Package / backend mapping ────────────────────────────────────────────────
 
 # Packages shipped inside QGIS — we only *check* these; we never install them.
@@ -204,13 +248,15 @@ BACKEND_DEPS = {
 LOCAL_SOURCE_EXTRA_IMPORTS = {
     "cdse": [],
     "asf": ["asf_search"],  # PyPI: asf-search
-    "pc": ["planetary_computer", "pystac_client"],
+    # pystac: pulled in by planetary-computer but explicit check helps diagnostics
+    "pc": ["planetary_computer", "pystac_client", "pystac"],
 }
 
 LOCAL_SOURCE_PIP_NAMES = {
     "asf_search": "asf-search",
     "planetary_computer": "planetary-computer",
     "pystac_client": "pystac-client",
+    "pystac": "pystac",
 }
 
 FOOTPRINT_DEPS = {
@@ -222,7 +268,7 @@ FOOTPRINT_DEPS = {
 # ── Deps hash tracking ──────────────────────────────────────────────────────
 
 # Bump when install logic changes significantly to force a re-check.
-_INSTALL_LOGIC_VERSION = "2"
+_INSTALL_LOGIC_VERSION = "3"
 
 
 def _deps_hash_file():
@@ -372,6 +418,10 @@ def find_missing(import_names):
 
     For ``rasterstats`` we additionally verify `zonal_stats` is importable,
     because a QGIS plugin of the same name can shadow the real package.
+
+    For :data:`DEPS_PRIORITY_IMPORTS`, the deps directory is searched *first*
+    so transitive dependencies (pydantic, pystac, …) match the ``--target``
+    install instead of older copies bundled with QGIS.
     """
     missing = []
     for name in import_names:
@@ -379,11 +429,50 @@ def find_missing(import_names):
             if not _rasterstats_ok():
                 missing.append(name)
             continue
+        if name in QGIS_PROVIDED:
+            try:
+                __import__(name)
+            except ImportError:
+                missing.append(name)
+            continue
         try:
-            __import__(name)
+            if name in DEPS_PRIORITY_IMPORTS:
+                with deps_priority():
+                    __import__(name)
+            else:
+                ensure_on_path()
+                __import__(name)
         except ImportError:
             missing.append(name)
     return missing
+
+
+def diagnose_import_failures(import_names):
+    """Return a human-readable multi-line string with the actual exception
+    for each name in *import_names* that still fails to import."""
+    lines = []
+    for name in import_names:
+        if name == "rasterstats":
+            ok, detail = _rasterstats_probe()
+            if not ok:
+                lines.append(f"{name}:\n{detail}")
+            continue
+        if name in QGIS_PROVIDED:
+            try:
+                __import__(name)
+            except Exception as e:
+                lines.append(f"{name}: {type(e).__name__}: {e}")
+            continue
+        try:
+            if name in DEPS_PRIORITY_IMPORTS:
+                with deps_priority():
+                    __import__(name)
+            else:
+                ensure_on_path()
+                __import__(name)
+        except Exception as e:
+            lines.append(f"{name}: {type(e).__name__}: {e}")
+    return "\n\n".join(lines) if lines else ""
 
 
 def local_backend_missing(local_data_source: str = "cdse"):

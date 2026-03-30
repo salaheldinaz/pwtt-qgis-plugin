@@ -12,7 +12,10 @@ _RETRY_BACKOFF_S = 5
 
 def authenticate_asf(username: str, password: str):
     """Return an ``ASFSession`` logged in with Earthdata credentials."""
-    import asf_search as asf
+    from . import deps
+
+    with deps.deps_priority():
+        import asf_search as asf
 
     if not username or not password:
         raise ValueError("Earthdata username and password are required for ASF.")
@@ -41,7 +44,10 @@ def search_s1_grd_asf(
     Returns dicts compatible with local_backend loaders:
     ``Id``, ``Name``, ``Online`` (True), ``DownloadUrl`` (first HTTPS URL), ``_asf_product`` (ASFProduct).
     """
-    import asf_search as asf
+    from . import deps
+
+    with deps.deps_priority():
+        import asf_search as asf
 
     wkt = _normalize_wkt_for_asf(aoi_wkt)
     start = start_date[:10]

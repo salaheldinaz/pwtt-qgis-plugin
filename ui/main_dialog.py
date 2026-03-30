@@ -589,13 +589,16 @@ class PWTTControlsDock(QDockWidget):
             local_src = self._local_data_source_id() if backend_id == "local" else None
             still_missing, _ = deps.backend_missing(backend_id, local_src)
             if still_missing:
+                detail = deps.diagnose_import_failures(still_missing)
                 QMessageBox.information(
                     self, "PWTT",
                     f"Packages were installed but {', '.join(still_missing)} "
                     f"still cannot be imported.\n\n"
-                    f"This can happen if QGIS needs to be restarted for "
-                    f"new packages to become visible.\n\n"
-                    f"Try restarting QGIS.",
+                    f"Technical detail:\n{detail}\n\n"
+                    f"If you see pydantic/pystac/version errors, try "
+                    f"Plugins → PWTT → Install Dependencies again after this update. "
+                    f"You can also remove the folder\n{deps.plugin_deps_dir()}\n"
+                    f"and reinstall dependencies for a clean tree.",
                 )
 
     def _get_credentials(self, backend_id):

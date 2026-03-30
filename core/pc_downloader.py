@@ -11,8 +11,11 @@ from .utils import wkt_to_bbox
 
 def authenticate_pc(subscription_key: Optional[str] = None):
     """Return a signed pystac-client ``Client`` for Planetary Computer STAC API."""
-    import planetary_computer
-    import pystac_client
+    from . import deps
+
+    with deps.deps_priority():
+        import planetary_computer
+        import pystac_client
 
     if subscription_key and str(subscription_key).strip():
         planetary_computer.set_subscription_key(str(subscription_key).strip())
