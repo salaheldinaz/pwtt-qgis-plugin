@@ -99,18 +99,90 @@ def search_s1_grd_pc(
     return out
 
 
-def _vv_vh_hrefs(item) -> Tuple[Optional[str], Optional[str]]:
-    """Resolve signed hrefs for VV and VH assets (PC naming varies slightly)."""
-    vv_h = vh_h = None
+def _asset_href_ci(item, key_lower: str) -> Optional[str]:
+    """Return href for first asset whose key matches *key_lower* (case-insensitive)."""
+    for k, asset in item.assets.items():
+        if k.lower() == key_lower and asset.href:
+            return asset.href
+    return None
+
+
+def _vv_vh_href_pairs(item) -> List[Tuple[str, str]]:
+    """Ordered (VV URL, VH URL) pairs — prefer plain ``vv``/``vh`` before ``*-cog`` (often ZSTD-only in GDAL).
+
+    Planetary Computer may expose several assets; iteration order used to pick the last match,
+    which tended to be COG/ZSTD. GDAL in some QGIS builds lacks ZSTD — non-COG keys may use Deflate.
+    """
+    # (sort_priority, vv_key, vh_key) — lower priority tried first
+    key_pairs = [
+        (0, "vv", "vh"),
+        (1, "gamma0_vv", "gamma0_vh"),
+        (2, "measurement-vv", "measurement-vh"),
+        (5, "vv-cog", "vh-cog"),
+    ]
+    out: List[Tuple[str, str]] = []
+    seen = set()
+    for _pri, vk, hk in key_pairs:
+        vv = _asset_href_ci(item, vk.lower())
+        vh = _asset_href_ci(item, hk.lower())
+        if vv and vh:
+            sig = (vv, vh)
+            if sig not in seen:
+                seen.add(sig)
+                out.append(sig)
+    if out:
+        return out
+
+    # Legacy single-pass (one vv + one vh href, best-effort)
+    vv_h, vh_h = _vv_vh_hrefs_legacy(item)
+    if vv_h and vh_h:
+        return [(vv_h, vh_h)]
+    return []
+
+
+def _vv_vh_hrefs_legacy(item) -> Tuple[Optional[str], Optional[str]]:
+    """Single VV/VH href pair — prefer lowest-rank asset key, not last dict iteration."""
+    best_vv = (99, None)
+    best_vh = (99, None)
+
+    def vv_rank(kl: str) -> int:
+        if kl == "vv":
+            return 0
+        if kl == "gamma0_vv":
+            return 1
+        if kl == "measurement-vv":
+            return 2
+        if kl == "vv-cog":
+            return 10
+        if "-vv-" in kl or kl.endswith("_vv"):
+            return 5
+        return 99
+
+    def vh_rank(kl: str) -> int:
+        if kl == "vh":
+            return 0
+        if kl == "gamma0_vh":
+            return 1
+        if kl == "measurement-vh":
+            return 2
+        if kl == "vh-cog":
+            return 10
+        if "-vh-" in kl or kl.endswith("_vh"):
+            return 5
+        return 99
+
     for key, asset in item.assets.items():
         kl = key.lower()
         href = asset.href
         if not href:
             continue
-        if kl in ("vv", "vv-cog", "gamma0_vv", "measurement-vv"):
-            vv_h = href
-        elif kl in ("vh", "vh-cog", "gamma0_vh", "measurement-vh"):
-            vh_h = href
+        rv, rh = vv_rank(kl), vh_rank(kl)
+        if rv < 99 and rv < best_vv[0]:
+            best_vv = (rv, href)
+        if rh < 99 and rh < best_vh[0]:
+            best_vh = (rh, href)
+
+    vv_h, vh_h = best_vv[1], best_vh[1]
     if vv_h is None or vh_h is None:
         for key, asset in item.assets.items():
             kl = key.lower()
@@ -122,6 +194,40 @@ def _vv_vh_hrefs(item) -> Tuple[Optional[str], Optional[str]]:
             if vh_h is None and ("-vh-" in kl or kl.endswith("_vh") or kl == "vh"):
                 vh_h = href
     return vv_h, vh_h
+
+
+def _vv_vh_hrefs(item) -> Tuple[Optional[str], Optional[str]]:
+    """First-choice VV/VH hrefs (highest-priority pair)."""
+    pairs = _vv_vh_href_pairs(item)
+    if not pairs:
+        return None, None
+    return pairs[0][0], pairs[0][1]
+
+
+def _probe_pc_geotiff_pair(vv_path: str, vh_path: str) -> Optional[BaseException]:
+    """Return ``None`` if GDAL can read a small window from both files; else first exception."""
+    try:
+        from . import deps
+
+        with deps.deps_priority():
+            import rasterio
+    except Exception as e:
+        return e
+    try:
+        for path in (vv_path, vh_path):
+            with rasterio.open(path) as s:
+                win = rasterio.windows.Window(
+                    0, 0, min(8, s.width), min(8, s.height)
+                )
+                s.read(1, window=win)
+        return None
+    except Exception as e:
+        return e
+
+
+def _is_zstd_codec_error(exc: BaseException) -> bool:
+    s = str(exc).lower()
+    return "zstd" in s or "missing codec" in s
 
 
 def download_pc_vv_vh(
@@ -136,17 +242,28 @@ def download_pc_vv_vh(
     os.makedirs(out_dir, exist_ok=True)
     stem = product.get("Id") or product.get("Name") or "granule"
     safe = "".join(c if c.isalnum() or c in "-._" else "_" for c in str(stem))[:200]
-    vv_h, vh_h = _vv_vh_hrefs(item)
-    if not vv_h or not vh_h:
+    href_pairs = _vv_vh_href_pairs(item)
+    if not href_pairs:
         return None, None
 
     vv_path = os.path.join(out_dir, f"{safe}_vv.tif")
     vh_path = os.path.join(out_dir, f"{safe}_vh.tif")
 
     if os.path.isfile(vv_path) and os.path.isfile(vh_path):
+        if _probe_pc_geotiff_pair(vv_path, vh_path) is None:
+            if log:
+                log(f"PC: reuse cached COGs — {vv_path} , {vh_path}")
+            return vv_path, vh_path
         if log:
-            log(f"PC: reuse cached COGs — {vv_path} , {vh_path}")
-        return vv_path, vh_path
+            log(
+                "PC: cached VV/VH not readable with this GDAL (often ZSTD vs Deflate) — "
+                "removing and re-downloading…"
+            )
+        try:
+            os.remove(vv_path)
+            os.remove(vh_path)
+        except OSError:
+            pass
 
     def _host_hint(url: str) -> str:
         try:
@@ -172,13 +289,50 @@ def download_pc_vv_vh(
                 os.remove(dest)
             raise
 
-    if log:
-        log(f"PC download: item «{safe}» → {out_dir}")
+    last_open_err: Optional[BaseException] = None
+    for attempt, (vv_h, vh_h) in enumerate(href_pairs):
+        if log:
+            pair_note = f" (asset pair {attempt + 1}/{len(href_pairs)})" if len(href_pairs) > 1 else ""
+            log(f"PC download: item «{safe}» → {out_dir}{pair_note}")
 
-    with requests.Session() as s:
-        _stream_download(s, vv_h, vv_path, "VV")
-        _stream_download(s, vh_h, vh_path, "VH")
+        with requests.Session() as s:
+            _stream_download(s, vv_h, vv_path, "VV")
+            _stream_download(s, vh_h, vh_path, "VH")
 
-    if log:
-        log(f"PC: wrote {vv_path} , {vh_path}")
-    return vv_path, vh_path
+        if log:
+            log(f"PC: wrote {vv_path} , {vh_path}")
+
+        probe = _probe_pc_geotiff_pair(vv_path, vh_path)
+        if probe is None:
+            return vv_path, vh_path
+
+        last_open_err = probe
+        if log:
+            log(f"PC: GDAL cannot read downloaded tiles — {_short_pc_open_error(probe)}")
+        try:
+            os.remove(vv_path)
+            os.remove(vh_path)
+        except OSError:
+            pass
+
+        if attempt + 1 < len(href_pairs) and log:
+            log("PC: trying alternate STAC VV/VH URLs…")
+
+    if last_open_err is not None and _is_zstd_codec_error(last_open_err):
+        raise RuntimeError(
+            "Planetary Computer Sentinel-1 GeoTIFFs are ZSTD-compressed; this QGIS build's "
+            "GDAL/libtiff cannot decode ZSTD. "
+            "Use Local processing with Copernicus (CDSE) or ASF instead, or install QGIS from a "
+            "build that includes ZSTD (e.g. many conda-forge / newer OSGeo4W packages). "
+            f"Detail: {last_open_err}"
+        )
+    return None, None
+
+
+def _short_pc_open_error(exc: Optional[BaseException]) -> str:
+    if exc is None:
+        return "unknown read error"
+    s = str(exc).strip()
+    if len(s) > 180:
+        s = s[:179] + "…"
+    return s

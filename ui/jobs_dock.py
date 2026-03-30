@@ -6,6 +6,7 @@ import html
 import json
 import os
 import re
+from typing import Tuple
 import shutil
 import threading
 from datetime import datetime
@@ -26,9 +27,11 @@ from qgis.PyQt.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QGroupBox,
+    QSizePolicy,
 )
 from qgis.PyQt.QtCore import Qt, QUrl, pyqtSignal, QTimer, QSize
-from qgis.PyQt.QtGui import QColor, QDesktopServices, QIcon, QPalette
+from qgis.PyQt.QtGui import QColor, QDesktopServices, QFont, QIcon, QPalette
 from qgis.core import QgsApplication, QgsProject, QgsSettings
 
 from .backend_auth import (
@@ -199,11 +202,25 @@ class PWTTJobsDock(QDockWidget):
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _jobs_button_group(title: str) -> Tuple[QGroupBox, QHBoxLayout]:
+        box = QGroupBox(title)
+        inner = QHBoxLayout(box)
+        inner.setContentsMargins(8, 10, 8, 8)
+        inner.setSpacing(6)
+        return box, inner
+
     def _build_ui(self):
         w = QWidget()
         layout = QVBoxLayout(w)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(10)
+
+        table_lbl = QLabel("Job list")
+        f = table_lbl.font()
+        f.setBold(True)
+        table_lbl.setFont(f)
+        layout.addWidget(table_lbl)
 
         # Job table
         self.job_table = QTableWidget(0, 8)
@@ -222,8 +239,12 @@ class PWTTJobsDock(QDockWidget):
         self.job_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.job_table.setSelectionMode(QTableWidget.SingleSelection)
         self.job_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.job_table.setAlternatingRowColors(True)
+        self.job_table.setShowGrid(True)
         self.job_table.verticalHeader().hide()
         hdr = self.job_table.horizontalHeader()
+        hdr.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        hdr.setStretchLastSection(True)
         hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
@@ -232,12 +253,13 @@ class PWTTJobsDock(QDockWidget):
         hdr.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(6, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(7, QHeaderView.ResizeToContents)
-        self.job_table.setMaximumHeight(180)
+        self.job_table.setMinimumHeight(140)
+        self.job_table.setMaximumHeight(260)
+        self.job_table.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.job_table.itemSelectionChanged.connect(self._on_job_selected)
         layout.addWidget(self.job_table)
 
-        # Action buttons
-        btn_row = QHBoxLayout()
+        # Action buttons — grouped for scanability
         self.load_btn = QPushButton("Load parameters")
         self.open_output_btn = QPushButton("Open output folder")
         self.view_logs_btn = QPushButton("View logs…")
@@ -249,6 +271,8 @@ class PWTTJobsDock(QDockWidget):
         self.cancel_btn = QPushButton("Cancel")
         self.rerun_btn = QPushButton("Rerun")
         self.delete_btn = QPushButton("Delete")
+        self.export_jobs_btn = QPushButton("Export jobs…")
+        self.import_jobs_btn = QPushButton("Import jobs…")
 
         self.load_btn.setIcon(
             _jobs_dock_btn_icon(
@@ -301,12 +325,32 @@ class PWTTJobsDock(QDockWidget):
             )
         )
         self.delete_btn.setIcon(_jobs_dock_btn_icon("/mActionDeleteSelected.svg"))
+        self.export_jobs_btn.setIcon(
+            _jobs_dock_btn_icon("/mActionFileSave.svg", "/mActionSaveEdits.svg")
+        )
+        self.import_jobs_btn.setIcon(
+            _jobs_dock_btn_icon("/mActionFileOpen.svg", "/mActionAddOgrLayer.svg")
+        )
 
-        for btn in (self.load_btn, self.open_output_btn, self.view_logs_btn, self.load_local_btn, self.apply_style_btn, self.footprints_btn, self.resume_btn, self.stop_btn,
-                     self.cancel_btn, self.rerun_btn, self.delete_btn):
+        _primary_btns = (
+            self.load_btn,
+            self.open_output_btn,
+            self.view_logs_btn,
+            self.load_local_btn,
+            self.apply_style_btn,
+            self.footprints_btn,
+            self.resume_btn,
+            self.stop_btn,
+            self.cancel_btn,
+            self.rerun_btn,
+            self.delete_btn,
+        )
+        for btn in _primary_btns:
             btn.setEnabled(False)
             btn.setIconSize(_JOBS_BTN_ICON_SIZE)
-            btn_row.addWidget(btn)
+        for btn in (self.export_jobs_btn, self.import_jobs_btn):
+            btn.setIconSize(_JOBS_BTN_ICON_SIZE)
+
         self.load_btn.setToolTip("Load job AOI to map and parameters to controls panel (output folder unchanged)")
         self.open_output_btn.setToolTip("Open this job\u2019s output folder in the file manager (if it exists on disk)")
         self.view_logs_btn.setToolTip(
@@ -322,6 +366,13 @@ class PWTTJobsDock(QDockWidget):
         self.footprints_btn.setToolTip(
             "Fetch OSM buildings and mean damage (T-stat) per polygon using the job\u2019s result GeoTIFF"
         )
+        self.export_jobs_btn.setToolTip(
+            "Save all jobs to a JSON file (parameters and saved activity log text, not rasters)"
+        )
+        self.import_jobs_btn.setToolTip(
+            "Add jobs from a JSON export or another machine\u2019s jobs list (merge into this profile)"
+        )
+
         self.load_btn.clicked.connect(self._load_selected)
         self.open_output_btn.clicked.connect(self._open_output_folder)
         self.view_logs_btn.clicked.connect(self._view_logs_selected)
@@ -333,42 +384,61 @@ class PWTTJobsDock(QDockWidget):
         self.cancel_btn.clicked.connect(self._cancel_selected)
         self.rerun_btn.clicked.connect(self._rerun_selected)
         self.delete_btn.clicked.connect(self._delete_selected)
-        layout.addLayout(btn_row)
-
-        io_row = QHBoxLayout()
-        self.export_jobs_btn = QPushButton("Export jobs…")
-        self.import_jobs_btn = QPushButton("Import jobs…")
-        self.export_jobs_btn.setIcon(
-            _jobs_dock_btn_icon("/mActionFileSave.svg", "/mActionSaveEdits.svg")
-        )
-        self.import_jobs_btn.setIcon(
-            _jobs_dock_btn_icon("/mActionFileOpen.svg", "/mActionAddOgrLayer.svg")
-        )
-        for btn in (self.export_jobs_btn, self.import_jobs_btn):
-            btn.setIconSize(_JOBS_BTN_ICON_SIZE)
-            io_row.addWidget(btn)
-        io_row.addStretch(1)
-        self.export_jobs_btn.setToolTip(
-            "Save all jobs to a JSON file (parameters and saved activity log text, not rasters)"
-        )
-        self.import_jobs_btn.setToolTip(
-            "Add jobs from a JSON export or another machine\u2019s jobs list (merge into this profile)"
-        )
         self.export_jobs_btn.clicked.connect(self._export_jobs)
         self.import_jobs_btn.clicked.connect(self._import_jobs)
-        layout.addLayout(io_row)
 
-        # Progress bar
+        g_inspect, row_inspect = self._jobs_button_group("Inspect")
+        for btn in (self.load_btn, self.open_output_btn, self.view_logs_btn):
+            row_inspect.addWidget(btn)
+        row_inspect.addStretch(1)
+        layout.addWidget(g_inspect)
+
+        g_map, row_map = self._jobs_button_group("Map && layers")
+        for btn in (self.load_local_btn, self.apply_style_btn, self.footprints_btn):
+            row_map.addWidget(btn)
+        row_map.addStretch(1)
+        layout.addWidget(g_map)
+
+        g_run, row_run = self._jobs_button_group("Run")
+        for btn in (self.resume_btn, self.stop_btn, self.cancel_btn, self.rerun_btn):
+            row_run.addWidget(btn)
+        row_run.addStretch(1)
+        layout.addWidget(g_run)
+
+        g_manage, row_manage = self._jobs_button_group("Manage")
+        for btn in (self.export_jobs_btn, self.import_jobs_btn, self.delete_btn):
+            row_manage.addWidget(btn)
+        row_manage.addStretch(1)
+        layout.addWidget(g_manage)
+
+        prog_box = QGroupBox("Progress && log")
+        prog_layout = QVBoxLayout(prog_box)
+        prog_layout.setContentsMargins(8, 10, 8, 8)
+        prog_layout.setSpacing(8)
+
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        layout.addWidget(self.progress_bar)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFixedHeight(22)
+        prog_layout.addWidget(self.progress_bar)
 
-        # Log
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setLineWrapMode(QTextEdit.WidgetWidth)
-        layout.addWidget(self.log_text)
+        self.log_text.setMinimumHeight(120)
+        self.log_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        lf = QFont(self.font())
+        lf.setStyleHint(QFont.Monospace)
+        lf.setFixedPitch(True)
+        pt = lf.pointSize()
+        if pt <= 0:
+            pt = 10
+        lf.setPointSize(max(pt, 10))
+        self.log_text.setFont(lf)
+        prog_layout.addWidget(self.log_text, 1)
+
+        layout.addWidget(prog_box, 1)
 
         self.setWidget(w)
 
@@ -591,10 +661,12 @@ class PWTTJobsDock(QDockWidget):
     def _job_log_document_html(self, entries):
         parts = [self._format_job_log_entry_html(m) for m in entries]
         bg = self.log_text.palette().color(QPalette.ColorRole.Base).name()
+        _mono = (
+            "ui-monospace,'Cascadia Mono','Source Code Pro',Menlo,Consolas,monospace"
+        )
         return (
             "<html><head><meta charset=\"utf-8\"/></head>"
-            f"<body style=\"background-color:{bg};font-family:system-ui,-apple-system,"
-            'Segoe UI,sans-serif;font-size:12px;\">'
+            f"<body style=\"background-color:{bg};font-family:{_mono};font-size:12px;\">"
             + "".join(parts)
             + "</body></html>"
         )
