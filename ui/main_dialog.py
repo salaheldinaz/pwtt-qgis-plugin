@@ -40,6 +40,7 @@ from qgis.gui import QgsFileWidget, QgsRubberBand
 
 from .backend_auth import (
     create_and_auth_backend as backend_auth_create_and_auth_backend,
+    confirm_local_processing_storage,
     ensure_footprint_dependencies,
     is_message_box_yes,
 )
@@ -884,6 +885,9 @@ class PWTTControlsDock(QDockWidget):
 
         backend_id = self.backend_combo.currentData()
         local_src = self._local_data_source_id() if backend_id == "local" else None
+
+        if backend_id == "local" and not confirm_local_processing_storage(self):
+            return
 
         # ── Check backend dependencies (offer install if missing) ─────────
         missing, pip_names = deps.backend_missing(backend_id, local_src)

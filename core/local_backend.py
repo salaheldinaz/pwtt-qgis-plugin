@@ -88,7 +88,7 @@ def _settings_local_source() -> str:
 class LocalBackend(PWTTBackend):
     @property
     def name(self):
-        return "Local Processing"
+        return "Local Processing (Experimental)"
 
     @property
     def id(self):

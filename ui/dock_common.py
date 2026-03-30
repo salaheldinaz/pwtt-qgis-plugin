@@ -6,7 +6,7 @@ import os
 BACKENDS = [
     ("openeo", "openEO"),
     ("gee", "Google Earth Engine"),
-    ("local", "Local Processing"),
+    ("local", "Local Processing (Experimental)"),
 ]
 
 STATUS_LABELS = {

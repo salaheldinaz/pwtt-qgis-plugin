@@ -27,7 +27,11 @@ from qgis.PyQt.QtCore import Qt, QUrl, pyqtSignal, QTimer, QSize
 from qgis.PyQt.QtGui import QColor, QDesktopServices, QIcon, QPalette
 from qgis.core import QgsApplication, QgsProject, QgsSettings
 
-from .backend_auth import create_and_auth_backend, ensure_footprint_dependencies
+from .backend_auth import (
+    confirm_local_processing_storage,
+    create_and_auth_backend,
+    ensure_footprint_dependencies,
+)
 from .dock_common import STATUS_COLORS, STATUS_LABELS, dock_title, job_footprints_sources
 
 
@@ -1284,6 +1288,8 @@ class PWTTJobsDock(QDockWidget):
         job = self._get_selected_job()
         if not job:
             return
+        if job["backend_id"] == "local" and not confirm_local_processing_storage(self):
+            return
         try:
             backend = create_and_auth_backend(
                 job["backend_id"],
@@ -1346,6 +1352,8 @@ class PWTTJobsDock(QDockWidget):
         """Create a new job with the same parameters and launch it."""
         old = self._get_selected_job()
         if not old:
+            return
+        if old["backend_id"] == "local" and not confirm_local_processing_storage(self):
             return
         try:
             backend = create_and_auth_backend(

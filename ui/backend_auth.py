@@ -14,6 +14,21 @@ def is_message_box_yes(reply):
         return reply == QMessageBox.Yes
 
 
+def confirm_local_processing_storage(parent):
+    """Disk-space warning before a local (download-heavy) run. True = user chose Continue."""
+    reply = QMessageBox.question(
+        parent,
+        "PWTT",
+        "Local processing downloads Sentinel-1 GRD products to your computer. "
+        "That uses a lot of disk space for raw downloads, cache, and outputs "
+        "(often multiple GB per run, depending on AOI and date ranges).\n\n"
+        "Continue?",
+        QMessageBox.Yes | QMessageBox.No,
+        QMessageBox.No,
+    )
+    return is_message_box_yes(reply)
+
+
 def ensure_footprint_dependencies(parent):
     """Prompt to install footprint packages if needed. Return True if ready."""
     from ..core import deps
