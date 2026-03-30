@@ -91,6 +91,8 @@ def create_job(
         "output_tif": None,
         "footprints_gpkg": None,
         "footprints_gpkgs": {},
+        # HTML-ish lines for Jobs dock + "View logs" (older jobs.json entries omit this).
+        "activity_log": [],
     }
 
 

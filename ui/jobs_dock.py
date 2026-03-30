@@ -18,6 +18,8 @@ from qgis.PyQt.QtWidgets import (
     QTableWidgetItem,
     QHeaderView,
     QWidget,
+    QDialog,
+    QDialogButtonBox,
 )
 from qgis.PyQt.QtCore import Qt, QUrl, pyqtSignal, QTimer
 from qgis.PyQt.QtGui import QColor, QDesktopServices
@@ -48,6 +50,12 @@ class PWTTJobsDock(QDockWidget):
         self._job_progress = {}    # job_id -> int (0-100)
         self._poll_running = False
         self.controls_dock = None  # set after construction by plugin
+
+        self._activity_log_dirty_jobs = set()
+        self._activity_log_flush_timer = QTimer(self)
+        self._activity_log_flush_timer.setSingleShot(True)
+        self._activity_log_flush_timer.setInterval(1200)
+        self._activity_log_flush_timer.timeout.connect(self._flush_activity_logs_to_store)
 
         self._build_ui()
 
@@ -98,6 +106,7 @@ class PWTTJobsDock(QDockWidget):
         btn_row = QHBoxLayout()
         self.load_btn = QPushButton("Load parameters")
         self.open_output_btn = QPushButton("Open output folder")
+        self.view_logs_btn = QPushButton("View logs…")
         self.load_local_btn = QPushButton("Load Local")
         self.apply_style_btn = QPushButton("Apply styling")
         self.footprints_btn = QPushButton("Per-building (OSM)")
@@ -106,12 +115,15 @@ class PWTTJobsDock(QDockWidget):
         self.cancel_btn = QPushButton("Cancel")
         self.rerun_btn = QPushButton("Rerun")
         self.delete_btn = QPushButton("Delete")
-        for btn in (self.load_btn, self.open_output_btn, self.load_local_btn, self.apply_style_btn, self.footprints_btn, self.resume_btn, self.stop_btn,
+        for btn in (self.load_btn, self.open_output_btn, self.view_logs_btn, self.load_local_btn, self.apply_style_btn, self.footprints_btn, self.resume_btn, self.stop_btn,
                      self.cancel_btn, self.rerun_btn, self.delete_btn):
             btn.setEnabled(False)
             btn_row.addWidget(btn)
         self.load_btn.setToolTip("Load job AOI to map and parameters to controls panel (output folder unchanged)")
         self.open_output_btn.setToolTip("Open this job\u2019s output folder in the file manager (if it exists on disk)")
+        self.view_logs_btn.setToolTip(
+            "Open this job\u2019s activity log in a larger window (saved with the job for later)"
+        )
         self.load_local_btn.setToolTip(
             "If the result GeoTIFF (and footprints) exist on disk, add them to the map"
         )
@@ -124,6 +136,7 @@ class PWTTJobsDock(QDockWidget):
         )
         self.load_btn.clicked.connect(self._load_selected)
         self.open_output_btn.clicked.connect(self._open_output_folder)
+        self.view_logs_btn.clicked.connect(self._view_logs_selected)
         self.load_local_btn.clicked.connect(self._load_local_selected)
         self.apply_style_btn.clicked.connect(self._apply_styling_to_result_selected)
         self.footprints_btn.clicked.connect(self._footprints_for_local_selected)
@@ -217,6 +230,27 @@ class PWTTJobsDock(QDockWidget):
 
         self.jobs_changed.emit()
 
+    def _ensure_job_log_loaded(self, job):
+        """Hydrate in-memory log from persisted job (e.g. new session)."""
+        jid = job["id"]
+        if jid in self._job_logs:
+            return
+        self._job_logs[jid] = list(job.get("activity_log") or [])
+
+    def _schedule_activity_log_persist(self, job_id):
+        self._activity_log_dirty_jobs.add(job_id)
+        if not self._activity_log_flush_timer.isActive():
+            self._activity_log_flush_timer.start()
+
+    def _flush_activity_logs_to_store(self):
+        from ..core import job_store
+
+        for jid in list(self._activity_log_dirty_jobs):
+            entries = self._job_logs.get(jid)
+            if entries is not None:
+                job_store.update_job(jid, activity_log=list(entries))
+        self._activity_log_dirty_jobs.clear()
+
     def _get_selected_job_id(self):
         row = self.job_table.currentRow()
         if row < 0:
@@ -281,13 +315,14 @@ class PWTTJobsDock(QDockWidget):
         from ..core import job_store
         job = self._get_selected_job()
         if not job:
-            for btn in (self.load_btn, self.open_output_btn, self.load_local_btn, self.apply_style_btn, self.footprints_btn, self.resume_btn, self.stop_btn,
+            for btn in (self.load_btn, self.open_output_btn, self.view_logs_btn, self.load_local_btn, self.apply_style_btn, self.footprints_btn, self.resume_btn, self.stop_btn,
                          self.cancel_btn, self.rerun_btn, self.delete_btn):
                 btn.setEnabled(False)
             self.log_text.clear()
             self.progress_bar.setValue(0)
             return
 
+        self._ensure_job_log_loaded(job)
         st = job["status"]
         self.load_btn.setEnabled(True)
         out_dir = (job.get("output_dir") or "").strip()
@@ -303,6 +338,7 @@ class PWTTJobsDock(QDockWidget):
         )
         self.rerun_btn.setEnabled(True)
         self.delete_btn.setEnabled(st != job_store.STATUS_RUNNING)
+        self.view_logs_btn.setEnabled(bool(self._job_logs.get(job["id"])))
 
         self.resume_btn.setText(
             "Check && Resume" if st == job_store.STATUS_WAITING_ORDERS else "Resume"
@@ -352,6 +388,7 @@ class PWTTJobsDock(QDockWidget):
         )
 
         job_id = job["id"]
+        self._ensure_job_log_loaded(job)
         self._active_tasks[job_id] = task
         bname = {"openeo": "openEO", "gee": "GEE", "local": "Local"}.get(
             job["backend_id"], job["backend_id"]
@@ -365,6 +402,7 @@ class PWTTJobsDock(QDockWidget):
         log_parts.append(f"output: {job['output_dir']}")
         self._job_logs.setdefault(job_id, []).append("<br>".join(log_parts))
         self._job_progress[job_id] = 0
+        self._schedule_activity_log_persist(job_id)
 
         task.taskCompleted.connect(lambda _jid=job_id: self._on_task_completed(_jid))
         task.taskTerminated.connect(lambda _jid=job_id: self._on_task_terminated(_jid))
@@ -387,11 +425,13 @@ class PWTTJobsDock(QDockWidget):
 
     def _append_order_poll_log(self, job_id, msg):
         self._job_logs.setdefault(job_id, []).append(msg)
+        self._schedule_activity_log_persist(job_id)
         if self._get_selected_job_id() == job_id:
             self.log_text.append(msg)
 
     def _handle_status_message(self, job_id, msg):
         self._job_logs.setdefault(job_id, []).append(msg)
+        self._schedule_activity_log_persist(job_id)
         if self._get_selected_job_id() == job_id:
             self.log_text.append(msg)
 
@@ -406,6 +446,7 @@ class PWTTJobsDock(QDockWidget):
                     job_store.update_job(job_id, remote_job_id=remote_id)
                     note = f"Remote job ID saved: {remote_id}"
                     self._job_logs.setdefault(job_id, []).append(note)
+                    self._schedule_activity_log_persist(job_id)
                     if self._get_selected_job_id() == job_id:
                         self.log_text.append(note)
                     self._refresh_job_list()
@@ -424,8 +465,6 @@ class PWTTJobsDock(QDockWidget):
         # GRD offline: run() returned True so QgsTask does not show a failure notification.
         if task.products_offline:
             remote_id = getattr(task, "remote_job_id", None)
-            if remote_id:
-                job_store.update_job(job_id, remote_job_id=remote_id)
             ids = list(task.offline_product_ids)
             prows = list(getattr(task, "offline_products", []) or [])
             by_id = {
@@ -441,12 +480,6 @@ class PWTTJobsDock(QDockWidget):
                 }
                 for pid in ids
             ]
-            job_store.update_job(
-                job_id,
-                status=job_store.STATUS_WAITING_ORDERS,
-                offline_product_ids=ids,
-                offline_products=offline_products,
-            )
             ids_str = ", ".join(ids[:5])
             if len(ids) > 5:
                 ids_str += f" (+{len(ids) - 5} more)"
@@ -455,6 +488,16 @@ class PWTTJobsDock(QDockWidget):
                 f"Product IDs: {ids_str}<br>"
                 f"Will auto-check every 2 min and resume when available."
             )
+            ow_fields = dict(
+                status=job_store.STATUS_WAITING_ORDERS,
+                offline_product_ids=ids,
+                offline_products=offline_products,
+                activity_log=list(self._job_logs[job_id]),
+            )
+            if remote_id:
+                ow_fields["remote_job_id"] = remote_id
+            job_store.update_job(job_id, **ow_fields)
+            self._activity_log_dirty_jobs.discard(job_id)
             self._job_progress.pop(job_id, None)
             self._refresh_job_list()
             if self._get_selected_job_id() == job_id:
@@ -475,8 +518,6 @@ class PWTTJobsDock(QDockWidget):
         remote_id = getattr(task, "remote_job_id", None)
         if remote_id:
             update_fields["remote_job_id"] = remote_id
-        job_store.update_job(job_id, **update_fields)
-        self._job_progress[job_id] = 100
         # Rich completion log
         done_parts = ["<b>Task completed successfully.</b>"]
         if output_tif:
@@ -490,6 +531,10 @@ class PWTTJobsDock(QDockWidget):
         if remote_id:
             done_parts.append(f"Remote job: {remote_id}")
         self._job_logs.setdefault(job_id, []).append("<br>".join(done_parts))
+        update_fields["activity_log"] = list(self._job_logs[job_id])
+        job_store.update_job(job_id, **update_fields)
+        self._job_progress[job_id] = 100
+        self._activity_log_dirty_jobs.discard(job_id)
         self._refresh_job_list()
         if self._get_selected_job_id() == job_id:
             self.progress_bar.setValue(100)
@@ -508,30 +553,43 @@ class PWTTJobsDock(QDockWidget):
 
         if task.isCanceled():
             current = job_store.get_job(job_id)
-            if current and current["status"] not in (
-                job_store.STATUS_STOPPED, job_store.STATUS_CANCELLED
-            ):
-                job_store.update_job(job_id, status=job_store.STATUS_CANCELLED)
             msg = "Task was cancelled."
             if remote_id:
                 msg += f" Remote job: {remote_id}"
             self._job_logs.setdefault(job_id, []).append(msg)
+            log_snapshot = list(self._job_logs[job_id])
+            if current and current["status"] not in (
+                job_store.STATUS_STOPPED, job_store.STATUS_CANCELLED
+            ):
+                job_store.update_job(
+                    job_id,
+                    status=job_store.STATUS_CANCELLED,
+                    activity_log=log_snapshot,
+                )
+            else:
+                job_store.update_job(job_id, activity_log=log_snapshot)
         elif task.exception:
-            job_store.update_job(
-                job_id, status=job_store.STATUS_FAILED, error=str(task.exception)
-            )
             err_parts = [f"<b>Task failed:</b> {task.exception}"]
             if remote_id:
                 err_parts.append(f"Remote job: {remote_id}")
             self._job_logs.setdefault(job_id, []).append("<br>".join(err_parts))
             if task.error_detail:
                 self._job_logs[job_id].append(f"<pre>{task.error_detail}</pre>")
-        else:
             job_store.update_job(
-                job_id, status=job_store.STATUS_FAILED, error="Unknown error"
+                job_id,
+                status=job_store.STATUS_FAILED,
+                error=str(task.exception),
+                activity_log=list(self._job_logs[job_id]),
             )
+        else:
             self._job_logs.setdefault(job_id, []).append(
                 "Task terminated unexpectedly."
+            )
+            job_store.update_job(
+                job_id,
+                status=job_store.STATUS_FAILED,
+                error="Unknown error",
+                activity_log=list(self._job_logs[job_id]),
             )
 
         self._refresh_job_list()
@@ -562,6 +620,29 @@ class PWTTJobsDock(QDockWidget):
             )
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(out_dir))
+
+    def _view_logs_selected(self):
+        job = self._get_selected_job()
+        if not job:
+            return
+        jid = job["id"]
+        self._ensure_job_log_loaded(job)
+        entries = self._job_logs.get(jid) or []
+        if not entries:
+            QMessageBox.information(self, "PWTT", "No log entries for this job.")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"PWTT job log — {jid}")
+        v = QVBoxLayout(dlg)
+        te = QTextEdit(dlg)
+        te.setReadOnly(True)
+        te.setHtml("<br>".join(entries))
+        v.addWidget(te)
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.rejected.connect(dlg.reject)
+        v.addWidget(bb)
+        dlg.resize(780, 520)
+        dlg.exec_()
 
     def _load_local_selected(self):
         """Add on-disk result raster and footprint layers for the selected job, if they exist."""

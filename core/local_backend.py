@@ -28,6 +28,18 @@ LOCAL_SOURCE_PC = "pc"
 # More scenes improve t-test accuracy but increase download time and memory.
 MAX_SCENES_PER_PERIOD = 3
 
+# Keep progress lines readable in the Jobs dock (full text still in exceptions / job log).
+_PROGRESS_ERR_MAX_LEN = 200
+
+
+def _short_progress_error(msg: str) -> str:
+    if not msg:
+        return "unknown error"
+    one_line = " ".join(str(msg).split())
+    if len(one_line) <= _PROGRESS_ERR_MAX_LEN:
+        return one_line
+    return one_line[: _PROGRESS_ERR_MAX_LEN - 1] + "…"
+
 
 def _add_months_dt(d: datetime, months: int) -> datetime:
     """Calendar add (same rule as openEO backend: clamp day to 28)."""
@@ -320,15 +332,22 @@ class LocalBackend(PWTTBackend):
                 else:
                     from .asf_downloader import download_product_asf
 
+                    err_msg = None
                     try:
                         safe_dir = download_product_asf(self._asf_session, prod, cache_dir)
                     except Exception as dl_err:
                         safe_dir = None
+                        err_msg = str(dl_err)
                         with _lock:
-                            download_failures.append({"name": name, "error": str(dl_err)})
+                            download_failures.append({"name": name, "error": err_msg})
                     if not safe_dir:
+                        if err_msg is None:
+                            err_msg = "no SAFE/ZIP in cache after download (unexpected)"
+                            with _lock:
+                                download_failures.append({"name": name, "error": err_msg})
+                        detail = _short_progress_error(err_msg)
                         if progress_callback:
-                            progress_callback(0, f"{label}: skip {name} (download failed)…")
+                            progress_callback(0, f"{label}: skip {name} — {detail}")
                         continue
 
                 vv_path, vh_path = find_vv_vh_in_safe(safe_dir)
@@ -357,15 +376,25 @@ class LocalBackend(PWTTBackend):
                 cd = prod.get("ContentDate") or {}
                 scene_date = (cd.get("Start") or "")[:19]
                 subdir = os.path.join(cache_dir, "pc_" + "".join(c if c.isalnum() else "_" for c in pid)[:120])
+                dl_err = None
                 try:
                     vv_path, vh_path = download_pc_vv_vh(prod, subdir)
-                except Exception as dl_err:
+                except Exception as e:
+                    dl_err = e
                     vv_path, vh_path = None, None
                     with _lock:
                         download_failures.append({"name": name, "error": str(dl_err)})
                 if not vv_path or not vh_path:
                     if progress_callback:
-                        progress_callback(0, f"{label}: skip {name} (no VV/VH assets)…")
+                        if dl_err is not None:
+                            detail = _short_progress_error(str(dl_err))
+                            progress_callback(
+                                0, f"{label}: skip {name} — {detail}"
+                            )
+                        else:
+                            progress_callback(
+                                0, f"{label}: skip {name} (no VV/VH assets)…"
+                            )
                     continue
                 result = _read_vv_vh(vv_path, vh_path)
                 if result is None:
