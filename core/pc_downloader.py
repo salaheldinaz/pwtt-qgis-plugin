@@ -2,7 +2,8 @@
 """Microsoft Planetary Computer: STAC search + signed download for Sentinel-1 GRD IW."""
 
 import os
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
 
@@ -35,6 +36,7 @@ def search_s1_grd_pc(
     start_date: str,
     end_date: str,
     max_results: int = 50,
+    log: Optional[Callable[[str], None]] = None,
 ) -> List[dict]:
     """STAC search ``sentinel-1-grd`` IW over AOI and time range.
 
@@ -47,6 +49,13 @@ def search_s1_grd_pc(
     start = start_date[:10]
     end = end_date[:10]
     dt = f"{start}/{end}"
+
+    if log:
+        log(
+            "PC API: STAC search planetarycomputer.microsoft.com/api/stac/v1 "
+            f"(collection=sentinel-1-grd, bbox=[{west:.4f},{south:.4f},{east:.4f},{north:.4f}], "
+            f"datetime={dt})"
+        )
 
     # Fetch slightly over limit then keep IW only (avoids STAC query dialect mismatches).
     search = catalog.search(
@@ -85,6 +94,8 @@ def search_s1_grd_pc(
                 "_pc_item": it,
             }
         )
+    if log:
+        log(f"PC API: STAC returned {len(out)} IW scene(s) (after filter)")
     return out
 
 
@@ -113,7 +124,11 @@ def _vv_vh_hrefs(item) -> Tuple[Optional[str], Optional[str]]:
     return vv_h, vh_h
 
 
-def download_pc_vv_vh(product: dict, out_dir: str) -> Tuple[Optional[str], Optional[str]]:
+def download_pc_vv_vh(
+    product: dict,
+    out_dir: str,
+    log: Optional[Callable[[str], None]] = None,
+) -> Tuple[Optional[str], Optional[str]]:
     """Download VV/VH GeoTIFFs for a STAC item into *out_dir*. Returns (vv_path, vh_path)."""
     item = product.get("_pc_item")
     if item is None:
@@ -129,10 +144,23 @@ def download_pc_vv_vh(product: dict, out_dir: str) -> Tuple[Optional[str], Optio
     vh_path = os.path.join(out_dir, f"{safe}_vh.tif")
 
     if os.path.isfile(vv_path) and os.path.isfile(vh_path):
+        if log:
+            log(f"PC: reuse cached COGs — {vv_path} , {vh_path}")
         return vv_path, vh_path
 
-    def _stream_download(session, url, dest):
+    def _host_hint(url: str) -> str:
+        try:
+            return urlparse(url).netloc or "(unknown host)"
+        except Exception:
+            return "(unknown host)"
+
+    def _stream_download(session, url, dest, band_label: str):
         """Download *url* to *dest*, removing partial file on failure."""
+        if log:
+            log(
+                f"PC GET: {_host_hint(url)} — stream {band_label} → {os.path.basename(dest)} "
+                "(signed URL; query not logged)"
+            )
         try:
             r = session.get(url, stream=True, timeout=(30, 600))
             r.raise_for_status()
@@ -144,8 +172,13 @@ def download_pc_vv_vh(product: dict, out_dir: str) -> Tuple[Optional[str], Optio
                 os.remove(dest)
             raise
 
-    with requests.Session() as s:
-        _stream_download(s, vv_h, vv_path)
-        _stream_download(s, vh_h, vh_path)
+    if log:
+        log(f"PC download: item «{safe}» → {out_dir}")
 
+    with requests.Session() as s:
+        _stream_download(s, vv_h, vv_path, "VV")
+        _stream_download(s, vh_h, vh_path, "VH")
+
+    if log:
+        log(f"PC: wrote {vv_path} , {vh_path}")
     return vv_path, vh_path

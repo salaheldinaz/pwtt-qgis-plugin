@@ -3,6 +3,7 @@
 
 import glob
 import os
+import shutil
 import threading
 
 from qgis.PyQt.QtWidgets import (
@@ -43,6 +44,89 @@ def _jobs_dock_btn_icon(*theme_paths: str, resource_fallback: str = None) -> QIc
 
 
 _JOBS_BTN_ICON_SIZE = QSize(18, 18)
+
+
+def _format_bytes_short(n: int) -> str:
+    if n <= 0:
+        return "\u2014"
+    for suffix, div in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
+        if n >= div:
+            return f"{n / div:.1f} {suffix}"
+    return f"{n} B"
+
+
+def _job_output_size_bytes(job: dict) -> int:
+    """Total size of on-disk job output (folder tree or loose artifact files)."""
+    out_dir = (job.get("output_dir") or "").strip()
+    total = 0
+    if out_dir and os.path.isdir(out_dir):
+        try:
+            for root, _dirs, files in os.walk(out_dir):
+                for name in files:
+                    fp = os.path.join(root, name)
+                    try:
+                        total += os.path.getsize(fp)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return total
+
+    paths = set()
+    jid = job.get("id") or ""
+    for cand in (job.get("output_tif"), job.get("footprints_gpkg")):
+        if cand:
+            paths.add(cand)
+    for p in (job.get("footprints_gpkgs") or {}).values():
+        if p:
+            paths.add(p)
+    if out_dir and jid:
+        paths.add(os.path.join(out_dir, f"pwtt_{jid}.tif"))
+    for p in paths:
+        if p and os.path.isfile(p):
+            try:
+                total += os.path.getsize(p)
+            except OSError:
+                pass
+    return total
+
+
+def _job_has_disk_output(job: dict) -> bool:
+    out_dir = (job.get("output_dir") or "").strip()
+    if out_dir and os.path.isdir(out_dir):
+        return True
+    return _job_output_size_bytes(job) > 0
+
+
+def _remove_job_output_from_disk(job: dict) -> None:
+    """Remove job output folder or orphaned artifact files (best effort)."""
+    out_dir = (job.get("output_dir") or "").strip()
+    if out_dir:
+        abs_out = os.path.abspath(os.path.expanduser(out_dir))
+        if abs_out not in (os.path.abspath(os.sep), os.path.expanduser("~")):
+            try:
+                if os.path.isdir(abs_out):
+                    shutil.rmtree(abs_out, ignore_errors=False)
+                    return
+            except OSError:
+                pass
+
+    paths = set()
+    jid = job.get("id") or ""
+    for cand in (job.get("output_tif"), job.get("footprints_gpkg")):
+        if cand:
+            paths.add(cand)
+    for p in (job.get("footprints_gpkgs") or {}).values():
+        if p:
+            paths.add(p)
+    if out_dir and jid:
+        paths.add(os.path.join(out_dir, f"pwtt_{jid}.tif"))
+    for p in paths:
+        if p and os.path.isfile(p):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
 
 
 class PWTTJobsDock(QDockWidget):
@@ -99,9 +183,18 @@ class PWTTJobsDock(QDockWidget):
         layout.setSpacing(4)
 
         # Job table
-        self.job_table = QTableWidget(0, 7)
+        self.job_table = QTableWidget(0, 8)
         self.job_table.setHorizontalHeaderLabels(
-            ["Status", "Backend", "Remote Job", "Local ID", "Output folder", "Dates", "Created"]
+            [
+                "Status",
+                "Backend",
+                "Remote Job",
+                "Local ID",
+                "Output folder",
+                "Files size",
+                "Dates",
+                "Created",
+            ]
         )
         self.job_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.job_table.setSelectionMode(QTableWidget.SingleSelection)
@@ -115,6 +208,7 @@ class PWTTJobsDock(QDockWidget):
         hdr.setSectionResizeMode(4, QHeaderView.Stretch)
         hdr.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(7, QHeaderView.ResizeToContents)
         self.job_table.setMaximumHeight(180)
         self.job_table.itemSelectionChanged.connect(self._on_job_selected)
         layout.addWidget(self.job_table)
@@ -280,13 +374,22 @@ class PWTTJobsDock(QDockWidget):
             od_item.setToolTip(out_dir)
             self.job_table.setItem(row, 4, od_item)
 
+            # On-disk output size
+            sz_b = _job_output_size_bytes(job)
+            sz_item = QTableWidgetItem(_format_bytes_short(sz_b))
+            sz_item.setToolTip(
+                f"{sz_b:,} bytes" if sz_b > 0 else "No files found for this job path"
+            )
+            sz_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.job_table.setItem(row, 5, sz_item)
+
             # Dates
             dates = f"{job['war_start'][:7]} \u2192 {job['inference_start'][:7]}"
-            self.job_table.setItem(row, 5, QTableWidgetItem(dates))
+            self.job_table.setItem(row, 6, QTableWidgetItem(dates))
 
             # Created
             created = job.get("created_at", "")[:16].replace("T", " ")
-            self.job_table.setItem(row, 6, QTableWidgetItem(created))
+            self.job_table.setItem(row, 7, QTableWidgetItem(created))
 
         # Restore selection
         if selected_id:
@@ -1149,9 +1252,52 @@ class PWTTJobsDock(QDockWidget):
         job = self._get_selected_job()
         if not job or job["status"] == job_store.STATUS_RUNNING:
             return
-        job_store.delete_job(job["id"])
-        self._job_logs.pop(job["id"], None)
-        self._job_progress.pop(job["id"], None)
+        jid = job["id"]
+        label = f"{jid[:8]}\u2026" if len(jid) > 10 else jid
+        reply = QMessageBox.question(
+            self,
+            "PWTT",
+            f"Remove job {label} from the jobs list?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        delete_files = False
+        if _job_has_disk_output(job):
+            sz_b = _job_output_size_bytes(job)
+            sz_human = _format_bytes_short(sz_b) if sz_b > 0 else "folder exists"
+            out_dir = (job.get("output_dir") or "").strip()
+            extra = ""
+            if out_dir:
+                extra = f"\n\nOutput path:\n{out_dir}"
+            r2 = QMessageBox.question(
+                self,
+                "PWTT",
+                f"This job has files on disk (about {sz_human}).\n\n"
+                f"Delete those files as well? This cannot be undone.{extra}",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            delete_files = r2 == QMessageBox.Yes
+
+        if delete_files:
+            try:
+                _remove_job_output_from_disk(job)
+            except OSError as e:
+                QMessageBox.warning(
+                    self,
+                    "PWTT",
+                    f"Could not delete all job files:\n{e}\n\n"
+                    "The job will stay in the list; fix permissions or remove files manually.",
+                )
+                return
+
+        job_store.delete_job(jid)
+        self._job_logs.pop(jid, None)
+        self._job_progress.pop(jid, None)
+        self._active_tasks.pop(jid, None)
         self._refresh_job_list()
 
     # ── Order polling ─────────────────────────────────────────────────────────

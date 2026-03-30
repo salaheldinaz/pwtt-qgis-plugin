@@ -7,7 +7,7 @@ import re
 import time
 import zipfile
 import requests
-from typing import List, Tuple, Optional
+from typing import Callable, List, Optional, Tuple
 from urllib.parse import quote
 
 
@@ -54,8 +54,15 @@ def search_s1_grd(
     start_date: str,
     end_date: str,
     max_results: int = 50,
+    log: Optional[Callable[[str], None]] = None,
 ) -> List[dict]:
     """Search for Sentinel-1 IW GRDH products. Returns list sorted with online products first."""
+    if log:
+        log(
+            "CDSE API: OData GET catalogue.dataspace.copernicus.eu/odata/v1/Products "
+            f"(SENTINEL-1 IW_GRDH_1S, AOI intersects, ContentDate "
+            f"{start_date[:10]} … {end_date[:10]}, top={max_results})"
+        )
     geom = _wkt_to_odata_geom(aoi_wkt)
     start_odata = start_date.replace(" ", "T") + "T00:00:00.000Z" if "T" not in start_date else start_date
     end_odata = end_date.replace(" ", "T") + "T23:59:59.999Z" if "T" not in end_date else end_date
@@ -71,6 +78,12 @@ def search_s1_grd(
     products = r.json().get("value", [])
     # Sort online products first so we prefer immediately available data
     products.sort(key=lambda p: (not p.get("Online", True),))
+    if log:
+        online_n = sum(1 for p in products if p.get("Online", True))
+        log(
+            f"CDSE API: response {len(products)} product(s) "
+            f"({online_n} marked online, {len(products) - online_n} offline)"
+        )
     return products
 
 
@@ -102,6 +115,7 @@ def download_product(
     product_name: str,
     out_dir: str,
     wait_for_offline: bool = True,
+    log: Optional[Callable[[str], None]] = None,
 ) -> Optional[str]:
     """
     Download full product (zip) and extract to out_dir. Returns path to extracted .SAFE directory.
@@ -114,7 +128,16 @@ def download_product(
         safe_name = product_name + ".SAFE" if not product_name.endswith(".SAFE") else product_name
         extract_dir = os.path.join(out_dir, safe_name)
         if os.path.isdir(extract_dir):
+            if log:
+                log(f"CDSE: reuse cached SAFE (no download) — {extract_dir}")
             return extract_dir
+
+    if log:
+        log(
+            f"CDSE download: product «{product_name}» id={product_id} "
+            f"→ GET download.dataspace.copernicus.eu/odata/v1/Products('$value')"
+        )
+        log(f"CDSE: zip target {zip_path}")
 
     with requests.Session() as session:
         session.headers["Authorization"] = f"Bearer {access_token}"
@@ -123,22 +146,37 @@ def download_product(
         # Follow redirects manually to handle auth on each hop
         r = session.get(url, allow_redirects=False, timeout=60)
         while r.status_code in (301, 302, 303, 307):
+            loc = r.headers.get("Location", "")
+            if log and loc:
+                log(f"CDSE: redirect HTTP {r.status_code} → {loc[:120]}{'…' if len(loc) > 120 else ''}")
             url = r.headers["Location"]
             r = session.get(url, allow_redirects=False, timeout=60)
 
         # 202 = order accepted (product being staged from cold storage)
         # 422 = product offline, not yet ordered or still staging
         if r.status_code in (202, 422):
+            if log:
+                log(
+                    f"CDSE: HTTP {r.status_code} (offline / staging) for «{product_name}» "
+                    f"— triggering order & catalogue poll"
+                )
             # Always trigger the order so CDSE starts staging it for future attempts
             _trigger_order(session, product_id)
             if not wait_for_offline:
                 return None
             # Poll until online
             waited = 0
+            if log:
+                log(
+                    f"CDSE: polling Products metadata every {ORDER_POLL_INTERVAL_S}s "
+                    f"(max {MAX_ORDER_WAIT_S}s)…"
+                )
             while waited < MAX_ORDER_WAIT_S:
                 time.sleep(ORDER_POLL_INTERVAL_S)
                 waited += ORDER_POLL_INTERVAL_S
                 if _is_product_online(access_token, product_id):
+                    if log:
+                        log(f"CDSE: product online after ~{waited}s — retrying download")
                     break
             else:
                 raise RuntimeError(
@@ -154,6 +192,8 @@ def download_product(
 
         # Re-request as a stream (the redirect-following request above wasn't streamed)
         r.close()
+        if log:
+            log(f"CDSE: streaming body to {zip_path} …")
         r = session.get(url, stream=True, timeout=(30, 600))
         r.raise_for_status()
         with open(zip_path, "wb") as f:
@@ -163,8 +203,12 @@ def download_product(
     safe_name = product_name + ".SAFE" if not product_name.endswith(".SAFE") else product_name
     extract_dir = os.path.join(out_dir, safe_name)
     if not os.path.isdir(extract_dir):
+        if log:
+            log(f"CDSE: extracting zip → {out_dir}")
         with zipfile.ZipFile(zip_path, "r") as z:
             z.extractall(out_dir)
+    if log:
+        log(f"CDSE: SAFE ready at {extract_dir}")
     return extract_dir
 
 

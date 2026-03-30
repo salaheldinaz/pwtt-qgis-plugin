@@ -203,6 +203,23 @@ class LocalBackend(PWTTBackend):
         cache_dir = os.path.join(os.path.dirname(output_path), ".pwtt_cache")
         os.makedirs(cache_dir, exist_ok=True)
 
+        def job_log(msg: str):
+            if progress_callback:
+                progress_callback(0, msg)
+
+        job_log(
+            f"Local processing: source={source}, cache_dir={cache_dir}, "
+            f"output_tif={output_path}"
+        )
+        job_log(
+            f"Local: AOI WGS84 bbox west={west:.5f} south={south:.5f} "
+            f"east={east:.5f} north={north:.5f}"
+        )
+        job_log(
+            f"Local: pre window {pre_start} … {war_start[:10]}, "
+            f"post window {inference_start[:10]} … {post_end}"
+        )
+
         self.run_metadata = {
             "collection": "SENTINEL-1 IW_GRDH_1S",
             "data_source": source,
@@ -221,34 +238,64 @@ class LocalBackend(PWTTBackend):
 
         if source == LOCAL_SOURCE_CDSE:
             pre_products = search_s1_grd(
-                self._token, aoi_wkt, pre_start, war_start, max_results=20
+                self._token,
+                aoi_wkt,
+                pre_start,
+                war_start,
+                max_results=20,
+                log=job_log,
             )
             if progress_callback:
                 progress_callback(10, "Searching post-war products…")
             post_products = search_s1_grd(
-                self._token, aoi_wkt, inference_start, post_end, max_results=20
+                self._token,
+                aoi_wkt,
+                inference_start,
+                post_end,
+                max_results=20,
+                log=job_log,
             )
         elif source == LOCAL_SOURCE_ASF:
             from .asf_downloader import search_s1_grd_asf
 
             pre_products = search_s1_grd_asf(
-                self._asf_session, aoi_wkt, pre_start, war_start, max_results=20
+                self._asf_session,
+                aoi_wkt,
+                pre_start,
+                war_start,
+                max_results=20,
+                log=job_log,
             )
             if progress_callback:
                 progress_callback(10, "Searching post-war products…")
             post_products = search_s1_grd_asf(
-                self._asf_session, aoi_wkt, inference_start, post_end, max_results=20
+                self._asf_session,
+                aoi_wkt,
+                inference_start,
+                post_end,
+                max_results=20,
+                log=job_log,
             )
         else:
             from .pc_downloader import search_s1_grd_pc
 
             pre_products = search_s1_grd_pc(
-                self._pc_client, aoi_wkt, pre_start, war_start, max_results=20
+                self._pc_client,
+                aoi_wkt,
+                pre_start,
+                war_start,
+                max_results=20,
+                log=job_log,
             )
             if progress_callback:
                 progress_callback(10, "Searching post-war products…")
             post_products = search_s1_grd_pc(
-                self._pc_client, aoi_wkt, inference_start, post_end, max_results=20
+                self._pc_client,
+                aoi_wkt,
+                inference_start,
+                post_end,
+                max_results=20,
+                log=job_log,
             )
 
         if not pre_products or not post_products:
@@ -278,6 +325,20 @@ class LocalBackend(PWTTBackend):
 
         self.run_metadata["pre_scenes_found"] = [_scene_summary(p) for p in pre_products]
         self.run_metadata["post_scenes_found"] = [_scene_summary(p) for p in post_products]
+
+        def _preview_names(products, n=6):
+            parts = []
+            for p in products[:n]:
+                parts.append(str(p.get("Name") or p.get("Id") or "?"))
+            tail = f" (+{len(products) - n} more)" if len(products) > n else ""
+            return ", ".join(parts) + tail
+
+        job_log(f"Local: pre search — {_preview_names(pre_products)}")
+        job_log(f"Local: post search — {_preview_names(post_products)}")
+        job_log(
+            f"Local: will try up to {MAX_SCENES_PER_PERIOD} pre + "
+            f"{MAX_SCENES_PER_PERIOD} post scenes (parallel download)"
+        )
 
         max_per_period = MAX_SCENES_PER_PERIOD
         pre_arrays = []
@@ -314,7 +375,12 @@ class LocalBackend(PWTTBackend):
 
                 if source == LOCAL_SOURCE_CDSE:
                     safe_dir = download_product(
-                        self._token, pid, name, cache_dir, wait_for_offline=False
+                        self._token,
+                        pid,
+                        name,
+                        cache_dir,
+                        wait_for_offline=False,
+                        log=job_log,
                     )
                     if safe_dir is None:
                         with _lock:
@@ -334,7 +400,9 @@ class LocalBackend(PWTTBackend):
 
                     err_msg = None
                     try:
-                        safe_dir = download_product_asf(self._asf_session, prod, cache_dir)
+                        safe_dir = download_product_asf(
+                            self._asf_session, prod, cache_dir, log=job_log
+                        )
                     except Exception as dl_err:
                         safe_dir = None
                         err_msg = str(dl_err)
@@ -352,7 +420,14 @@ class LocalBackend(PWTTBackend):
 
                 vv_path, vh_path = find_vv_vh_in_safe(safe_dir)
                 if not vv_path or not vh_path:
+                    job_log(
+                        f"{label}: no VV/VH tifs under measurement/ in {safe_dir} "
+                        f"(skip «{name}»)"
+                    )
                     continue
+                job_log(
+                    f"{label}: VV/VH rasters — {vv_path} | {vh_path}"
+                )
                 result = _read_vv_vh(vv_path, vh_path)
                 if result is None:
                     if progress_callback:
@@ -362,6 +437,10 @@ class LocalBackend(PWTTBackend):
                 with _lock:
                     self.run_metadata[used_key].append({"id": pid, "name": name, "date": scene_date})
                 loaded += 1
+                job_log(
+                    f"{label}: accepted scene «{name}» ({scene_date}) "
+                    f"[{loaded}/{max_per_period}]"
+                )
 
         def load_products_pc(products, arrays_list, label, used_key):
             from .pc_downloader import download_pc_vv_vh
@@ -378,7 +457,7 @@ class LocalBackend(PWTTBackend):
                 subdir = os.path.join(cache_dir, "pc_" + "".join(c if c.isalnum() else "_" for c in pid)[:120])
                 dl_err = None
                 try:
-                    vv_path, vh_path = download_pc_vv_vh(prod, subdir)
+                    vv_path, vh_path = download_pc_vv_vh(prod, subdir, log=job_log)
                 except Exception as e:
                     dl_err = e
                     vv_path, vh_path = None, None
@@ -396,6 +475,7 @@ class LocalBackend(PWTTBackend):
                                 0, f"{label}: skip {name} (no VV/VH assets)…"
                             )
                     continue
+                job_log(f"{label}: PC COGs ready — {vv_path} | {vh_path}")
                 result = _read_vv_vh(vv_path, vh_path)
                 if result is None:
                     if progress_callback:
@@ -405,6 +485,10 @@ class LocalBackend(PWTTBackend):
                 with _lock:
                     self.run_metadata[used_key].append({"id": pid, "name": name, "date": scene_date})
                 loaded += 1
+                job_log(
+                    f"{label}: accepted PC scene «{name}» ({scene_date}) "
+                    f"[{loaded}/{max_per_period}]"
+                )
 
         if progress_callback:
             progress_callback(12, "Downloading pre- and post-war scenes…")
@@ -419,6 +503,11 @@ class LocalBackend(PWTTBackend):
             post_fut = pool.submit(loader, post_products, post_arrays, "Post", "post_scenes_used")
             pre_fut.result()
             post_fut.result()
+
+        job_log(
+            f"Local: downloads finished — pre stacks={len(pre_arrays)}, "
+            f"post stacks={len(post_arrays)}"
+        )
 
         if not pre_arrays or not post_arrays:
             if source == LOCAL_SOURCE_CDSE and triggered_orders[0] > 0:
@@ -461,6 +550,10 @@ class LocalBackend(PWTTBackend):
         ref_vv, ref_vh, ref_profile, ref_transform, ref_crs = pre_arrays[0]
         height, width = ref_vv.shape
         pixel_size = abs(ref_transform.a)
+        job_log(
+            f"Local: reference grid {width}×{height} px, "
+            f"~{pixel_size:.2f} m, CRS {ref_crs}"
+        )
 
         def to_ref(vv, vh, profile, transform, crs):
             if crs == ref_crs and transform == ref_transform:
@@ -504,6 +597,10 @@ class LocalBackend(PWTTBackend):
             post_vv_list.append(np.log(np.maximum(vv_f, 1e-12)))
             post_vh_list.append(np.log(np.maximum(vh_f, 1e-12)))
 
+        job_log(
+            "Local: per-scene reproject (if needed), Lee filter, log-amplitude — "
+            f"pre {len(pre_vv_list)} layers, post {len(post_vv_list)} layers"
+        )
         if progress_callback:
             progress_callback(55, "Computing t-test…")
         pre_vv = np.stack(pre_vv_list, axis=0)
@@ -533,6 +630,10 @@ class LocalBackend(PWTTBackend):
         t_vv = np.abs(post_mean_vv - pre_mean_vv) / denom_vv
         t_vh = np.abs(post_mean_vh - pre_mean_vh) / denom_vh
         max_change = np.maximum(t_vv, t_vh)
+        job_log(
+            f"Local: Welch-style t on means — pre_n={pre_n} post_n={post_n}, "
+            f"df={df}, damage |t| threshold={damage_threshold}"
+        )
 
         p_vv = two_sided_normal_p_value(t_vv)
         p_vh = two_sided_normal_p_value(t_vh)
@@ -541,6 +642,7 @@ class LocalBackend(PWTTBackend):
 
         if progress_callback:
             progress_callback(70, "Post-processing…")
+        job_log("Local: 10 m Gaussian on max |t|, then 50/100/150 m ring means (equal weight)")
         max_change = _focal_median_gaussian(max_change, 10.0, pixel_size)
 
         def _mean_kernel(radius_m):
@@ -556,6 +658,9 @@ class LocalBackend(PWTTBackend):
 
         if progress_callback:
             progress_callback(90, "Writing GeoTIFF…")
+        job_log(
+            f"Local: write GeoTIFF bands (1=t, 2=damage mask, 3=p-value) LZW → {output_path}"
+        )
         out_profile = ref_profile.copy()
         out_profile.update(
             dtype=rasterio.float32,
