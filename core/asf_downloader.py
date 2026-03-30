@@ -271,3 +271,39 @@ def download_product_asf(
                     log(f"ASF: SAFE root from archive {candidate}")
                 return candidate
     return None
+
+
+def remove_zips_for_extracted_safe(safe_dir: str, log: Optional[Callable[[str], None]] = None) -> None:
+    """Remove .zip archives next to an extracted .SAFE after rasters were read (saves disk).
+
+    In ``asf_*`` subfolders all .zip files are removed (one granule per folder). In a flat
+    legacy cache, only zips whose names match the SAFE stem (same heuristics as download).
+    """
+    parent = os.path.dirname(os.path.normpath(safe_dir))
+    base = os.path.basename(safe_dir.rstrip("/\\"))
+    stem = base[:-5] if base.endswith(".SAFE") else base
+    isolated = os.path.basename(parent).startswith("asf_")
+    try:
+        names = os.listdir(parent)
+    except OSError:
+        return
+    for fn in names:
+        if not fn.endswith(".zip"):
+            continue
+        full = os.path.join(parent, fn)
+        if not os.path.isfile(full):
+            continue
+        if isolated or (
+            stem
+            and (
+                stem[:20] in fn
+                or fn.startswith(stem[:16])
+                or fn == stem + ".zip"
+            )
+        ):
+            try:
+                os.remove(full)
+                if log:
+                    log(f"ASF: removed archive to save space — {fn}")
+            except OSError:
+                pass

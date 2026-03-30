@@ -123,13 +123,23 @@ def download_product(
     and product is not available.
     """
     os.makedirs(out_dir, exist_ok=True)
+    safe_name = product_name + ".SAFE" if not product_name.endswith(".SAFE") else product_name
+    extract_dir = os.path.join(out_dir, safe_name)
+    if os.path.isdir(extract_dir):
+        if log:
+            log(f"CDSE: reuse cached SAFE (no download) — {extract_dir}")
+        return extract_dir
+
     zip_path = os.path.join(out_dir, product_name + ".zip")
     if os.path.isfile(zip_path):
-        safe_name = product_name + ".SAFE" if not product_name.endswith(".SAFE") else product_name
-        extract_dir = os.path.join(out_dir, safe_name)
+        if not os.path.isdir(extract_dir):
+            if log:
+                log(f"CDSE: extracting existing zip → {out_dir}")
+            with zipfile.ZipFile(zip_path, "r") as z:
+                z.extractall(out_dir)
         if os.path.isdir(extract_dir):
             if log:
-                log(f"CDSE: reuse cached SAFE (no download) — {extract_dir}")
+                log(f"CDSE: SAFE ready at {extract_dir}")
             return extract_dir
 
     if log:
@@ -210,6 +220,19 @@ def download_product(
     if log:
         log(f"CDSE: SAFE ready at {extract_dir}")
     return extract_dir
+
+
+def remove_product_zip(product_name: str, out_dir: str, log: Optional[Callable[[str], None]] = None) -> None:
+    """Delete the product .zip under out_dir after SAFE has been used (saves disk)."""
+    zip_path = os.path.join(out_dir, product_name + ".zip")
+    if not os.path.isfile(zip_path):
+        return
+    try:
+        os.remove(zip_path)
+        if log:
+            log(f"CDSE: removed archive to save space — {os.path.basename(zip_path)}")
+    except OSError:
+        pass
 
 
 def find_vv_vh_in_safe(safe_dir: str) -> Tuple[Optional[str], Optional[str]]:

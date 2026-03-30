@@ -436,6 +436,14 @@ class LocalBackend(PWTTBackend):
                 if result is None:
                     job_log(f"{label}: skip {name} (failed to read raster)…")
                     continue
+                if source == LOCAL_SOURCE_CDSE:
+                    from .downloader import remove_product_zip
+
+                    remove_product_zip(name, cache_dir, log=job_log)
+                elif source == LOCAL_SOURCE_ASF:
+                    from .asf_downloader import remove_zips_for_extracted_safe
+
+                    remove_zips_for_extracted_safe(safe_dir, log=job_log)
                 arrays_list.append(result)
                 with _lock:
                     self.run_metadata[used_key].append({"id": pid, "name": name, "date": scene_date})
