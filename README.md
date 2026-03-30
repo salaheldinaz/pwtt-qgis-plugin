@@ -15,7 +15,9 @@ QGIS plugin implementing the **Pixel-Wise T-Test (PWTT)** algorithm for building
 - **Python packages** (depending on backend and features):
   - openEO backend: [openeo](https://pypi.org/project/openeo/)
   - GEE backend: [earthengine-api](https://pypi.org/project/earthengine-api/) (GEE logic is bundled; no repo `code/` folder needed)
-  - Local backend: [numpy](https://pypi.org/project/numpy/), [scipy](https://pypi.org/project/scipy/), [rasterio](https://pypi.org/project/rasterio/), [requests](https://pypi.org/project/requests/)
+  - Local backend (CDSE): [numpy](https://pypi.org/project/numpy/), [rasterio](https://pypi.org/project/rasterio/), [requests](https://pypi.org/project/requests/)
+  - Local backend (ASF): [asf-search](https://pypi.org/project/asf-search/) (Python 3.10+ upstream requirement), [requests](https://pypi.org/project/requests/)
+  - Local backend (Planetary Computer): [planetary-computer](https://pypi.org/project/planetary-computer/), [pystac-client](https://pypi.org/project/pystac-client/), [requests](https://pypi.org/project/requests/)
   - Building footprints (optional): [geopandas](https://pypi.org/project/geopandas/), [rasterstats](https://pypi.org/project/rasterstats/)
 
 Use the same Python that QGIS uses (e.g. from QGIS’s Python environment or OS package manager).
@@ -48,11 +50,11 @@ Use the same Python that QGIS uses (e.g. from QGIS’s Python environment or OS 
 |--------|----------------|------|----------|
 | **openEO**  | [Copernicus Data Space](https://dataspace.copernicus.eu/) (cloud) | OIDC browser or client ID/secret | `openeo` |
 | **Google Earth Engine** | [GEE](https://earthengine.google.com/) (cloud) | `ee.Authenticate()` + optional project name | `earthengine-api` |
-| **Local** | Your machine | CDSE username/password | `numpy`, `scipy`, `rasterio`, `requests` |
+| **Local** | Your machine | Source-specific: CDSE creds, Earthdata creds (ASF), optional PC key | `numpy`, `rasterio`, `requests` (+ source-specific packages) |
 
 - **openEO:** No data download; result GeoTIFF is downloaded when the batch job finishes.
 - **GEE:** Uses bundled PWTT logic; download is streamed to disk. Very large AOIs may require GEE Export to Drive instead of getDownloadURL.
-- **Local:** Downloads [Sentinel-1 GRD](https://sentinels.copernicus.eu/web/sentinel/missions/sentinel-1) products from CDSE into a `.pwtt_cache` folder next to the output directory; processes with scipy/rasterio. Disk and RAM usage depend on AOI size and number of scenes.
+- **Local:** Select source in UI: CDSE, ASF, or Microsoft Planetary Computer. Downloads [Sentinel-1 GRD](https://sentinels.copernicus.eu/web/sentinel/missions/sentinel-1) into `.pwtt_cache` next to output, then processes with NumPy/rasterio. Disk and RAM usage depend on AOI size and number of scenes.
 
 ## Usage
 

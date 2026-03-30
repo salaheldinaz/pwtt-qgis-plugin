@@ -94,13 +94,15 @@ So: you are always working from **real GRD granules in your chosen months**, not
 
 ---
 
-## Backend: Local (CDSE download + NumPy/SciPy/rasterio)
+## Backend: Local (GRD download + NumPy/rasterio)
 
-**Auth:** CDSE username / password.
+**Data source (UI):** **Copernicus Data Space (CDSE)**, **ASF (Earthdata Login)**, or **Microsoft Planetary Computer** (STAC `sentinel-1-grd`). CDSE may serve products from cold storage (staging / resume); ASF and PC use hot object storage.
+
+**Auth:** CDSE username/password; or NASA Earthdata username/password (ASF); or optional Planetary Computer subscription key (PC often works without a key).
 
 **Processing:**
 
-1. **Search** Sentinel-1 IW GRD for pre and post windows; **download** products into `<output_dir>/.pwtt_cache` (skip/wait logic for offline products).
+1. **Search** Sentinel-1 IW GRD for pre and post windows; **download** into `<output_dir>/.pwtt_cache` (CDSE: skip/wait logic for offline products; ASF: SAFE zip; PC: signed VV/VH COGs).
 2. Use up to **3** pre and **3** post scenes; **Lee** speckle filter; **log** σ⁰; reproject to a common grid.
 3. **Per-pixel** comparison of pre vs post stacks: **Welch-style t**-type statistic for **VV** and **VH**; take **element-wise max** of the two.
 4. **Post-processing:** Gaussian-style smoothing, circular-kernel means at 50 / 100 / 150 m; combined **T_statistic**; **damage** = 1 where **`T_statistic` > threshold** (UI default 3.3).

@@ -58,6 +58,7 @@ def create_job(
     footprints_sources=None,
     damage_threshold: float = 3.3,
     gee_viz: bool = False,
+    data_source: str = "cdse",
 ) -> dict:
     now = datetime.now().isoformat(timespec="seconds")
     if footprints_sources is None:
@@ -75,6 +76,9 @@ def create_job(
         "footprints_sources": list(footprints_sources),
         "damage_threshold": float(damage_threshold),
         "gee_viz": bool(gee_viz),
+        "data_source": (data_source or "cdse").strip().lower()
+        if backend_id == "local"
+        else "cdse",
         "status": STATUS_PENDING,
         "created_at": now,
         "updated_at": now,

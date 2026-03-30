@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Full-local backend: CDSE download, Lee filter, t-test (numpy), post-process, rasterio output."""
+"""Full-local backend: GRD from CDSE / ASF / Planetary Computer, Lee filter, t-test, rasterio output."""
 
 import os
 from datetime import datetime
 import numpy as np
 from typing import Optional
+
+from qgis.core import QgsSettings
+
 from .base_backend import PWTTBackend
 from .downloader import get_token, search_s1_grd, download_product, find_vv_vh_in_safe
 from .local_numpy_ops import (
@@ -14,6 +17,10 @@ from .local_numpy_ops import (
     uniform_filter2d_edge,
 )
 from .utils import wkt_to_bbox
+
+LOCAL_SOURCE_CDSE = "cdse"
+LOCAL_SOURCE_ASF = "asf"
+LOCAL_SOURCE_PC = "pc"
 
 
 def _add_months_dt(d: datetime, months: int) -> datetime:
@@ -50,6 +57,16 @@ def _circle_kernel(radius_m: float, pixel_size: float) -> np.ndarray:
     return ((x * x + y * y) <= (radius_m / pixel_size) ** 2).astype(np.float64)
 
 
+def _settings_local_source() -> str:
+    s = QgsSettings()
+    s.beginGroup("PWTT")
+    src = (s.value("local_data_source", LOCAL_SOURCE_CDSE) or LOCAL_SOURCE_CDSE).strip().lower()
+    s.endGroup()
+    if src not in (LOCAL_SOURCE_CDSE, LOCAL_SOURCE_ASF, LOCAL_SOURCE_PC):
+        return LOCAL_SOURCE_CDSE
+    return src
+
+
 class LocalBackend(PWTTBackend):
     @property
     def name(self):
@@ -60,25 +77,75 @@ class LocalBackend(PWTTBackend):
         return "local"
 
     def check_dependencies(self):
-        for pkg in ("numpy", "rasterio", "requests"):
-            try:
-                __import__(pkg)
-            except ImportError:
-                return False, f"Local backend requires: pip install numpy rasterio requests"
+        from . import deps
+
+        src = _settings_local_source()
+        missing, pip = deps.local_backend_missing(src)
+        if missing:
+            if pip:
+                return False, f"Local backend ({src}) requires: pip install {' '.join(pip)}"
+            return False, f"Local backend missing: {', '.join(missing)}"
         return True, ""
 
     def authenticate(self, credentials: dict) -> bool:
-        user = (credentials.get("username") or "").strip()
-        password = credentials.get("password") or ""
-        if not user:
-            raise ValueError("CDSE username is required.")
-        if not password:
-            raise ValueError("CDSE password is required.")
-        try:
-            self._token = get_token(user, password)
+        source = (credentials.get("source") or LOCAL_SOURCE_CDSE).strip().lower()
+        if source not in (LOCAL_SOURCE_CDSE, LOCAL_SOURCE_ASF, LOCAL_SOURCE_PC):
+            source = LOCAL_SOURCE_CDSE
+        self._data_source = source
+
+        if source == LOCAL_SOURCE_CDSE:
+            user = (credentials.get("username") or "").strip()
+            password = credentials.get("password") or ""
+            if not user:
+                raise ValueError("CDSE username is required.")
+            if not password:
+                raise ValueError("CDSE password is required.")
+            try:
+                self._token = get_token(user, password)
+            except Exception as e:
+                raise RuntimeError(f"CDSE authentication failed: {e}") from e
+            self._asf_session = None
+            self._pc_client = None
             return True
-        except Exception as e:
-            raise RuntimeError(f"CDSE authentication failed: {e}") from e
+
+        if source == LOCAL_SOURCE_ASF:
+            from .asf_downloader import authenticate_asf
+
+            user = (credentials.get("earthdata_username") or credentials.get("username") or "").strip()
+            password = credentials.get("earthdata_password") or credentials.get("password") or ""
+            if not user:
+                raise ValueError("Earthdata username is required for ASF.")
+            if not password:
+                raise ValueError("Earthdata password is required for ASF.")
+            try:
+                self._asf_session = authenticate_asf(user, password)
+            except Exception as e:
+                raise RuntimeError(
+                    "ASF / Earthdata authentication failed. "
+                    "Check Earthdata credentials and account access for ASF downloads. "
+                    f"Details: {e}"
+                ) from e
+            self._token = None
+            self._pc_client = None
+            return True
+
+        if source == LOCAL_SOURCE_PC:
+            from .pc_downloader import authenticate_pc
+
+            key = (credentials.get("pc_subscription_key") or "").strip() or None
+            try:
+                self._pc_client = authenticate_pc(key)
+            except Exception as e:
+                raise RuntimeError(
+                    "Planetary Computer client initialization failed. "
+                    "Check network access and subscription key (if provided). "
+                    f"Details: {e}"
+                ) from e
+            self._token = None
+            self._asf_session = None
+            return True
+
+        return False
 
     def run(
         self,
@@ -95,8 +162,14 @@ class LocalBackend(PWTTBackend):
         damage_threshold: float = 3.3,
         gee_viz: bool = False,
     ) -> str:
-        if not getattr(self, "_token", None):
+        source = getattr(self, "_data_source", LOCAL_SOURCE_CDSE)
+        if source == LOCAL_SOURCE_CDSE and not getattr(self, "_token", None):
             raise ValueError("Not authenticated. Call authenticate() first.")
+        if source == LOCAL_SOURCE_ASF and not getattr(self, "_asf_session", None):
+            raise ValueError("Not authenticated. Call authenticate() first.")
+        if source == LOCAL_SOURCE_PC and not getattr(self, "_pc_client", None):
+            raise ValueError("Not authenticated. Call authenticate() first.")
+
         import rasterio
         from rasterio.warp import reproject, Resampling
 
@@ -112,9 +185,9 @@ class LocalBackend(PWTTBackend):
         cache_dir = os.path.join(os.path.dirname(output_path), ".pwtt_cache")
         os.makedirs(cache_dir, exist_ok=True)
 
-        # Initialise run_metadata to collect scene details
         self.run_metadata = {
             "collection": "SENTINEL-1 IW_GRDH_1S",
+            "data_source": source,
             "pre_period": {"start": pre_start, "end": war_start},
             "post_period": {"start": inference_start, "end": post_end},
             "bbox": [west, south, east, north],
@@ -127,14 +200,55 @@ class LocalBackend(PWTTBackend):
 
         if progress_callback:
             progress_callback(5, "Searching pre-war products…")
-        pre_products = search_s1_grd(self._token, aoi_wkt, pre_start, war_start, max_results=20)
-        if progress_callback:
-            progress_callback(10, "Searching post-war products…")
-        post_products = search_s1_grd(self._token, aoi_wkt, inference_start, post_end, max_results=20)
-        if not pre_products or not post_products:
-            raise RuntimeError("No Sentinel-1 GRD products found for the given AOI and dates.")
 
-        # Record all found scenes
+        if source == LOCAL_SOURCE_CDSE:
+            pre_products = search_s1_grd(
+                self._token, aoi_wkt, pre_start, war_start, max_results=20
+            )
+            if progress_callback:
+                progress_callback(10, "Searching post-war products…")
+            post_products = search_s1_grd(
+                self._token, aoi_wkt, inference_start, post_end, max_results=20
+            )
+        elif source == LOCAL_SOURCE_ASF:
+            from .asf_downloader import search_s1_grd_asf
+
+            pre_products = search_s1_grd_asf(
+                self._asf_session, aoi_wkt, pre_start, war_start, max_results=20
+            )
+            if progress_callback:
+                progress_callback(10, "Searching post-war products…")
+            post_products = search_s1_grd_asf(
+                self._asf_session, aoi_wkt, inference_start, post_end, max_results=20
+            )
+        else:
+            from .pc_downloader import search_s1_grd_pc
+
+            pre_products = search_s1_grd_pc(
+                self._pc_client, aoi_wkt, pre_start, war_start, max_results=20
+            )
+            if progress_callback:
+                progress_callback(10, "Searching post-war products…")
+            post_products = search_s1_grd_pc(
+                self._pc_client, aoi_wkt, inference_start, post_end, max_results=20
+            )
+
+        if not pre_products or not post_products:
+            if source == LOCAL_SOURCE_CDSE:
+                raise RuntimeError(
+                    "No Sentinel-1 GRD products found on CDSE for this AOI/date range. "
+                    "Try a wider date range or switch local source to ASF/Planetary Computer."
+                )
+            if source == LOCAL_SOURCE_ASF:
+                raise RuntimeError(
+                    "No Sentinel-1 GRD products found on ASF for this AOI/date range. "
+                    "Confirm Earthdata access and try a wider date range."
+                )
+            raise RuntimeError(
+                "No Sentinel-1 GRD products found on Planetary Computer for this AOI/date range. "
+                "Try a wider date range or use CDSE/ASF source."
+            )
+
         def _scene_summary(prod):
             cd = prod.get("ContentDate") or {}
             return {
@@ -143,38 +257,53 @@ class LocalBackend(PWTTBackend):
                 "date": (cd.get("Start") or "")[:19],
                 "online": prod.get("Online", True),
             }
+
         self.run_metadata["pre_scenes_found"] = [_scene_summary(p) for p in pre_products]
         self.run_metadata["post_scenes_found"] = [_scene_summary(p) for p in post_products]
 
-        # Download and load up to 3 pre and 3 post (to limit disk/time)
         max_per_period = 3
-        pre_arrays = []  # list of (vv, vh, profile)
+        pre_arrays = []
         post_arrays = []
         triggered_orders = 0
         offline_product_ids = []
 
-        def load_products(products, arrays_list, label, used_key):
+        def load_products_safe(products, arrays_list, label, used_key):
             nonlocal triggered_orders
             loaded = 0
-            for i, prod in enumerate(products):
+            for prod in products:
                 if loaded >= max_per_period:
                     break
                 if progress_callback:
-                    progress_callback(0, f"{label} {loaded+1}/{max_per_period}…")
+                    progress_callback(0, f"{label} {loaded + 1}/{max_per_period}…")
                 pid, name = prod["Id"], prod["Name"]
                 cd = prod.get("ContentDate") or {}
                 scene_date = (cd.get("Start") or "")[:19]
-                # Try download; skip offline products that aren't immediately available
-                safe_dir = download_product(self._token, pid, name, cache_dir, wait_for_offline=False)
-                if safe_dir is None:
-                    triggered_orders += 1
-                    offline_product_ids.append(pid)
-                    self.run_metadata["offline_scenes"].append(
-                        {"id": pid, "name": name, "date": scene_date}
+
+                if source == LOCAL_SOURCE_CDSE:
+                    safe_dir = download_product(
+                        self._token, pid, name, cache_dir, wait_for_offline=False
                     )
-                    if progress_callback:
-                        progress_callback(0, f"{label}: {name} is offline, staging order triggered…")
-                    continue
+                    if safe_dir is None:
+                        triggered_orders += 1
+                        offline_product_ids.append(pid)
+                        self.run_metadata["offline_scenes"].append(
+                            {"id": pid, "name": name, "date": scene_date}
+                        )
+                        if progress_callback:
+                            progress_callback(
+                                0,
+                                f"{label}: {name} is offline, staging order triggered…",
+                            )
+                        continue
+                else:
+                    from .asf_downloader import download_product_asf
+
+                    safe_dir = download_product_asf(self._asf_session, prod, cache_dir)
+                    if not safe_dir:
+                        if progress_callback:
+                            progress_callback(0, f"{label}: skip {name} (download failed)…")
+                        continue
+
                 vv_path, vh_path = find_vv_vh_in_safe(safe_dir)
                 if not vv_path or not vh_path:
                     continue
@@ -185,22 +314,61 @@ class LocalBackend(PWTTBackend):
                     crs = src.crs
                 with rasterio.open(vh_path) as src:
                     vh = src.read(1)
-                arrays_list.append((vv.astype(np.float32), vh.astype(np.float32), profile, transform, crs))
-                self.run_metadata[used_key].append(
-                    {"id": pid, "name": name, "date": scene_date}
+                arrays_list.append(
+                    (vv.astype(np.float32), vh.astype(np.float32), profile, transform, crs)
                 )
+                self.run_metadata[used_key].append({"id": pid, "name": name, "date": scene_date})
+                loaded += 1
+
+        def load_products_pc(products, arrays_list, label, used_key):
+            from .pc_downloader import download_pc_vv_vh
+
+            loaded = 0
+            for prod in products:
+                if loaded >= max_per_period:
+                    break
+                if progress_callback:
+                    progress_callback(0, f"{label} {loaded + 1}/{max_per_period}…")
+                pid, name = prod["Id"], prod["Name"]
+                cd = prod.get("ContentDate") or {}
+                scene_date = (cd.get("Start") or "")[:19]
+                subdir = os.path.join(cache_dir, "pc_" + "".join(c if c.isalnum() else "_" for c in pid)[:120])
+                vv_path, vh_path = download_pc_vv_vh(prod, subdir)
+                if not vv_path or not vh_path:
+                    if progress_callback:
+                        progress_callback(0, f"{label}: skip {name} (no VV/VH assets)…")
+                    continue
+                with rasterio.open(vv_path) as src:
+                    vv = src.read(1)
+                    profile = src.profile.copy()
+                    transform = src.transform
+                    crs = src.crs
+                with rasterio.open(vh_path) as src:
+                    vh = src.read(1)
+                arrays_list.append(
+                    (vv.astype(np.float32), vh.astype(np.float32), profile, transform, crs)
+                )
+                self.run_metadata[used_key].append({"id": pid, "name": name, "date": scene_date})
                 loaded += 1
 
         if progress_callback:
             progress_callback(12, "Downloading pre-war scenes…")
-        load_products(pre_products, pre_arrays, "Pre", "pre_scenes_used")
+        if source == LOCAL_SOURCE_PC:
+            load_products_pc(pre_products, pre_arrays, "Pre", "pre_scenes_used")
+        else:
+            load_products_safe(pre_products, pre_arrays, "Pre", "pre_scenes_used")
+
         if progress_callback:
             progress_callback(35, "Downloading post-war scenes…")
-        load_products(post_products, post_arrays, "Post", "post_scenes_used")
+        if source == LOCAL_SOURCE_PC:
+            load_products_pc(post_products, post_arrays, "Post", "post_scenes_used")
+        else:
+            load_products_safe(post_products, post_arrays, "Post", "post_scenes_used")
 
         if not pre_arrays or not post_arrays:
-            if triggered_orders > 0:
+            if source == LOCAL_SOURCE_CDSE and triggered_orders > 0:
                 from .base_backend import ProductsOfflineError
+
                 raise ProductsOfflineError(
                     f"All available products are in cold storage. "
                     f"Staging orders have been triggered for {triggered_orders} product(s). "
@@ -208,13 +376,21 @@ class LocalBackend(PWTTBackend):
                     product_ids=offline_product_ids,
                     offline_scenes=list(self.run_metadata.get("offline_scenes", [])),
                 )
+            if source == LOCAL_SOURCE_ASF:
+                raise RuntimeError(
+                    "Could not load VV/VH data from ASF products. "
+                    "Try a different date range or verify Earthdata/ASF access."
+                )
+            if source == LOCAL_SOURCE_PC:
+                raise RuntimeError(
+                    "Could not load VV/VH assets from Planetary Computer STAC items. "
+                    "Try a different date range or switch source."
+                )
             raise RuntimeError(
-                "Could not load VV/VH data from any product. "
-                "All available products may be in offline/cold storage. "
-                "Try a more recent date range or try again later."
+                "Could not load VV/VH data from any CDSE product. "
+                "All products may be offline; try again later or switch source."
             )
 
-        # Use first pre image as reference grid; reproject others into it
         ref_vv, ref_vh, ref_profile, ref_transform, ref_crs = pre_arrays[0]
         height, width = ref_vv.shape
         pixel_size = abs(ref_transform.a)
@@ -224,8 +400,24 @@ class LocalBackend(PWTTBackend):
                 return vv, vh
             out_vv = np.empty((height, width), dtype=np.float32)
             out_vh = np.empty((height, width), dtype=np.float32)
-            reproject(vv, out_vv, src_transform=transform, src_crs=crs, dst_transform=ref_transform, dst_crs=ref_crs, resampling=Resampling.bilinear)
-            reproject(vh, out_vh, src_transform=transform, src_crs=crs, dst_transform=ref_transform, dst_crs=ref_crs, resampling=Resampling.bilinear)
+            reproject(
+                vv,
+                out_vv,
+                src_transform=transform,
+                src_crs=crs,
+                dst_transform=ref_transform,
+                dst_crs=ref_crs,
+                resampling=Resampling.bilinear,
+            )
+            reproject(
+                vh,
+                out_vh,
+                src_transform=transform,
+                src_crs=crs,
+                dst_transform=ref_transform,
+                dst_crs=ref_crs,
+                resampling=Resampling.bilinear,
+            )
             return out_vv, out_vh
 
         pre_vv_list = []
@@ -273,7 +465,6 @@ class LocalBackend(PWTTBackend):
         t_vh = np.abs(post_mean_vh - pre_mean_vh) / denom_vh
         max_change = np.maximum(t_vv, t_vh)
 
-        # Compute two-tailed p-values (normal approximation, valid for df > 30)
         p_vv = two_sided_normal_p_value(t_vv)
         p_vh = two_sided_normal_p_value(t_vh)
         p_value = np.minimum(p_vv, p_vh)
@@ -282,10 +473,12 @@ class LocalBackend(PWTTBackend):
         if progress_callback:
             progress_callback(70, "Post-processing…")
         max_change = _focal_median_gaussian(max_change, 10.0, pixel_size)
+
         def _mean_kernel(radius_m):
             k = _circle_kernel(radius_m, pixel_size)
             k = k / (k.sum() + 1e-12)
             return k
+
         k50 = convolve2d_edge(max_change, _mean_kernel(50))
         k100 = convolve2d_edge(max_change, _mean_kernel(100))
         k150 = convolve2d_edge(max_change, _mean_kernel(150))
@@ -306,7 +499,6 @@ class LocalBackend(PWTTBackend):
             dst.write(damage, 2)
             dst.write(p_value.astype(np.float32), 3)
 
-        # Finalize run_metadata with output details
         self.run_metadata["output_size_bytes"] = os.path.getsize(output_path)
         self.run_metadata["output_crs"] = str(ref_crs)
         self.run_metadata["output_pixel_size_m"] = round(pixel_size, 2)

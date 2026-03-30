@@ -76,12 +76,10 @@ class PWTTPlugin:
     def _ensure_docks(self):
         if self.controls_dock is not None:
             return
-        from .ui.main_dialog import (
-            PWTTJobsDock,
-            PWTTControlsDock,
-            PWTTOpenEOJobsDock,
-            PWTTGrdStagingDock,
-        )
+        from .ui.grd_staging_dock import PWTTGrdStagingDock
+        from .ui.jobs_dock import PWTTJobsDock
+        from .ui.main_dialog import PWTTControlsDock
+        from .ui.openeo_jobs_dock import PWTTOpenEOJobsDock
         mw = self.iface.mainWindow()
 
         self.jobs_dock = PWTTJobsDock(mw, self.plugin_dir)

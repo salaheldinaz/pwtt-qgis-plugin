@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
-"""PWTT dock panels: controls and jobs."""
+"""PWTT dock panels: controls (damage detection)."""
 
-import glob
 import os
-import threading
+
 from qgis.PyQt.QtWidgets import (
     QDockWidget,
     QVBoxLayout,
@@ -19,21 +18,16 @@ from qgis.PyQt.QtWidgets import (
     QDoubleSpinBox,
     QCheckBox,
     QProgressBar,
-    QTextEdit,
     QGroupBox,
     QFormLayout,
     QMessageBox,
     QScrollArea,
     QFrame,
-    QTableWidget,
-    QTableWidgetItem,
-    QHeaderView,
 )
-from qgis.PyQt.QtCore import QDate, Qt, pyqtSignal, QTimer
+from qgis.PyQt.QtCore import QDate, Qt
 from qgis.PyQt.QtGui import QColor, QIcon
 from qgis.core import (
     Qgis,
-    QgsApplication,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsGeometry,
@@ -44,2259 +38,18 @@ from qgis.core import (
 )
 from qgis.gui import QgsFileWidget, QgsRubberBand
 
-
-BACKENDS = [
-    ("openeo", "openEO"),
-    ("gee", "Google Earth Engine"),
-    ("local", "Local Processing"),
-]
-
-_STATUS_LABELS = {
-    "pending": "Pending",
-    "running": "Running\u2026",
-    "waiting_orders": "Waiting",
-    "stopped": "Stopped",
-    "completed": "Done",
-    "failed": "Failed",
-    "cancelled": "Cancelled",
-}
-_STATUS_COLORS = {
-    "pending": "#888",
-    "running": "#2196F3",
-    "waiting_orders": "#FF9800",
-    "stopped": "#888",
-    "completed": "#4CAF50",
-    "failed": "#F44336",
-    "cancelled": "#888",
-}
-
-
-def _offline_grd_catalog_rows(job: dict) -> list:
-    """Merge stored product ids with optional name/date metadata for display."""
-    ids = list(job.get("offline_product_ids") or [])
-    raw = job.get("offline_products")
-    if not isinstance(raw, list):
-        raw = []
-    by_id = {
-        p["id"]: p
-        for p in raw
-        if isinstance(p, dict) and p.get("id")
-    }
-    return [
-        {
-            "id": pid,
-            "name": str(by_id.get(pid, {}).get("name", "")),
-            "date": str(by_id.get(pid, {}).get("date", "")),
-        }
-        for pid in ids
-    ]
-
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-def _read_plugin_version(plugin_dir):
-    """Single source of truth: pwtt_qgis/metadata.txt version= line."""
-    if not plugin_dir:
-        return None
-    meta = os.path.join(plugin_dir, "metadata.txt")
-    try:
-        with open(meta, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("version="):
-                    return line.split("=", 1)[1].strip()
-    except OSError:
-        pass
-    return None
-
-
-def _dock_title(base, plugin_dir):
-    v = _read_plugin_version(plugin_dir)
-    return f"{base} ({v})" if v else base
-
-
-def _job_footprints_sources(job: dict) -> list:
-    """Return footprints_sources for a job, with backwards-compat fallback."""
-    sources = job.get("footprints_sources")
-    if sources:
-        return list(sources)
-    return ["current_osm"] if job.get("include_footprints") else []
-
-
-def _ensure_footprint_dependencies(parent):
-    """Prompt to install footprint packages if needed. Return True if ready to run."""
-    from ..core import deps
-
-    fp_missing, fp_pip = deps.footprint_missing()
-    if not fp_missing:
-        return True
-    if fp_pip:
-        reply = QMessageBox.question(
-            parent, "PWTT",
-            f"Building footprints require: {', '.join(fp_pip)}\n\nInstall now?",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if _is_message_box_yes(reply):
-            if not deps.install_with_dialog(fp_pip, parent=parent):
-                return False
-            fp_missing, fp_pip = deps.footprint_missing()
-    if fp_missing:
-        detail = ""
-        if "rasterstats" in fp_missing:
-            detail = deps.rasterstats_failure_detail()
-        qgis_only = [n for n in fp_missing if n not in (fp_pip or [])]
-        msg = f"Cannot compute footprints: missing {', '.join(fp_missing)}."
-        if qgis_only:
-            msg += (
-                f"\n{', '.join(qgis_only)} should be provided by QGIS — "
-                f"check your QGIS installation."
-            )
-        else:
-            msg += "\nInstall the packages or skip this step."
-        if detail:
-            msg += f"\n\n{detail}"
-        QMessageBox.warning(parent, "PWTT", msg)
-        return False
-    return True
-
-
-def _is_message_box_yes(reply):
-    """Reliable Yes detection across PyQt5/6 (``QMessageBox.question`` return values)."""
-    try:
-        return (int(reply) & int(QMessageBox.Yes)) != 0
-    except (TypeError, ValueError):
-        return reply == QMessageBox.Yes
-
-
-def _get_backend_class(backend_id):
-    try:
-        if backend_id == "openeo":
-            from ..core.openeo_backend import OpenEOBackend
-            return OpenEOBackend
-        if backend_id == "gee":
-            from ..core.gee_backend import GEEBackend
-            return GEEBackend
-        if backend_id == "local":
-            from ..core.local_backend import LocalBackend
-            return LocalBackend
-    except Exception:
-        return None
-    return None
-
-
-def _auth_with_progress(backend, credentials, backend_id, parent=None):
-    """Run backend.authenticate() in a background QThread with a progress/auth dialog.
-
-    Raises RuntimeError on authentication failure or user cancellation.
-    """
-    import webbrowser as _wb
-    from qgis.PyQt.QtCore import QThread, pyqtSignal
-    from qgis.PyQt.QtWidgets import (
-        QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-        QProgressDialog, QApplication,
-    )
-
-    is_oidc = (
-        (backend_id == "openeo" and not (credentials or {}).get("client_id"))
-        or backend_id == "gee"
-    )
-
-    class _Worker(QThread):
-        auth_url_ready = pyqtSignal(str)
-
-        def __init__(self, b, c):
-            super().__init__()
-            self.b = b
-            self.c = c
-            self.ok = False
-            self.error_msg = ""
-
-        def run(self):
-            try:
-                self.ok = self.b.authenticate(self.c)
-                if not self.ok:
-                    self.error_msg = "Authentication failed. Check your credentials."
-            except Exception as e:
-                self.ok = False
-                self.error_msg = str(e)
-
-    worker = _Worker(backend, credentials)
-    canceled = [False]
-
-    if is_oidc and parent is not None:
-        # ── Browser-based auth flow (openEO OIDC / GEE OAuth) ────────────────
-        _backend_label = {
-            "openeo": ("openEO Sign In", "Connecting to openEO CDSE\u2026"),
-            "gee": ("Google Earth Engine Sign In", "Connecting to Google Earth Engine\u2026"),
-        }
-        _title, _connecting = _backend_label.get(
-            backend_id, ("Sign In", "Connecting\u2026")
-        )
-        dlg = QDialog(parent)
-        dlg.setWindowTitle(f"PWTT \u2014 {_title}")
-        dlg.setWindowModality(Qt.WindowModal)
-        dlg.setMinimumWidth(440)
-        layout = QVBoxLayout(dlg)
-
-        status_lbl = QLabel(_connecting)
-        status_lbl.setWordWrap(True)
-        layout.addWidget(status_lbl)
-
-        url_lbl = QLabel()
-        url_lbl.setWordWrap(True)
-        url_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        url_lbl.hide()
-        layout.addWidget(url_lbl)
-
-        url_btn_row = QHBoxLayout()
-        copy_btn = QPushButton("Copy URL")
-        copy_btn.setEnabled(False)
-        open_btn = QPushButton("Open in Browser")
-        open_btn.setEnabled(False)
-        url_btn_row.addWidget(copy_btn)
-        url_btn_row.addWidget(open_btn)
-        layout.addLayout(url_btn_row)
-
-        cancel_btn = QPushButton("Cancel")
-        layout.addWidget(cancel_btn)
-
-        # Save originals early so _on_open can use the real webbrowser.open.
-        _orig_open = _wb.open
-        _orig_open_new = _wb.open_new
-        _orig_open_tab = _wb.open_new_tab
-        _orig_get = _wb.get
-
-        detected_url = [None]
-
-        def _on_url_ready(url):
-            detected_url[0] = url
-            url_lbl.setText(url)
-            url_lbl.show()
-            copy_btn.setEnabled(True)
-            open_btn.setEnabled(True)
-            status_lbl.setText(
-                "Visit the URL below and approve the sign-in, then wait here:"
-            )
-            dlg.adjustSize()
-
-        def _on_copy():
-            if detected_url[0]:
-                QApplication.clipboard().setText(detected_url[0])
-
-        def _on_open():
-            if detected_url[0]:
-                _orig_open(detected_url[0])
-
-        def _on_cancel():
-            canceled[0] = True
-            try:
-                worker.finished.disconnect()
-            except Exception:
-                pass
-            dlg.reject()
-
-        worker.auth_url_ready.connect(_on_url_ready)
-        worker.finished.connect(dlg.accept, Qt.QueuedConnection)
-        copy_btn.clicked.connect(_on_copy)
-        open_btn.clicked.connect(_on_open)
-        cancel_btn.clicked.connect(_on_cancel)
-
-        # Intercept webbrowser calls made by auth libraries (openEO OIDC,
-        # GEE OAuth) so the URL appears in our dialog instead of
-        # auto-opening or printing to stdout.
-
-        def _intercept(url, *a, **kw):
-            if url:
-                worker.auth_url_ready.emit(url)
-            return True
-
-        class _DummyBrowser:
-            """Fake browser so ee.oauth._open_new_browser doesn't bail."""
-            name = "pwtt-interceptor"
-
-        _wb.open = _intercept
-        _wb.open_new = _intercept
-        _wb.open_new_tab = _intercept
-        _wb.get = lambda *a, **kw: _DummyBrowser()
-        try:
-            worker.start()
-            dlg.exec_()
-        finally:
-            _wb.open = _orig_open
-            _wb.open_new = _orig_open_new
-            _wb.open_new_tab = _orig_open_tab
-            _wb.get = _orig_get
-
-        if canceled[0]:
-            worker.wait(2000)
-            raise RuntimeError("Authentication cancelled.")
-
-        worker.wait()
-
-    else:
-        # ── Standard busy-spinner progress dialog ─────────────────────────────
-        dlg = QProgressDialog("Authenticating\u2026", "Cancel", 0, 0, parent)
-        dlg.setWindowTitle("PWTT")
-        dlg.setWindowModality(Qt.WindowModal)
-        dlg.setMinimumDuration(0)
-
-        # Do NOT use wasCanceled() after dlg.close(): on some platforms/Qt builds
-        # programmatic close is reported as canceled, so auth "succeeds" but we
-        # raise Authentication cancelled. and _run shows nothing (silent no-job).
-        prog_cancel_clicked = [False]
-
-        def _on_progress_dialog_cancel():
-            prog_cancel_clicked[0] = True
-
-        dlg.canceled.connect(_on_progress_dialog_cancel)
-
-        def _dismiss_auth_progress():
-            # close() often emits canceled() on macOS/Qt; that must not count as
-            # user cancel or _run exits with "Authentication cancelled." silently.
-            try:
-                dlg.canceled.disconnect()
-            except Exception:
-                pass
-            dlg.close()
-
-        # QThread.finished fires from the worker thread; dismiss must run on GUI.
-        worker.finished.connect(_dismiss_auth_progress, Qt.QueuedConnection)
-        worker.start()
-        dlg.exec_()
-
-        if prog_cancel_clicked[0]:
-            worker.wait(2000)
-            raise RuntimeError("Authentication cancelled.")
-
-        worker.wait()
-
-    if not worker.ok:
-        raise RuntimeError(worker.error_msg or "Authentication failed. Check your credentials.")
-
-
-def _merge_openeo_creds_from_controls_dock(creds, controls_dock):
-    """Use client id/secret from the controls panel when both are set.
-
-    QgsSettings are only updated after a successful Run (_save_settings). Until then,
-    Connect && Refresh / resume paths read empty keys from disk and fall back to
-    interactive OIDC even though the user already filled Client ID/secret in the UI.
-    """
-    if controls_dock is None or not hasattr(controls_dock, "_get_credentials"):
-        return creds
-    try:
-        ui = controls_dock._get_credentials("openeo")
-    except Exception:
-        return creds
-    if ui.get("client_id") and ui.get("client_secret"):
-        out = dict(creds)
-        out["client_id"] = ui["client_id"]
-        out["client_secret"] = ui["client_secret"]
-        if "verify_ssl" in ui:
-            out["verify_ssl"] = ui["verify_ssl"]
-        return out
-    return creds
-
-
-def _merge_local_creds_from_controls_dock(creds, controls_dock):
-    """Use CDSE username/password from the panel when set (Resume before Run saved settings)."""
-    if controls_dock is None or not hasattr(controls_dock, "_get_credentials"):
-        return creds
-    try:
-        ui = controls_dock._get_credentials("local")
-    except Exception:
-        return creds
-    u = (ui.get("username") or "").strip()
-    p = ui.get("password") or ""
-    if u or p:
-        out = dict(creds)
-        if u:
-            out["username"] = u
-        if p:
-            out["password"] = p
-        return out
-    return creds
-
-
-def _create_and_auth_backend(backend_id, parent=None, controls_dock=None):
-    """Create a backend instance and authenticate using stored credentials.
-
-    If *parent* is given, authentication runs in a background thread with a
-    progress dialog so the UI stays responsive (important for OIDC flows).
-
-    For openEO, pass *controls_dock* when available so client-credentials from the
-    PWTT panel (not yet flushed to QgsSettings) are used.
-    """
-    BackendClass = _get_backend_class(backend_id)
-    if not BackendClass:
-        raise RuntimeError(f"Backend '{backend_id}' is not available.")
-    backend = BackendClass()
-    ok, msg = backend.check_dependencies()
-    if not ok:
-        raise RuntimeError(msg)
-    s = QgsSettings()
-    s.beginGroup("PWTT")
-    if backend_id == "openeo":
-        creds = {
-            "client_id": s.value("openeo_client_id", "") or None,
-            "client_secret": s.value("openeo_client_secret", "") or None,
-            "verify_ssl": s.value("openeo_verify_ssl", True, type=bool),
-        }
-    elif backend_id == "gee":
-        creds = {"project": s.value("gee_project", "")}
-    elif backend_id == "local":
-        creds = {
-            "username": s.value("cdse_username", ""),
-            "password": s.value("cdse_password", ""),
-        }
-    else:
-        creds = {}
-    s.endGroup()
-    if backend_id == "openeo":
-        creds = _merge_openeo_creds_from_controls_dock(creds, controls_dock)
-    elif backend_id == "local":
-        creds = _merge_local_creds_from_controls_dock(creds, controls_dock)
-    if parent:
-        _auth_with_progress(backend, creds, backend_id, parent)  # raises on failure
-    else:
-        try:
-            if not backend.authenticate(creds):
-                raise RuntimeError("Authentication failed. Check your credentials.")
-        except RuntimeError:
-            raise
-        except Exception as e:
-            raise RuntimeError(str(e)) from e
-    return backend
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  PWTTJobsDock  — job list, actions, progress, log, order polling
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class PWTTJobsDock(QDockWidget):
-    """Dockable jobs panel: job table, action buttons, progress bar, and log."""
-
-    # Thread-safe bridge for status messages from background tasks
-    _status_signal = pyqtSignal(str, str)   # (job_id, message)
-    # Signal to auto-resume a job on the main thread
-    _auto_resume_signal = pyqtSignal(str)   # job_id
-    # Thread-safe: append a line to a job log (e.g. CDSE poll from background thread)
-    _order_poll_log = pyqtSignal(str, str)  # (job_id, message)
-    # Emitted after the job table is refreshed (e.g. GRD staging dock sync)
-    jobs_changed = pyqtSignal()
-
-    def __init__(self, parent=None, plugin_dir=None):
-        super().__init__(_dock_title("PWTT \u2014 Jobs", plugin_dir), parent)
-        self.setObjectName("PWTTJobsDock")
-        self.setAllowedAreas(Qt.AllDockWidgetAreas)
-
-        self._active_tasks = {}    # job_id -> PWTTRunTask
-        self._job_logs = {}        # job_id -> [str]
-        self._job_progress = {}    # job_id -> int (0-100)
-        self._poll_running = False
-        self.controls_dock = None  # set after construction by plugin
-
-        self._build_ui()
-
-        self._status_signal.connect(self._handle_status_message)
-        self._auto_resume_signal.connect(self._auto_resume_job)
-        self._order_poll_log.connect(self._append_order_poll_log)
-
-        # Order-polling timer (checks every 2 min)
-        self._order_timer = QTimer(self)
-        self._order_timer.timeout.connect(self._poll_orders)
-        self._order_timer.start(120_000)
-
-        # Recover stale jobs and populate table
-        from ..core import job_store
-        job_store.recover_stale_jobs()
-        self._refresh_job_list()
-
-    # ── UI ────────────────────────────────────────────────────────────────────
-
-    def _build_ui(self):
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
-
-        # Job table
-        self.job_table = QTableWidget(0, 7)
-        self.job_table.setHorizontalHeaderLabels(
-            ["Status", "Backend", "Remote Job", "Local ID", "Output folder", "Dates", "Created"]
-        )
-        self.job_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.job_table.setSelectionMode(QTableWidget.SingleSelection)
-        self.job_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.job_table.verticalHeader().hide()
-        hdr = self.job_table.horizontalHeader()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(4, QHeaderView.Stretch)
-        hdr.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(6, QHeaderView.ResizeToContents)
-        self.job_table.setMaximumHeight(180)
-        self.job_table.itemSelectionChanged.connect(self._on_job_selected)
-        layout.addWidget(self.job_table)
-
-        # Action buttons
-        btn_row = QHBoxLayout()
-        self.load_btn = QPushButton("Load parameters")
-        self.load_local_btn = QPushButton("Load Local")
-        self.apply_style_btn = QPushButton("Apply styling")
-        self.footprints_btn = QPushButton("Per-building (OSM)")
-        self.resume_btn = QPushButton("Resume")
-        self.stop_btn = QPushButton("Stop")
-        self.cancel_btn = QPushButton("Cancel")
-        self.rerun_btn = QPushButton("Rerun")
-        self.delete_btn = QPushButton("Delete")
-        for btn in (self.load_btn, self.load_local_btn, self.apply_style_btn, self.footprints_btn, self.resume_btn, self.stop_btn,
-                     self.cancel_btn, self.rerun_btn, self.delete_btn):
-            btn.setEnabled(False)
-            btn_row.addWidget(btn)
-        self.load_btn.setToolTip("Load job AOI to map and parameters to controls panel")
-        self.load_local_btn.setToolTip(
-            "If the result GeoTIFF (and footprints) exist on disk, add them to the map"
-        )
-        self.apply_style_btn.setToolTip(
-            "Re-apply PWTT band-1 pseudocolor (3\u20135) and layer opacity to this job\u2019s "
-            "result raster already in the project (matches layer name or GeoTIFF path)"
-        )
-        self.footprints_btn.setToolTip(
-            "Fetch OSM buildings and mean damage (T-stat) per polygon using the job\u2019s result GeoTIFF"
-        )
-        self.load_btn.clicked.connect(self._load_selected)
-        self.load_local_btn.clicked.connect(self._load_local_selected)
-        self.apply_style_btn.clicked.connect(self._apply_styling_to_result_selected)
-        self.footprints_btn.clicked.connect(self._footprints_for_local_selected)
-        self.resume_btn.clicked.connect(self._resume_selected)
-        self.stop_btn.clicked.connect(self._stop_selected)
-        self.cancel_btn.clicked.connect(self._cancel_selected)
-        self.rerun_btn.clicked.connect(self._rerun_selected)
-        self.delete_btn.clicked.connect(self._delete_selected)
-        layout.addLayout(btn_row)
-
-        # Progress bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        layout.addWidget(self.progress_bar)
-
-        # Log
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setLineWrapMode(QTextEdit.WidgetWidth)
-        layout.addWidget(self.log_text)
-
-        self.setWidget(w)
-
-    # ── Table helpers ─────────────────────────────────────────────────────────
-
-    def _refresh_job_list(self):
-        from ..core import job_store
-        jobs = job_store.load_jobs()
-
-        selected_id = self._get_selected_job_id()
-        self.job_table.setRowCount(len(jobs))
-
-        for row, job in enumerate(jobs):
-            st = job["status"]
-
-            # Status cell (carries job id)
-            item = QTableWidgetItem(_STATUS_LABELS.get(st, st))
-            item.setForeground(QColor(_STATUS_COLORS.get(st, "#000")))
-            item.setData(Qt.UserRole, job["id"])
-            self.job_table.setItem(row, 0, item)
-
-            # Backend
-            bname = {"openeo": "openEO", "gee": "GEE", "local": "Local"}.get(
-                job["backend_id"], job["backend_id"]
-            )
-            self.job_table.setItem(row, 1, QTableWidgetItem(bname))
-
-            # Remote Job ID (e.g. openEO batch job id)
-            remote_id = job.get("remote_job_id") or ""
-            # Show truncated id for readability
-            display_id = remote_id[-12:] if len(remote_id) > 12 else remote_id
-            rid_item = QTableWidgetItem(display_id)
-            rid_item.setToolTip(remote_id)  # full id on hover
-            self.job_table.setItem(row, 2, rid_item)
-
-            # Local job id (plugin UUID)
-            lid = job["id"]
-            lid_disp = lid[:8] + "\u2026" if len(lid) > 10 else lid
-            lid_item = QTableWidgetItem(lid_disp)
-            lid_item.setToolTip(lid)
-            self.job_table.setItem(row, 3, lid_item)
-
-            # Output directory
-            out_dir = job.get("output_dir") or ""
-            odisp = out_dir
-            if len(out_dir) > 48:
-                odisp = "\u2026" + out_dir[-47:]
-            od_item = QTableWidgetItem(odisp)
-            od_item.setToolTip(out_dir)
-            self.job_table.setItem(row, 4, od_item)
-
-            # Dates
-            dates = f"{job['war_start'][:7]} \u2192 {job['inference_start'][:7]}"
-            self.job_table.setItem(row, 5, QTableWidgetItem(dates))
-
-            # Created
-            created = job.get("created_at", "")[:16].replace("T", " ")
-            self.job_table.setItem(row, 6, QTableWidgetItem(created))
-
-        # Restore selection
-        if selected_id:
-            for row in range(self.job_table.rowCount()):
-                item = self.job_table.item(row, 0)
-                if item and item.data(Qt.UserRole) == selected_id:
-                    self.job_table.setCurrentCell(row, 0)
-                    return
-        # Auto-select first row if nothing selected
-        if self.job_table.rowCount() > 0 and self.job_table.currentRow() < 0:
-            self.job_table.setCurrentCell(0, 0)
-
-        self.jobs_changed.emit()
-
-    def _get_selected_job_id(self):
-        row = self.job_table.currentRow()
-        if row < 0:
-            return None
-        item = self.job_table.item(row, 0)
-        return item.data(Qt.UserRole) if item else None
-
-    def _get_selected_job(self):
-        jid = self._get_selected_job_id()
-        if not jid:
-            return None
-        from ..core import job_store
-        return job_store.get_job(jid)
-
-    def _local_result_tif_path(self, job):
-        """Path to the job\u2019s result GeoTIFF if it exists on disk, else None."""
-        if not job:
-            return None
-        jid = job["id"]
-        out_dir = (job.get("output_dir") or "").strip()
-        for cand in (
-            job.get("output_tif"),
-            os.path.join(out_dir, f"pwtt_{jid}.tif") if out_dir else None,
-        ):
-            if cand and os.path.isfile(cand) and os.path.getsize(cand) > 0:
-                return cand
-        return None
-
-    def _select_job(self, job_id):
-        for row in range(self.job_table.rowCount()):
-            item = self.job_table.item(row, 0)
-            if item and item.data(Qt.UserRole) == job_id:
-                self.job_table.setCurrentCell(row, 0)
-                return
-
-    def focus_job(self, job_id):
-        """Show the jobs dock and select *job_id* in the table."""
-        self.show()
-        self.raise_()
-        self._select_job(job_id)
-        self._on_job_selected()
-
-    def resume_job_by_id(self, job_id):
-        """Resume a job by id (used from GRD staging dock)."""
-        from ..core import job_store
-        job = job_store.get_job(job_id)
-        if not job:
-            QMessageBox.warning(self, "PWTT", "Job not found.")
-            return
-        if job_id in self._active_tasks:
-            QMessageBox.information(self, "PWTT", "This job is already running.")
-            return
-        if job["status"] not in job_store.RESUMABLE_STATUSES:
-            QMessageBox.information(
-                self, "PWTT", "This job is not in a resumable state."
-            )
-            return
-        self._select_job(job_id)
-        self._resume_selected()
-
-    def _on_job_selected(self):
-        from ..core import job_store
-        job = self._get_selected_job()
-        if not job:
-            for btn in (self.load_btn, self.load_local_btn, self.apply_style_btn, self.footprints_btn, self.resume_btn, self.stop_btn,
-                         self.cancel_btn, self.rerun_btn, self.delete_btn):
-                btn.setEnabled(False)
-            self.log_text.clear()
-            self.progress_bar.setValue(0)
-            return
-
-        st = job["status"]
-        self.load_btn.setEnabled(True)
-        self.load_local_btn.setEnabled(True)
-        self.apply_style_btn.setEnabled(True)
-        self.footprints_btn.setEnabled(self._local_result_tif_path(job) is not None)
-        self.resume_btn.setEnabled(st in job_store.RESUMABLE_STATUSES)
-        self.stop_btn.setEnabled(st == job_store.STATUS_RUNNING)
-        self.cancel_btn.setEnabled(
-            st in (job_store.STATUS_RUNNING, job_store.STATUS_WAITING_ORDERS,
-                   job_store.STATUS_STOPPED)
-        )
-        self.rerun_btn.setEnabled(True)
-        self.delete_btn.setEnabled(st != job_store.STATUS_RUNNING)
-
-        self.resume_btn.setText(
-            "Check && Resume" if st == job_store.STATUS_WAITING_ORDERS else "Resume"
-        )
-
-        # Log
-        self.log_text.clear()
-        for msg in self._job_logs.get(job["id"], []):
-            self.log_text.append(msg)
-
-        # Progress
-        if st == job_store.STATUS_COMPLETED:
-            self.progress_bar.setValue(100)
-        elif job["id"] in self._job_progress:
-            self.progress_bar.setValue(self._job_progress[job["id"]])
-        else:
-            self.progress_bar.setValue(0)
-
-    # ── Launch / lifecycle ────────────────────────────────────────────────────
-
-    def launch_job(self, job, backend):
-        """Start a task for the given job. Called from controls dock or resume."""
-        if job["id"] in self._active_tasks:
-            return
-        from ..core.pwtt_task import PWTTRunTask
-        from ..core import job_store
-
-        job["status"] = job_store.STATUS_RUNNING
-        job["error"] = None
-        job_store.save_job(job)
-
-        fp_sources = _job_footprints_sources(job)
-        task = PWTTRunTask(
-            backend=backend,
-            aoi_wkt=job["aoi_wkt"],
-            war_start=job["war_start"],
-            inference_start=job["inference_start"],
-            pre_interval=job["pre_interval"],
-            post_interval=job["post_interval"],
-            output_dir=job["output_dir"],
-            include_footprints=bool(fp_sources),
-            footprints_sources=fp_sources,
-            job_id=job["id"],
-            remote_job_id=job.get("remote_job_id"),
-            damage_threshold=job.get("damage_threshold", 3.3),
-            gee_viz=job.get("gee_viz", False),
-        )
-
-        job_id = job["id"]
-        self._active_tasks[job_id] = task
-        bname = {"openeo": "openEO", "gee": "GEE", "local": "Local"}.get(
-            job["backend_id"], job["backend_id"]
-        )
-        remote_id = job.get("remote_job_id")
-        log_parts = [f"Task started — backend: {bname}"]
-        if remote_id:
-            log_parts.append(f"remote job: {remote_id}")
-        log_parts.append(f"dates: {job['war_start']} → {job['inference_start']}")
-        log_parts.append(f"pre: {job['pre_interval']}mo, post: {job['post_interval']}mo")
-        log_parts.append(f"output: {job['output_dir']}")
-        self._job_logs.setdefault(job_id, []).append("<br>".join(log_parts))
-        self._job_progress[job_id] = 0
-
-        task.taskCompleted.connect(lambda _jid=job_id: self._on_task_completed(_jid))
-        task.taskTerminated.connect(lambda _jid=job_id: self._on_task_terminated(_jid))
-        if hasattr(task, "progressChanged"):
-            task.progressChanged.connect(
-                lambda v, _jid=job_id: self._on_task_progress(_jid, v)
-            )
-        task.on_status_message(
-            lambda msg, _jid=job_id: self._status_signal.emit(_jid, msg)
-        )
-
-        QgsApplication.taskManager().addTask(task)
-
-        self._refresh_job_list()
-        self._select_job(job_id)
-        self.show()
-        self.raise_()
-
-    # ── Task callbacks (main thread) ──────────────────────────────────────────
-
-    def _append_order_poll_log(self, job_id, msg):
-        self._job_logs.setdefault(job_id, []).append(msg)
-        if self._get_selected_job_id() == job_id:
-            self.log_text.append(msg)
-
-    def _handle_status_message(self, job_id, msg):
-        self._job_logs.setdefault(job_id, []).append(msg)
-        if self._get_selected_job_id() == job_id:
-            self.log_text.append(msg)
-
-        # Persist remote job id as soon as the backend sets it
-        task = self._active_tasks.get(job_id)
-        if task:
-            remote_id = getattr(task, "remote_job_id", None)
-            if remote_id:
-                from ..core import job_store
-                existing = job_store.get_job(job_id)
-                if existing and existing.get("remote_job_id") != remote_id:
-                    job_store.update_job(job_id, remote_job_id=remote_id)
-                    note = f"Remote job ID saved: {remote_id}"
-                    self._job_logs.setdefault(job_id, []).append(note)
-                    if self._get_selected_job_id() == job_id:
-                        self.log_text.append(note)
-                    self._refresh_job_list()
-
-    def _on_task_progress(self, job_id, value):
-        self._job_progress[job_id] = int(value)
-        if self._get_selected_job_id() == job_id:
-            self.progress_bar.setValue(int(value))
-
-    def _on_task_completed(self, job_id):
-        from ..core import job_store
-        task = self._active_tasks.pop(job_id, None)
-        if not task:
-            return
-
-        # GRD offline: run() returned True so QgsTask does not show a failure notification.
-        if task.products_offline:
-            remote_id = getattr(task, "remote_job_id", None)
-            if remote_id:
-                job_store.update_job(job_id, remote_job_id=remote_id)
-            ids = list(task.offline_product_ids)
-            prows = list(getattr(task, "offline_products", []) or [])
-            by_id = {
-                p["id"]: p
-                for p in prows
-                if isinstance(p, dict) and p.get("id")
-            }
-            offline_products = [
-                {
-                    "id": pid,
-                    "name": str(by_id.get(pid, {}).get("name", "")),
-                    "date": str(by_id.get(pid, {}).get("date", "")),
-                }
-                for pid in ids
-            ]
-            job_store.update_job(
-                job_id,
-                status=job_store.STATUS_WAITING_ORDERS,
-                offline_product_ids=ids,
-                offline_products=offline_products,
-            )
-            ids_str = ", ".join(ids[:5])
-            if len(ids) > 5:
-                ids_str += f" (+{len(ids) - 5} more)"
-            self._job_logs.setdefault(job_id, []).append(
-                f"<b>Products offline</b> — staging from cold storage.<br>"
-                f"Product IDs: {ids_str}<br>"
-                f"Will auto-check every 2 min and resume when available."
-            )
-            self._job_progress.pop(job_id, None)
-            self._refresh_job_list()
-            if self._get_selected_job_id() == job_id:
-                self._on_job_selected()
-            return
-
-        output_tif = getattr(task, "output_tif", None)
-        footprints = getattr(task, "footprints_gpkg", None)  # backwards compat (first)
-        footprints_gpkgs = getattr(task, "footprints_gpkgs", {}) or {}
-        update_fields = dict(
-            status=job_store.STATUS_COMPLETED,
-            output_tif=output_tif,
-            footprints_gpkg=footprints,
-            footprints_gpkgs=footprints_gpkgs,
-            offline_product_ids=[],
-            offline_products=[],
-        )
-        remote_id = getattr(task, "remote_job_id", None)
-        if remote_id:
-            update_fields["remote_job_id"] = remote_id
-        job_store.update_job(job_id, **update_fields)
-        self._job_progress[job_id] = 100
-        # Rich completion log
-        done_parts = ["<b>Task completed successfully.</b>"]
-        if output_tif:
-            try:
-                size_mb = os.path.getsize(output_tif) / (1024 * 1024)
-                done_parts.append(f"Output: {output_tif} ({size_mb:.1f} MB)")
-            except OSError:
-                done_parts.append(f"Output: {output_tif}")
-        for src, fp_path in footprints_gpkgs.items():
-            done_parts.append(f"Footprints ({src}): {fp_path}")
-        if remote_id:
-            done_parts.append(f"Remote job: {remote_id}")
-        self._job_logs.setdefault(job_id, []).append("<br>".join(done_parts))
-        self._refresh_job_list()
-        if self._get_selected_job_id() == job_id:
-            self.progress_bar.setValue(100)
-            self.log_text.append("<br>".join(done_parts))
-
-    def _on_task_terminated(self, job_id):
-        from ..core import job_store
-        task = self._active_tasks.pop(job_id, None)
-        if not task:
-            return
-
-        # Persist remote job id (e.g. openEO) even on failure so we can resume
-        remote_id = getattr(task, "remote_job_id", None)
-        if remote_id:
-            job_store.update_job(job_id, remote_job_id=remote_id)
-
-        if task.isCanceled():
-            current = job_store.get_job(job_id)
-            if current and current["status"] not in (
-                job_store.STATUS_STOPPED, job_store.STATUS_CANCELLED
-            ):
-                job_store.update_job(job_id, status=job_store.STATUS_CANCELLED)
-            msg = "Task was cancelled."
-            if remote_id:
-                msg += f" Remote job: {remote_id}"
-            self._job_logs.setdefault(job_id, []).append(msg)
-        elif task.exception:
-            job_store.update_job(
-                job_id, status=job_store.STATUS_FAILED, error=str(task.exception)
-            )
-            err_parts = [f"<b>Task failed:</b> {task.exception}"]
-            if remote_id:
-                err_parts.append(f"Remote job: {remote_id}")
-            self._job_logs.setdefault(job_id, []).append("<br>".join(err_parts))
-            if task.error_detail:
-                self._job_logs[job_id].append(f"<pre>{task.error_detail}</pre>")
-        else:
-            job_store.update_job(
-                job_id, status=job_store.STATUS_FAILED, error="Unknown error"
-            )
-            self._job_logs.setdefault(job_id, []).append(
-                "Task terminated unexpectedly."
-            )
-
-        self._refresh_job_list()
-        if self._get_selected_job_id() == job_id:
-            self._on_job_selected()
-
-    # ── Action handlers ───────────────────────────────────────────────────────
-
-    def _load_selected(self):
-        """Load job AOI to map, zoom to it, and fill parameters in controls panel."""
-        job = self._get_selected_job()
-        if not job:
-            return
-        if not self.controls_dock:
-            return
-        self.controls_dock.load_job_params(job)
-
-    def _load_local_selected(self):
-        """Add on-disk result raster and footprint layers for the selected job, if they exist."""
-        job = self._get_selected_job()
-        if not job:
-            return
-        jid = job["id"]
-        out_dir = (job.get("output_dir") or "").strip()
-
-        tif_path = self._local_result_tif_path(job)
-
-        if not tif_path:
-            hint = os.path.join(out_dir, f"pwtt_{jid}.tif") if out_dir else "(set output folder)"
-            QMessageBox.information(
-                self,
-                "PWTT",
-                "No local result GeoTIFF found for this job.\n\n"
-                "Checked the path stored on the job (if any) and:\n"
-                f"  {hint}",
-            )
-            return
-
-        from qgis.core import QgsRasterLayer, QgsVectorLayer
-
-        from ..core.qgis_layer_tree import (
-            add_map_layer_to_pwtt_job_group,
-            pwtt_damage_layer_name,
-            pwtt_footprints_layer_name,
-        )
-        from ..core.qgis_output_style import (
-            damage_threshold_from_job_meta,
-            style_pwtt_footprints_layer,
-            style_pwtt_raster_layer,
-        )
-
-        backend_id = job.get("backend_id")
-        project = QgsProject.instance()
-        thr = damage_threshold_from_job_meta(
-            tif_path, default=float(job.get("damage_threshold", 3.3))
-        )
-
-        label = pwtt_damage_layer_name(jid, backend_id)
-        rlayer = QgsRasterLayer(tif_path, label, "gdal")
-        if not rlayer.isValid():
-            QMessageBox.warning(
-                self, "PWTT", f"Could not open raster as a QGIS layer:\n{tif_path}"
-            )
-            return
-        style_pwtt_raster_layer(rlayer, damage_threshold=thr)
-        add_map_layer_to_pwtt_job_group(project, rlayer, jid, backend_id)
-        log_parts = [f"Load Local: added {label}"]
-
-        fp_items = []
-        gpkgs = job.get("footprints_gpkgs") or {}
-        if isinstance(gpkgs, dict):
-            for src, pth in gpkgs.items():
-                if pth and os.path.isfile(pth) and os.path.getsize(pth) > 0:
-                    fp_items.append((src, pth))
-        if not fp_items:
-            legacy = job.get("footprints_gpkg")
-            if legacy and os.path.isfile(legacy) and os.path.getsize(legacy) > 0:
-                fp_items.append((None, legacy))
-        if not fp_items and out_dir:
-            prefix = f"pwtt_{jid}_footprints_"
-            suffix_to_source = {"war": "historical_war_start", "infer": "historical_inference_start"}
-            for pth in sorted(glob.glob(os.path.join(glob.escape(out_dir), prefix + "*.gpkg"))):
-                base = os.path.basename(pth)
-                if not base.startswith(prefix) or not base.endswith(".gpkg"):
-                    continue
-                suf = base[len(prefix) : -len(".gpkg")]
-                src = suffix_to_source.get(suf, suf)
-                fp_items.append((src, pth))
-
-        for src, pth in fp_items:
-            fp_label = pwtt_footprints_layer_name(
-                jid,
-                backend_id,
-                src,
-                war_start=job.get("war_start"),
-                inference_start=job.get("inference_start"),
-            )
-            vl = QgsVectorLayer(pth, fp_label, "ogr")
-            if vl.isValid():
-                style_pwtt_footprints_layer(vl)
-                add_map_layer_to_pwtt_job_group(project, vl, jid, backend_id)
-                log_parts.append(f"Load Local: added {fp_label}")
-            else:
-                log_parts.append(f"Load Local: skipped invalid footprints \u2014 {pth}")
-
-        msg = "<br>".join(log_parts)
-        self._job_logs.setdefault(jid, []).append(msg)
-        if self._get_selected_job_id() == jid:
-            self.log_text.append(msg)
-
-    @staticmethod
-    def _raster_source_paths_resolved(layer):
-        """Paths to compare to a job GeoTIFF (handles simple GDAL vs URI-ish sources)."""
-        src = (layer.source() or "").strip()
-        if not src:
-            return []
-        paths = [src]
-        if "|" in src:
-            paths.append(src.split("|", 1)[0].strip())
-        if src.lower().startswith("gdal:") and '"' in src:
-            # e.g. GDAL:"path":band
-            for part in src.split('"'):
-                p = part.strip()
-                if p.endswith(".tif") or p.endswith(".tiff") or os.path.sep in p:
-                    paths.append(p)
-        out = []
-        for p in paths:
-            if p and os.path.isfile(p):
-                try:
-                    out.append(os.path.realpath(p))
-                except OSError:
-                    out.append(os.path.abspath(p))
-        return list(dict.fromkeys(out))
-
-    def _apply_styling_to_result_selected(self):
-        """Re-run PWTT symbology on the selected job\u2019s result raster if it is in the map."""
-        job = self._get_selected_job()
-        if not job:
-            return
-        jid = job["id"]
-        backend_id = job.get("backend_id")
-        thr_default = float(job.get("damage_threshold", 3.3))
-        tif_path = self._local_result_tif_path(job)
-        try:
-            tif_resolved = os.path.realpath(tif_path) if tif_path else None
-        except OSError:
-            tif_resolved = os.path.abspath(tif_path) if tif_path else None
-
-        from qgis.core import QgsRasterLayer
-
-        from ..core.qgis_layer_tree import pwtt_damage_layer_name
-        from ..core.qgis_output_style import (
-            damage_threshold_from_job_meta,
-            style_pwtt_raster_layer,
-        )
-
-        expected_name = pwtt_damage_layer_name(jid, backend_id)
-        project = QgsProject.instance()
-        matched = []
-        for _lid, layer in project.mapLayers().items():
-            if not isinstance(layer, QgsRasterLayer) or not layer.isValid():
-                continue
-            layer_paths = self._raster_source_paths_resolved(layer)
-            name_ok = layer.name() == expected_name
-            path_ok = bool(
-                tif_resolved and layer_paths and any(p == tif_resolved for p in layer_paths)
-            )
-            if not name_ok and not path_ok:
-                continue
-            meta_tif = tif_path or (layer_paths[0] if layer_paths else (layer.source() or ""))
-            thr = damage_threshold_from_job_meta(meta_tif, default=thr_default)
-            style_pwtt_raster_layer(layer, damage_threshold=thr)
-            matched.append(layer.name())
-
-        if not matched:
-            QMessageBox.information(
-                self,
-                "PWTT",
-                "No matching result raster in the project.\n\n"
-                f"Expected layer name:\n  {expected_name}\n"
-                + (
-                    f"\nor GeoTIFF path:\n  {tif_path}"
-                    if tif_path
-                    else "\n(Set job output folder / run \u201cLoad Local\u201d so the plugin "
-                    "knows the GeoTIFF path for matching.)"
-                ),
-            )
-            return
-
-        msg = "Apply styling: updated " + ", ".join(matched)
-        self._job_logs.setdefault(jid, []).append(msg)
-        if self._get_selected_job_id() == jid:
-            self.log_text.append(msg)
-        try:
-            from qgis.utils import iface as qgis_iface
-
-            if qgis_iface is not None:
-                qgis_iface.mapCanvas().refresh()
-        except ImportError:
-            pass
-
-    def _footprints_for_local_selected(self):
-        """OSM buildings + zonal mean T-stat for this job\u2019s on-disk result raster."""
-        job = self._get_selected_job()
-        if not job:
-            return
-        jid = job["id"]
-        tif_path = self._local_result_tif_path(job)
-        if not tif_path:
-            hint = os.path.join(
-                (job.get("output_dir") or "").strip(), f"pwtt_{jid}.tif"
-            ) if (job.get("output_dir") or "").strip() else "(set output folder)"
-            QMessageBox.information(
-                self,
-                "PWTT",
-                "No local result GeoTIFF found for this job.\n\n"
-                "Run the job or point output to an existing raster, then try again.\n"
-                f"Expected e.g.:\n  {hint}",
-            )
-            return
-        out_dir = (job.get("output_dir") or "").strip()
-        if not out_dir:
-            QMessageBox.warning(self, "PWTT", "Job has no output folder set.")
-            return
-        gpkg_path = os.path.join(out_dir, f"pwtt_{jid}_footprints_current.gpkg")
-        if not _ensure_footprint_dependencies(self):
-            return
-
-        aoi_wkt = (job.get("aoi_wkt") or "").strip()
-        if not aoi_wkt:
-            from ..core.utils import raster_bounds_to_aoi_wkt
-
-            aoi_wkt = raster_bounds_to_aoi_wkt(tif_path)
-        if not aoi_wkt:
-            QMessageBox.warning(
-                self, "PWTT",
-                "Could not determine AOI (job has no AOI WKT and raster extent could not be read).",
-            )
-            return
-
-        if os.path.isfile(gpkg_path) and os.path.getsize(gpkg_path) > 0:
-            reply = QMessageBox.question(
-                self, "PWTT",
-                f"Footprints file already exists:\n{gpkg_path}\n\nOverwrite and recompute?",
-                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-            )
-            if reply == QMessageBox.Cancel:
-                return
-            if reply == QMessageBox.No:
-                self._add_local_footprints_layer(gpkg_path, jid, job.get("backend_id"))
-                return
-
-        os.makedirs(out_dir, exist_ok=True)
-        self.footprints_btn.setEnabled(False)
-        self._status_signal.emit(jid, f"Computing OSM building footprints for job {jid}\u2026")
-        last_err = []
-        done = []
-
-        def _worker():
-            try:
-                from ..core.footprints import compute_footprints
-
-                def _prog(pct, msg):
-                    self._status_signal.emit(jid, f"[{pct}%] {msg}")
-
-                compute_footprints(
-                    tif_path,
-                    aoi_wkt,
-                    gpkg_path,
-                    progress_callback=_prog,
-                )
-                done.append(True)
-            except Exception as e:
-                last_err.append(str(e))
-                self._status_signal.emit(jid, f"Footprints error: {e}")
-
-        def _check_done():
-            if t.is_alive():
-                return
-            timer.stop()
-            self.footprints_btn.setEnabled(self._local_result_tif_path(self._get_selected_job()) is not None)
-            if last_err:
-                return
-            if done and os.path.isfile(gpkg_path) and os.path.getsize(gpkg_path) > 0:
-                from ..core import job_store
-
-                existing = job_store.get_job(jid) or job
-                gpkgs = dict(existing.get("footprints_gpkgs") or {})
-                gpkgs["current_osm"] = gpkg_path
-                legacy = existing.get("footprints_gpkg") or gpkg_path
-                job_store.update_job(
-                    jid,
-                    footprints_gpkgs=gpkgs,
-                    footprints_gpkg=legacy,
-                )
-                self._refresh_job_list()
-                note = f"Footprints saved: {gpkg_path}"
-                self._job_logs.setdefault(jid, []).append(note)
-                if self._get_selected_job_id() == jid:
-                    self.log_text.append(note)
-                self._add_local_footprints_layer(gpkg_path, jid, job.get("backend_id"))
-            else:
-                self._status_signal.emit(jid, "Footprints step finished but output file is missing.")
-
-        t = threading.Thread(target=_worker, daemon=True)
-        t.start()
-        timer = QTimer(self)
-        timer.timeout.connect(_check_done)
-        timer.start(400)
-
-    def _add_local_footprints_layer(self, path, job_id, backend_id):
-        from qgis.core import QgsProject, QgsVectorLayer
-
-        from ..core.qgis_layer_tree import (
-            add_map_layer_to_pwtt_job_group,
-            pwtt_footprints_layer_name,
-        )
-        from ..core.qgis_output_style import style_pwtt_footprints_layer
-
-        job = self._get_selected_job()
-        label = pwtt_footprints_layer_name(
-            job_id,
-            backend_id,
-            "current_osm",
-            war_start=(job or {}).get("war_start"),
-            inference_start=(job or {}).get("inference_start"),
-        )
-        layer = QgsVectorLayer(path, label, "ogr")
-        if layer.isValid():
-            style_pwtt_footprints_layer(layer)
-            add_map_layer_to_pwtt_job_group(QgsProject.instance(), layer, job_id, backend_id)
-            msg = f"Layer added: {label}"
-            self._job_logs.setdefault(job_id, []).append(msg)
-            if self._get_selected_job_id() == job_id:
-                self.log_text.append(msg)
-        else:
-            msg = "Failed to load footprints GeoPackage."
-            self._job_logs.setdefault(job_id, []).append(msg)
-            if self._get_selected_job_id() == job_id:
-                self.log_text.append(msg)
-
-    def _resume_selected(self):
-        job = self._get_selected_job()
-        if not job:
-            return
-        try:
-            backend = _create_and_auth_backend(
-                job["backend_id"], parent=self, controls_dock=self.controls_dock
-            )
-        except RuntimeError as e:
-            QMessageBox.warning(self, "PWTT", str(e))
-            return
-        remote_id = job.get("remote_job_id")
-        prev_status = job.get("status", "?")
-        if remote_id:
-            self._job_logs.setdefault(job["id"], []).append(
-                f"Resuming (was {prev_status}) — remote job: {remote_id}"
-            )
-        else:
-            self._job_logs.setdefault(job["id"], []).append(
-                f"Resuming (was {prev_status}) — will create new remote job"
-            )
-        self.launch_job(job, backend)
-
-    def _stop_selected(self):
-        from ..core import job_store
-        job = self._get_selected_job()
-        if not job:
-            return
-        task = self._active_tasks.get(job["id"])
-        if task:
-            remote_id = getattr(task, "remote_job_id", None) or job.get("remote_job_id")
-            job_store.update_job(job["id"], status=job_store.STATUS_STOPPED)
-            task.cancel()
-            msg = "Stopping task…"
-            if remote_id:
-                msg += f" (remote job {remote_id} will continue on server)"
-            self._job_logs.setdefault(job["id"], []).append(msg)
-        self._refresh_job_list()
-
-    def _cancel_selected(self):
-        from ..core import job_store
-        job = self._get_selected_job()
-        if not job:
-            return
-        remote_id = job.get("remote_job_id")
-        job_store.update_job(job["id"], status=job_store.STATUS_CANCELLED)
-        task = self._active_tasks.pop(job["id"], None)
-        if task:
-            task.cancel()
-        msg = "Cancelled."
-        if remote_id:
-            msg += f" Note: remote job {remote_id} may still be running on the server."
-        self._job_logs.setdefault(job["id"], []).append(msg)
-        self._refresh_job_list()
-        if self._get_selected_job_id() == job["id"]:
-            self._on_job_selected()
-
-    def _rerun_selected(self):
-        """Create a new job with the same parameters and launch it."""
-        old = self._get_selected_job()
-        if not old:
-            return
-        try:
-            backend = _create_and_auth_backend(
-                old["backend_id"], parent=self, controls_dock=self.controls_dock
-            )
-        except RuntimeError as e:
-            QMessageBox.warning(self, "PWTT", str(e))
-            return
-        old_fp_sources = _job_footprints_sources(old)
-        from ..core import job_store
-        new_job = job_store.create_job(
-            backend_id=old["backend_id"],
-            aoi_wkt=old["aoi_wkt"],
-            war_start=old["war_start"],
-            inference_start=old["inference_start"],
-            pre_interval=old["pre_interval"],
-            post_interval=old["post_interval"],
-            output_dir="",  # set below
-            include_footprints=bool(old_fp_sources),
-            footprints_sources=old_fp_sources,
-            damage_threshold=old.get("damage_threshold", 3.3),
-            gee_viz=old.get("gee_viz", False),
-        )
-        # Derive base dir from old output_dir (old is base/old_id/)
-        base_dir = os.path.dirname(old["output_dir"].rstrip("/"))
-        if not base_dir:
-            proj_path = QgsProject.instance().absolutePath()
-            base_dir = proj_path if proj_path else os.path.expanduser("~/PWTT")
-        new_job["output_dir"] = os.path.join(base_dir, new_job["id"])
-        os.makedirs(new_job["output_dir"], exist_ok=True)
-        job_store.save_job(new_job)
-        self.launch_job(new_job, backend)
-
-    def _delete_selected(self):
-        from ..core import job_store
-        job = self._get_selected_job()
-        if not job or job["status"] == job_store.STATUS_RUNNING:
-            return
-        job_store.delete_job(job["id"])
-        self._job_logs.pop(job["id"], None)
-        self._job_progress.pop(job["id"], None)
-        self._refresh_job_list()
-
-    # ── Order polling ─────────────────────────────────────────────────────────
-
-    def _poll_orders(self):
-        """Kick off a background thread that checks offline product status."""
-        if self._poll_running:
-            return
-        from ..core import job_store
-        waiting = [
-            j for j in job_store.load_jobs()
-            if j["status"] == job_store.STATUS_WAITING_ORDERS
-            and j["backend_id"] == "local"
-            and j.get("offline_product_ids")
-        ]
-        if not waiting:
-            return
-        s = QgsSettings()
-        s.beginGroup("PWTT")
-        username = s.value("cdse_username", "")
-        password = s.value("cdse_password", "")
-        s.endGroup()
-        if not username or not password:
-            return
-        self._poll_running = True
-        threading.Thread(
-            target=self._poll_orders_worker,
-            args=(username, password, waiting),
-            daemon=True,
-        ).start()
-
-    def _poll_orders_worker(self, username, password, waiting_jobs):
-        from datetime import datetime
-
-        try:
-            from ..core.downloader import get_token, _is_product_online
-
-            token = get_token(username, password)
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            for job in waiting_jobs:
-                jid = job["id"]
-                pids = job["offline_product_ids"]
-                online_n = sum(
-                    1 for pid in pids if _is_product_online(token, pid)
-                )
-                n = len(pids)
-                if online_n >= n:
-                    self._order_poll_log.emit(
-                        jid,
-                        f"[{ts}] Auto-check CDSE API: all {n} product(s) online — resuming.",
-                    )
-                    self._auto_resume_signal.emit(jid)
-                else:
-                    self._order_poll_log.emit(
-                        jid,
-                        f"[{ts}] Auto-check CDSE API: {online_n}/{n} product(s) online; still waiting.",
-                    )
-        except Exception as e:
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            for job in waiting_jobs:
-                self._order_poll_log.emit(
-                    job["id"],
-                    f"[{ts}] Auto-check CDSE API failed (will retry on next timer): {e}",
-                )
-        finally:
-            self._poll_running = False
-
-    def _auto_resume_job(self, job_id):
-        """Main thread: auto-resume a job whose products are now online."""
-        from ..core import job_store
-        job = job_store.get_job(job_id)
-        if not job or job["status"] != job_store.STATUS_WAITING_ORDERS:
-            return
-        if job_id in self._active_tasks:
-            return
-        try:
-            backend = _create_and_auth_backend(
-                job["backend_id"], controls_dock=self.controls_dock
-            )
-        except Exception:
-            return
-        self._job_logs.setdefault(job_id, []).append(
-            "Products now available \u2014 auto-resuming\u2026"
-        )
-        self.launch_job(job, backend)
-
-    # ── Cleanup ───────────────────────────────────────────────────────────────
-
-    def cleanup(self):
-        self._order_timer.stop()
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  PWTTGrdStagingDock — local CDSE jobs waiting on offline GRD staging
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class PWTTGrdStagingDock(QDockWidget):
-    """Panel: Local jobs with Sentinel-1 GRD products staging from CDSE cold storage."""
-
-    _check_done = pyqtSignal(str, list)  # job_id, list of (product_id, online_bool)
-    _check_log = pyqtSignal(str)
-
-    def __init__(self, parent=None, plugin_dir=None):
-        super().__init__(_dock_title("PWTT \u2014 GRD staging", plugin_dir), parent)
-        self.setObjectName("PWTTGrdStagingDock")
-        self.setAllowedAreas(Qt.AllDockWidgetAreas)
-        self.jobs_dock = None
-        self.controls_dock = None
-        self._check_running = False
-        self._build_ui()
-        self._check_done.connect(self._on_check_done)
-        self._check_log.connect(self._append_log)
-
-    def _build_ui(self):
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
-
-        hint = QLabel(
-            "Local backend: jobs waiting for GRD products to come online on CDSE. "
-            "The Jobs panel auto-checks every 2 minutes and resumes when all products are online."
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #555; font-size: 0.9em;")
-        layout.addWidget(hint)
-
-        top_row = QHBoxLayout()
-        self.refresh_btn = QPushButton("Refresh list")
-        self.refresh_btn.clicked.connect(self.refresh_list)
-        top_row.addWidget(self.refresh_btn)
-        self.check_btn = QPushButton("Check CDSE now")
-        self.check_btn.setToolTip(
-            "Query the CDSE catalogue for the selected job\u2019s products (Online flag)."
-        )
-        self.check_btn.clicked.connect(self._check_selected_job)
-        top_row.addWidget(self.check_btn)
-        self.resume_btn = QPushButton("Resume job")
-        self.resume_btn.setToolTip("Same as Check && Resume in the Jobs panel.")
-        self.resume_btn.clicked.connect(self._resume_selected_job)
-        top_row.addWidget(self.resume_btn)
-        self.focus_jobs_btn = QPushButton("Show in Jobs")
-        self.focus_jobs_btn.setToolTip("Open the Jobs panel and select this job.")
-        self.focus_jobs_btn.clicked.connect(self._focus_in_jobs)
-        top_row.addWidget(self.focus_jobs_btn)
-        top_row.addStretch(1)
-        self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color: gray; font-size: 0.9em;")
-        top_row.addWidget(self.status_label)
-        layout.addLayout(top_row)
-
-        layout.addWidget(QLabel("Waiting jobs (Local, CDSE staging):"))
-        self.jobs_table = QTableWidget(0, 4)
-        self.jobs_table.setHorizontalHeaderLabels(
-            ["Job", "Period (YYYY-MM)", "GRD #", "Output folder"]
-        )
-        self.jobs_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.jobs_table.setSelectionMode(QTableWidget.SingleSelection)
-        self.jobs_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.jobs_table.verticalHeader().hide()
-        hj = self.jobs_table.horizontalHeader()
-        hj.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        hj.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        hj.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        hj.setSectionResizeMode(3, QHeaderView.Stretch)
-        layout.addWidget(self.jobs_table)
-
-        layout.addWidget(QLabel("Products for selected job:"))
-        self.products_table = QTableWidget(0, 4)
-        self.products_table.setHorizontalHeaderLabels(
-            ["Product name", "Product UUID", "Acquisition", "CDSE online"]
-        )
-        self.products_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.products_table.setSelectionMode(QTableWidget.SingleSelection)
-        self.products_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.products_table.verticalHeader().hide()
-        hp = self.products_table.horizontalHeader()
-        hp.setSectionResizeMode(0, QHeaderView.Stretch)
-        hp.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        hp.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        hp.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        layout.addWidget(self.products_table)
-
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setMaximumHeight(100)
-        layout.addWidget(self.log_text)
-
-        self.jobs_table.itemSelectionChanged.connect(self._on_job_selection_changed)
-        self.setWidget(w)
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        self.refresh_list()
-
-    def _append_log(self, msg):
-        self.log_text.append(msg)
-
-    def refresh_list(self):
-        from ..core import job_store
-        waiting = [
-            j
-            for j in job_store.load_jobs()
-            if j.get("status") == job_store.STATUS_WAITING_ORDERS
-            and j.get("backend_id") == "local"
-            and j.get("offline_product_ids")
-        ]
-        self.jobs_table.setRowCount(len(waiting))
-        for row, job in enumerate(waiting):
-            jid = job["id"]
-            c0 = QTableWidgetItem(jid)
-            c0.setData(Qt.UserRole, jid)
-            self.jobs_table.setItem(row, 0, c0)
-            ym = f"{job['war_start'][:7]} \u2192 {job['inference_start'][:7]}"
-            self.jobs_table.setItem(row, 1, QTableWidgetItem(ym))
-            n = len(job.get("offline_product_ids") or [])
-            self.jobs_table.setItem(row, 2, QTableWidgetItem(str(n)))
-            od = job.get("output_dir") or ""
-            disp = od
-            if len(disp) > 52:
-                disp = "\u2026" + disp[-49:]
-            od_item = QTableWidgetItem(disp)
-            od_item.setToolTip(od)
-            self.jobs_table.setItem(row, 3, od_item)
-        nwait = len(waiting)
-        self.status_label.setText(
-            f"{nwait} job(s) waiting" if nwait else "No jobs waiting on GRD"
-        )
-        self._on_job_selection_changed()
-
-    def _selected_pwtt_job_id(self):
-        row = self.jobs_table.currentRow()
-        if row < 0:
-            return None
-        item = self.jobs_table.item(row, 0)
-        return item.data(Qt.UserRole) if item else None
-
-    def _on_job_selection_changed(self):
-        from ..core import job_store
-        jid = self._selected_pwtt_job_id()
-        self.resume_btn.setEnabled(bool(jid))
-        self.focus_jobs_btn.setEnabled(bool(jid))
-        self.check_btn.setEnabled(bool(jid) and not self._check_running)
-        if not jid:
-            self.products_table.setRowCount(0)
-            return
-        job = job_store.get_job(jid)
-        if not job:
-            self.products_table.setRowCount(0)
-            return
-        rows = _offline_grd_catalog_rows(job)
-        self.products_table.setRowCount(len(rows))
-        gray = QColor("#666")
-        for i, r in enumerate(rows):
-            nm = r.get("name") or "\u2014"
-            ni = QTableWidgetItem(nm)
-            ni.setToolTip(nm if nm != "\u2014" else r["id"])
-            self.products_table.setItem(i, 0, ni)
-            pid = r["id"]
-            short = pid[:10] + "\u2026" if len(pid) > 14 else pid
-            pi = QTableWidgetItem(short)
-            pi.setToolTip(pid)
-            pi.setData(Qt.UserRole, pid)
-            self.products_table.setItem(i, 1, pi)
-            self.products_table.setItem(i, 2, QTableWidgetItem(r.get("date") or ""))
-            st = QTableWidgetItem("\u2014")
-            st.setForeground(gray)
-            self.products_table.setItem(i, 3, st)
-
-    def _check_selected_job(self):
-        if self._check_running:
-            self._append_log("A CDSE check is already running.")
-            return
-        jid = self._selected_pwtt_job_id()
-        if not jid:
-            return
-        from ..core import job_store
-        job = job_store.get_job(jid)
-        if not job:
-            return
-        pids = list(job.get("offline_product_ids") or [])
-        if not pids:
-            return
-        s = QgsSettings()
-        s.beginGroup("PWTT")
-        username = s.value("cdse_username", "")
-        password = s.value("cdse_password", "")
-        s.endGroup()
-        if not username or not password:
-            self._append_log(
-                "CDSE username/password not set. Enter credentials in Damage Detection panel."
-            )
-            QMessageBox.warning(
-                self,
-                "PWTT",
-                "Set CDSE username and password in PWTT \u2014 Damage Detection, then try again.",
-            )
-            return
-        self._check_running = True
-        self.check_btn.setEnabled(False)
-        self._append_log(f"Checking {len(pids)} product(s) for job {jid}\u2026")
-
-        def _worker():
-            try:
-                from ..core.downloader import get_token, _is_product_online
-                token = get_token(username, password)
-                results = [(pid, _is_product_online(token, pid)) for pid in pids]
-                self._check_done.emit(jid, results)
-            except Exception as e:
-                self._check_log.emit(f"CDSE check failed: {e}")
-                self._check_done.emit("", [])
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _on_check_done(self, job_id, results):
-        self._check_running = False
-        self._on_job_selection_changed()
-        jid = self._selected_pwtt_job_id()
-        if job_id and results and jid == job_id:
-            green = QColor("#2E7D32")
-            red = QColor("#C62828")
-            for row in range(self.products_table.rowCount()):
-                item = self.products_table.item(row, 1)
-                if not item:
-                    continue
-                pid = item.data(Qt.UserRole)
-                online = None
-                for p, o in results:
-                    if p == pid:
-                        online = o
-                        break
-                st_item = self.products_table.item(row, 3)
-                if online is None or st_item is None:
-                    continue
-                if online:
-                    st_item.setText("Yes")
-                    st_item.setForeground(green)
-                else:
-                    st_item.setText("No")
-                    st_item.setForeground(red)
-            online_n = sum(1 for _, o in results if o)
-            self._append_log(
-                f"Job {job_id}: {online_n}/{len(results)} product(s) online on CDSE."
-            )
-        elif job_id or results:
-            self._append_log("CDSE check finished (job selection changed).")
-
-    def _resume_selected_job(self):
-        jid = self._selected_pwtt_job_id()
-        if not jid or not self.jobs_dock:
-            return
-        self.jobs_dock.resume_job_by_id(jid)
-
-    def _focus_in_jobs(self):
-        jid = self._selected_pwtt_job_id()
-        if not jid or not self.jobs_dock:
-            return
-        self.jobs_dock.focus_job(jid)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  PWTTOpenEOJobsDock — list all openEO remote jobs, download results
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class PWTTOpenEOJobsDock(QDockWidget):
-    """List openEO batch jobs from the server and download/add results."""
-
-    _jobs_loaded = pyqtSignal(list)  # emitted from worker thread
-    _log_signal = pyqtSignal(str)   # thread-safe log append
-
-    def __init__(self, parent=None, plugin_dir=None):
-        # Short dock title (no PWTT/version suffix); server job title is in the Job ID tooltip.
-        super().__init__("PWTT \u2014 openEO Jobs", parent)
-        self.setObjectName("PWTTOpenEOJobsDock")
-        self.setAllowedAreas(Qt.AllDockWidgetAreas)
-        self._conn = None  # openEO connection (set after auth)
-        self._remote_jobs = []  # list of job metadata dicts
-        self._build_ui()
-        self._jobs_loaded.connect(self._populate_table)
-        self._log_signal.connect(self._append_log)
-
-    def _build_ui(self):
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
-
-        # Top bar: refresh
-        top_row = QHBoxLayout()
-        self.refresh_btn = QPushButton("Connect && Refresh")
-        self.refresh_btn.setToolTip("Authenticate to openEO and list all batch jobs")
-        self.refresh_btn.clicked.connect(self._refresh_jobs)
-        top_row.addWidget(self.refresh_btn)
-        self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color: gray; font-size: 0.9em;")
-        top_row.addWidget(self.status_label, 1)
-        layout.addLayout(top_row)
-
-        # Job table
-        self.job_table = QTableWidget(0, 5)
-        self.job_table.setHorizontalHeaderLabels(
-            ["Job ID", "Status", "Progress", "Created", "Updated"]
-        )
-        self.job_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.job_table.setSelectionMode(QTableWidget.SingleSelection)
-        self.job_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.job_table.verticalHeader().hide()
-        hdr = self.job_table.horizontalHeader()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(4, QHeaderView.Stretch)
-        layout.addWidget(self.job_table)
-
-        # Action buttons
-        btn_row = QHBoxLayout()
-        self.download_btn = QPushButton("Download && Add to Map")
-        self.download_btn.setEnabled(False)
-        self.download_btn.setToolTip("Download result GeoTIFF and add as layer")
-        self.download_btn.clicked.connect(self._download_selected)
-        btn_row.addWidget(self.download_btn)
-        self.footprints_btn = QPushButton("Per-building (OSM)")
-        self.footprints_btn.setEnabled(False)
-        self.footprints_btn.setToolTip(
-            "After the GeoTIFF is downloaded: fetch OSM buildings and mean damage (T-stat) per polygon"
-        )
-        self.footprints_btn.clicked.connect(self._footprints_for_selected)
-        btn_row.addWidget(self.footprints_btn)
-        self.logs_btn = QPushButton("Show Logs")
-        self.logs_btn.setEnabled(False)
-        self.logs_btn.setToolTip("Fetch and show server-side logs for selected job")
-        self.logs_btn.clicked.connect(self._show_selected_logs)
-        btn_row.addWidget(self.logs_btn)
-        self.delete_remote_btn = QPushButton("Delete Remote Job")
-        self.delete_remote_btn.setEnabled(False)
-        self.delete_remote_btn.clicked.connect(self._delete_selected)
-        btn_row.addWidget(self.delete_remote_btn)
-        layout.addLayout(btn_row)
-
-        # Log
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setMaximumHeight(140)
-        layout.addWidget(self.log_text)
-
-        self.job_table.itemSelectionChanged.connect(self._on_selection_changed)
-        self.setWidget(w)
-
-    def _append_log(self, msg):
-        self.log_text.append(msg)
-
-    # ── Auth & refresh ───────────────────────────────────────────────────────
-
-    def _refresh_jobs(self):
-        """Authenticate (if needed) and list all openEO batch jobs."""
-        if not self._conn:
-            try:
-                backend = _create_and_auth_backend(
-                    "openeo",
-                    parent=self,
-                    controls_dock=getattr(self, "controls_dock", None),
-                )
-                self._conn = backend._conn
-                self.log_text.append("Connected to openEO CDSE.")
-            except RuntimeError as e:
-                if str(e) != "Authentication cancelled.":
-                    QMessageBox.warning(self, "PWTT", str(e))
-                return
-            except Exception as e:
-                QMessageBox.warning(self, "PWTT", f"openEO auth failed: {e}")
-                return
-
-        self.status_label.setText("Loading jobs\u2026")
-        self.refresh_btn.setEnabled(False)
-        self.log_text.append("Fetching job list from server…")
-
-        def _worker():
-            try:
-                jobs = self._conn.list_jobs()
-                result = []
-                for j in jobs:
-                    result.append({
-                        "id": j.get("id", ""),
-                        "status": j.get("status", ""),
-                        "created": j.get("created", ""),
-                        "updated": j.get("updated", ""),
-                        "title": j.get("title", ""),
-                        "progress": j.get("progress"),
-                        "costs": j.get("costs"),
-                        "usage": j.get("usage"),
-                    })
-                self._log_signal.emit(f"Received {len(result)} job(s) from server.")
-                self._jobs_loaded.emit(result)
-            except Exception as e:
-                self._log_signal.emit(f"Failed to list jobs: {e}")
-                self._jobs_loaded.emit([])
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _populate_table(self, jobs):
-        self._remote_jobs = jobs
-        self.job_table.setRowCount(len(jobs))
-
-        _color_map = {
-            "finished": "#4CAF50",
-            "running": "#2196F3",
-            "queued": "#FF9800",
-            "created": "#888",
-            "error": "#F44336",
-            "canceled": "#888",
-            "cancelled": "#888",
-        }
-
-        for row, j in enumerate(jobs):
-            # Job ID
-            jid = j["id"]
-            display_id = jid[-16:] if len(jid) > 16 else jid
-            id_item = QTableWidgetItem(display_id)
-            # Build rich tooltip
-            tip_parts = [f"ID: {jid}"]
-            if j.get("title"):
-                tip_parts.append(f"Title: {j['title']}")
-            if j.get("costs") is not None:
-                tip_parts.append(f"Costs: {j['costs']}")
-            usage = j.get("usage")
-            if usage and isinstance(usage, dict):
-                for k, v in usage.items():
-                    tip_parts.append(f"{k}: {v}")
-            id_item.setToolTip("\n".join(tip_parts))
-            id_item.setData(Qt.UserRole, jid)
-            self.job_table.setItem(row, 0, id_item)
-
-            # Status
-            st_item = QTableWidgetItem(j["status"])
-            color = _color_map.get(j["status"], "#000")
-            st_item.setForeground(QColor(color))
-            self.job_table.setItem(row, 1, st_item)
-
-            # Progress
-            progress = j.get("progress")
-            prog_text = f"{progress}%" if progress is not None else ""
-            self.job_table.setItem(row, 2, QTableWidgetItem(prog_text))
-
-            # Created
-            created = (j.get("created") or "")[:19].replace("T", " ")
-            self.job_table.setItem(row, 3, QTableWidgetItem(created))
-
-            # Updated
-            updated = (j.get("updated") or "")[:19].replace("T", " ")
-            self.job_table.setItem(row, 4, QTableWidgetItem(updated))
-
-        # Summary in status bar
-        by_status = {}
-        for j in jobs:
-            st = j.get("status", "?")
-            by_status[st] = by_status.get(st, 0) + 1
-        summary = ", ".join(f"{cnt} {st}" for st, cnt in sorted(by_status.items()))
-        self.status_label.setText(f"{len(jobs)} job(s)" + (f" ({summary})" if summary else ""))
-        self.refresh_btn.setEnabled(True)
-
-    # ── Selection ────────────────────────────────────────────────────────────
-
-    def _on_selection_changed(self):
-        row = self.job_table.currentRow()
-        if row < 0 or row >= len(self._remote_jobs):
-            self.download_btn.setEnabled(False)
-            self.footprints_btn.setEnabled(False)
-            self.logs_btn.setEnabled(False)
-            self.delete_remote_btn.setEnabled(False)
-            return
-        j = self._remote_jobs[row]
-        self.download_btn.setEnabled(j["status"] == "finished")
-        self.footprints_btn.setEnabled(j["status"] == "finished")
-        self.logs_btn.setEnabled(True)
-        self.delete_remote_btn.setEnabled(j["status"] not in ("running", "queued"))
-
-    def _get_selected_remote_id(self):
-        row = self.job_table.currentRow()
-        if row < 0:
-            return None
-        item = self.job_table.item(row, 0)
-        return item.data(Qt.UserRole) if item else None
-
-    def _remote_job_local_paths(self, job_id):
-        """Same layout as download: ``<project_or_home>/PWTT/<job_id>/pwtt_<job_id>.tif``."""
-        proj_path = QgsProject.instance().absolutePath()
-        base_dir = proj_path if proj_path else os.path.expanduser("~/PWTT")
-        out_dir = os.path.join(base_dir, job_id)
-        tif_path = os.path.join(out_dir, f"pwtt_{job_id}.tif")
-        gpkg_path = os.path.join(out_dir, f"pwtt_{job_id}_footprints.gpkg")
-        return out_dir, tif_path, gpkg_path
-
-    # ── Show Logs ─────────────────────────────────────────────────────────────
-
-    def _show_selected_logs(self):
-        """Fetch and display server-side logs for the selected openEO job."""
-        job_id = self._get_selected_remote_id()
-        if not job_id or not self._conn:
-            return
-        self.logs_btn.setEnabled(False)
-        self.log_text.append(f"Fetching logs for {job_id}…")
-
-        def _worker():
-            try:
-                job = self._conn.job(job_id)
-                # Also fetch job metadata
-                try:
-                    info = job.describe()
-                    parts = []
-                    for key in ("id", "status", "created", "updated", "progress"):
-                        val = info.get(key)
-                        if val is not None and val != "":
-                            parts.append(f"{key}={val}")
-                    usage = info.get("usage")
-                    if usage and isinstance(usage, dict):
-                        for k, v in usage.items():
-                            parts.append(f"{k}={v}")
-                    costs = info.get("costs")
-                    if costs is not None:
-                        parts.append(f"costs={costs}")
-                    if parts:
-                        self._log_signal.emit(f"<b>Job info:</b> {', '.join(parts)}")
-                except Exception:
-                    pass
-
-                logs = job.logs()
-                entries = list(logs) if logs else []
-                if not entries:
-                    self._log_signal.emit(f"No log entries for {job_id}.")
-                else:
-                    self._log_signal.emit(f"<b>{len(entries)} log entries for {job_id}:</b>")
-                    for entry in entries[-30:]:  # last 30
-                        if isinstance(entry, dict):
-                            lvl = entry.get("level", "info")
-                            msg = entry.get("message", "")
-                            eid = entry.get("id", "")
-                        else:
-                            lvl, msg, eid = "info", str(entry), ""
-                        if not msg:
-                            continue
-                        color = {"error": "#F44336", "warning": "#FF9800"}.get(lvl, "#666")
-                        prefix = f"[{eid}] " if eid else ""
-                        self._log_signal.emit(
-                            f'<span style="color:{color}">[{lvl}]</span> {prefix}{msg}'
-                        )
-            except Exception as e:
-                self._log_signal.emit(f"Failed to fetch logs: {e}")
-
-        def _done():
-            self.logs_btn.setEnabled(True)
-
-        t = threading.Thread(target=_worker, daemon=True)
-        t.start()
-        # Re-enable button after thread finishes
-        _timer = QTimer(self)
-        _timer.timeout.connect(lambda: (not t.is_alive()) and (_timer.stop(), _done()))
-        _timer.start(500)
-
-    # ── Download ─────────────────────────────────────────────────────────────
-
-    def _download_selected(self):
-        """Download result of the selected openEO job and add to QGIS layers."""
-        job_id = self._get_selected_remote_id()
-        if not job_id or not self._conn:
-            return
-
-        out_dir, out_path, _gpkg_unused = self._remote_job_local_paths(job_id)
-        os.makedirs(out_dir, exist_ok=True)
-
-        if os.path.isfile(out_path):
-            reply = QMessageBox.question(
-                self, "PWTT",
-                f"File already exists:\n{out_path}\n\nAdd existing file to map instead of re-downloading?",
-                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-            )
-            if reply == QMessageBox.Cancel:
-                return
-            if reply == QMessageBox.Yes:
-                self._add_tif_to_map(out_path, job_id)
-                return
-
-        self.download_btn.setEnabled(False)
-        self.log_text.append(f"Downloading {job_id}…")
-        last_err = []
-
-        def _worker():
-            from ..core.openeo_backend import download_job_geotiff
-
-            try:
-                job = self._conn.job(job_id)
-                results = job.get_results()
-                # Log result metadata
-                try:
-                    meta = results.get_metadata()
-                    bbox = meta.get("bbox")
-                    assets = meta.get("assets", {})
-                    parts = [f"{len(assets)} asset(s)"]
-                    if bbox:
-                        parts.append(f"bbox={bbox}")
-                    for name, info in assets.items():
-                        ftype = info.get("type", "")
-                        parts.append(f"{name} ({ftype})")
-                    self._log_signal.emit(f"Result metadata: {', '.join(parts)}")
-                except Exception:
-                    pass
-                download_job_geotiff(results, out_path, out_dir)
-                size_mb = os.path.getsize(out_path) / (1024 * 1024) if os.path.isfile(out_path) else 0
-                self._log_signal.emit(f"Downloaded {size_mb:.1f} MB to {out_path}")
-            except Exception as e:
-                last_err.append(str(e))
-                self._log_signal.emit(f"Download error: {e}")
-
-        def _check_done():
-            if os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
-                timer.stop()
-                self._add_tif_to_map(out_path, job_id)
-                self.download_btn.setEnabled(True)
-            elif not t.is_alive():
-                timer.stop()
-                detail = f" {last_err[-1]}" if last_err else ""
-                self.log_text.append(f"Download failed.{detail}")
-                self.download_btn.setEnabled(True)
-
-        t = threading.Thread(target=_worker, daemon=True)
-        t.start()
-        timer = QTimer(self)
-        timer.timeout.connect(_check_done)
-        timer.start(1000)
-
-    def _add_tif_to_map(self, path, job_id):
-        """Add a GeoTIFF to QGIS layers."""
-        from qgis.core import QgsProject, QgsRasterLayer
-
-        from ..core.qgis_layer_tree import (
-            add_map_layer_to_pwtt_job_group,
-            pwtt_damage_layer_name,
-        )
-        from ..core.qgis_output_style import damage_threshold_from_job_meta, style_pwtt_raster_layer
-
-        backend_id = "openeo"
-        label = pwtt_damage_layer_name(job_id, backend_id)
-        layer = QgsRasterLayer(path, label, "gdal")
-        if layer.isValid():
-            thr = damage_threshold_from_job_meta(path)
-            style_pwtt_raster_layer(layer, damage_threshold=thr)
-            add_map_layer_to_pwtt_job_group(QgsProject.instance(), layer, job_id, backend_id)
-            self.log_text.append(f"Layer added: {label}")
-        else:
-            self.log_text.append("Failed to load layer \u2014 file may be invalid.")
-
-    def _footprints_for_selected(self):
-        """OSM buildings + zonal mean T-stat for the downloaded openEO result raster."""
-        job_id = self._get_selected_remote_id()
-        if not job_id:
-            return
-        out_dir, tif_path, gpkg_path = self._remote_job_local_paths(job_id)
-        if not os.path.isfile(tif_path) or os.path.getsize(tif_path) == 0:
-            QMessageBox.information(
-                self, "PWTT",
-                "Download the result GeoTIFF first using \u201cDownload && Add to Map\u201d.",
-            )
-            return
-        if not _ensure_footprint_dependencies(self):
-            return
-        from ..core.utils import raster_bounds_to_aoi_wkt
-
-        aoi_wkt = raster_bounds_to_aoi_wkt(tif_path)
-        if not aoi_wkt:
-            QMessageBox.warning(
-                self, "PWTT",
-                "Could not read raster extent (missing CRS or rasterio unavailable).",
-            )
-            return
-        if os.path.isfile(gpkg_path) and os.path.getsize(gpkg_path) > 0:
-            reply = QMessageBox.question(
-                self, "PWTT",
-                f"Footprints file already exists:\n{gpkg_path}\n\nOverwrite and recompute?",
-                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-            )
-            if reply == QMessageBox.Cancel:
-                return
-            if reply == QMessageBox.No:
-                self._add_footprints_layer(gpkg_path, job_id)
-                return
-
-        os.makedirs(out_dir, exist_ok=True)
-        self.footprints_btn.setEnabled(False)
-        self.log_text.append(f"Computing OSM building footprints for {job_id}\u2026")
-        last_err = []
-        done = []
-
-        def _worker():
-            try:
-                from ..core.footprints import compute_footprints
-
-                def _prog(pct, msg):
-                    self._log_signal.emit(f"[{pct}%] {msg}")
-
-                compute_footprints(
-                    tif_path,
-                    aoi_wkt,
-                    gpkg_path,
-                    progress_callback=_prog,
-                )
-                done.append(True)
-            except Exception as e:
-                last_err.append(str(e))
-                self._log_signal.emit(f"Footprints error: {e}")
-
-        def _check_done():
-            if t.is_alive():
-                return
-            timer.stop()
-            self.footprints_btn.setEnabled(True)
-            if last_err:
-                return
-            if done and os.path.isfile(gpkg_path) and os.path.getsize(gpkg_path) > 0:
-                self.log_text.append(f"Footprints saved: {gpkg_path}")
-                self._add_footprints_layer(gpkg_path, job_id)
-            else:
-                self.log_text.append("Footprints step finished but output file is missing.")
-
-        t = threading.Thread(target=_worker, daemon=True)
-        t.start()
-        timer = QTimer(self)
-        timer.timeout.connect(_check_done)
-        timer.start(400)
-
-    def _add_footprints_layer(self, path, job_id):
-        from qgis.core import QgsProject, QgsVectorLayer
-
-        from ..core.qgis_layer_tree import (
-            add_map_layer_to_pwtt_job_group,
-            pwtt_footprints_layer_name,
-        )
-        from ..core.qgis_output_style import style_pwtt_footprints_layer
-
-        backend_id = "openeo"
-        label = pwtt_footprints_layer_name(job_id, backend_id, "current_osm")
-        layer = QgsVectorLayer(path, label, "ogr")
-        if layer.isValid():
-            style_pwtt_footprints_layer(layer)
-            add_map_layer_to_pwtt_job_group(QgsProject.instance(), layer, job_id, backend_id)
-            self.log_text.append(f"Layer added: {label}")
-        else:
-            self.log_text.append("Failed to load footprints GeoPackage.")
-
-    # ── Delete remote ────────────────────────────────────────────────────────
-
-    def _delete_selected(self):
-        job_id = self._get_selected_remote_id()
-        if not job_id or not self._conn:
-            return
-        reply = QMessageBox.question(
-            self, "PWTT",
-            f"Delete remote openEO job {job_id}?\n\nThis cannot be undone.",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            return
-        try:
-            job = self._conn.job(job_id)
-            status = job.status()
-            job.delete()
-            self.log_text.append(f"Deleted remote job {job_id} (was {status})")
-            self._refresh_jobs()
-        except Exception as e:
-            self.log_text.append(f"Delete failed: {e}")
-            QMessageBox.warning(self, "PWTT", f"Failed to delete: {e}")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  PWTTControlsDock  — backend, credentials, AOI, parameters, output, run
-# ═══════════════════════════════════════════════════════════════════════════════
+from .backend_auth import (
+    create_and_auth_backend as backend_auth_create_and_auth_backend,
+    ensure_footprint_dependencies,
+    is_message_box_yes,
+)
+from .dock_common import BACKENDS, dock_title, job_footprints_sources
 
 class PWTTControlsDock(QDockWidget):
     """Dockable controls panel: backend, credentials, AOI, parameters, output, run."""
 
     def __init__(self, iface, plugin_dir, jobs_dock, parent=None):
-        super().__init__(_dock_title("PWTT \u2014 Damage Detection", plugin_dir), parent)
+        super().__init__(dock_title("PWTT \u2014 Damage Detection", plugin_dir), parent)
         self.setObjectName("PWTTControlsDock")
         self.setAllowedAreas(Qt.AllDockWidgetAreas)
         self.iface = iface
@@ -2414,14 +167,75 @@ class PWTTControlsDock(QDockWidget):
         self.cred_stacked.addWidget(gee_page)
 
         local_page = QWidget()
-        local_layout = QFormLayout(local_page)
+        local_outer = QVBoxLayout(local_page)
+        local_outer.setContentsMargins(0, 0, 0, 0)
+        self.local_source_combo = QComboBox()
+        self.local_source_combo.addItem(
+            "Copernicus Data Space (CDSE)", "cdse"
+        )
+        self.local_source_combo.addItem(
+            "ASF (Earthdata Login)", "asf"
+        )
+        self.local_source_combo.addItem(
+            "Microsoft Planetary Computer", "pc"
+        )
+        self.local_source_combo.setToolTip(
+            "Where to download Sentinel-1 IW GRD for local processing.\n"
+            "ASF and Planetary Computer avoid CDSE cold-storage delays."
+        )
+        local_outer.addWidget(QLabel("GRD data source:"))
+        local_outer.addWidget(self.local_source_combo)
+
+        self.local_cred_stack = QStackedWidget()
+        cdse_page = QWidget()
+        cdse_form = QFormLayout(cdse_page)
         self.cdse_username = QLineEdit()
         self.cdse_username.setPlaceholderText("CDSE username")
-        local_layout.addRow("Username:", self.cdse_username)
+        cdse_form.addRow("Username:", self.cdse_username)
         self.cdse_password = QLineEdit()
         self.cdse_password.setEchoMode(QLineEdit.Password)
         self.cdse_password.setPlaceholderText("CDSE password")
-        local_layout.addRow("Password:", self.cdse_password)
+        cdse_form.addRow("Password:", self.cdse_password)
+        self.local_cred_stack.addWidget(cdse_page)
+
+        asf_page = QWidget()
+        asf_form = QFormLayout(asf_page)
+        self.earthdata_username = QLineEdit()
+        self.earthdata_username.setPlaceholderText("NASA Earthdata username")
+        asf_form.addRow("Earthdata username:", self.earthdata_username)
+        self.earthdata_password = QLineEdit()
+        self.earthdata_password.setEchoMode(QLineEdit.Password)
+        self.earthdata_password.setPlaceholderText("Earthdata password")
+        asf_form.addRow("Earthdata password:", self.earthdata_password)
+        asf_hint = QLabel(
+            "<a href=\"https://urs.earthdata.nasa.gov/\">Earthdata Login</a> "
+            "(free). Bulk download: "
+            "<a href=\"https://bulk-download.asf.alaska.edu/help\">ASF bulk download</a>."
+        )
+        asf_hint.setOpenExternalLinks(True)
+        asf_hint.setWordWrap(True)
+        asf_form.addRow(asf_hint)
+        self.local_cred_stack.addWidget(asf_page)
+
+        pc_page = QWidget()
+        pc_form = QFormLayout(pc_page)
+        self.pc_subscription_key = QLineEdit()
+        self.pc_subscription_key.setPlaceholderText("Optional (higher rate limits)")
+        self.pc_subscription_key.setEchoMode(QLineEdit.Password)
+        pc_form.addRow("Subscription key:", self.pc_subscription_key)
+        pc_hint = QLabel(
+            "<a href=\"https://planetarycomputer.microsoft.com/dataset/sentinel-1-grd\">"
+            "Sentinel-1 GRD on Planetary Computer</a> — key optional for reads."
+        )
+        pc_hint.setOpenExternalLinks(True)
+        pc_hint.setWordWrap(True)
+        pc_form.addRow(pc_hint)
+        self.local_cred_stack.addWidget(pc_page)
+
+        local_outer.addWidget(self.local_cred_stack)
+        self.local_source_combo.currentIndexChanged.connect(
+            self._on_local_source_changed
+        )
         self.cred_stacked.addWidget(local_page)
 
         cred_layout.addWidget(self.cred_stacked)
@@ -2597,12 +411,34 @@ class PWTTControlsDock(QDockWidget):
 
     # ── Backend / credentials ─────────────────────────────────────────────────
 
+    def _local_data_source_id(self):
+        """Local GRD source: cdse | asf | pc (from combo user data)."""
+        if not hasattr(self, "local_source_combo"):
+            return "cdse"
+        v = self.local_source_combo.currentData()
+        return v if v in ("cdse", "asf", "pc") else "cdse"
+
+    def _on_local_source_changed(self, _index=None):
+        """Swap credential fields and refresh deps when Local source changes."""
+        if hasattr(self, "local_cred_stack") and hasattr(self, "local_source_combo"):
+            self.local_cred_stack.setCurrentIndex(self.local_source_combo.currentIndex())
+        # Persist immediately so LocalBackend.check_dependencies() matches the UI before Run.
+        if hasattr(self, "local_source_combo"):
+            s = QgsSettings()
+            s.beginGroup("PWTT")
+            s.setValue("local_data_source", self._local_data_source_id())
+            s.endGroup()
+        if self.backend_combo.currentData() == "local":
+            self._on_backend_changed(self.backend_combo.currentIndex())
+            self._refresh_cred_storage_indicator()
+
     def _on_backend_changed(self, index):
         from ..core import deps
         backend_id = self.backend_combo.currentData()
         self.cred_stacked.setCurrentIndex([b[0] for b in BACKENDS].index(backend_id))
 
-        missing_imports, pip_names = deps.backend_missing(backend_id)
+        local_src = self._local_data_source_id() if backend_id == "local" else None
+        missing_imports, pip_names = deps.backend_missing(backend_id, local_src)
         self._pending_pip_install = pip_names  # stash for install button
 
         if missing_imports:
@@ -2637,6 +473,9 @@ class PWTTControlsDock(QDockWidget):
         gee = (s.value("gee_project", "") or "").strip()
         cu = (s.value("cdse_username", "") or "").strip()
         cp = (s.value("cdse_password", "") or "").strip()
+        eu = (s.value("earthdata_username", "") or "").strip()
+        ep = (s.value("earthdata_password", "") or "").strip()
+        pc_k = (s.value("pc_subscription_key", "") or "").strip()
         s.endGroup()
         return {
             "openeo_id": bool(cid),
@@ -2644,6 +483,9 @@ class PWTTControlsDock(QDockWidget):
             "gee_project": bool(gee),
             "cdse_user": bool(cu),
             "cdse_pass": bool(cp),
+            "earthdata_user": bool(eu),
+            "earthdata_pass": bool(ep),
+            "pc_key": bool(pc_k),
         }
 
     def _refresh_cred_storage_indicator(self):
@@ -2680,26 +522,50 @@ class PWTTControlsDock(QDockWidget):
                 )
                 self.cred_storage_label.setStyleSheet("color: gray; font-size: 0.9em;")
         elif bid == "local":
-            if snap["cdse_user"] and snap["cdse_pass"]:
-                self.cred_storage_label.setText(
-                    "Stored: CDSE username & password in QGIS settings."
-                )
-                self.cred_storage_label.setStyleSheet("color: #2e7d32; font-size: 0.9em;")
-            elif snap["cdse_user"]:
-                self.cred_storage_label.setText(
-                    "Partial: username in settings; password not saved."
-                )
-                self.cred_storage_label.setStyleSheet("color: #e65100; font-size: 0.9em;")
-            elif snap["cdse_pass"]:
-                self.cred_storage_label.setText(
-                    "Partial: password in settings; username not saved."
-                )
-                self.cred_storage_label.setStyleSheet("color: #e65100; font-size: 0.9em;")
+            src = self._local_data_source_id()
+            if src == "cdse":
+                if snap["cdse_user"] and snap["cdse_pass"]:
+                    self.cred_storage_label.setText(
+                        "Stored: CDSE username & password in QGIS settings."
+                    )
+                    self.cred_storage_label.setStyleSheet("color: #2e7d32; font-size: 0.9em;")
+                elif snap["cdse_user"] or snap["cdse_pass"]:
+                    self.cred_storage_label.setText(
+                        "Partial: incomplete CDSE credentials in settings."
+                    )
+                    self.cred_storage_label.setStyleSheet("color: #e65100; font-size: 0.9em;")
+                else:
+                    self.cred_storage_label.setText(
+                        "Not stored: no CDSE credentials in QGIS settings."
+                    )
+                    self.cred_storage_label.setStyleSheet("color: gray; font-size: 0.9em;")
+            elif src == "asf":
+                if snap["earthdata_user"] and snap["earthdata_pass"]:
+                    self.cred_storage_label.setText(
+                        "Stored: Earthdata username & password in QGIS settings."
+                    )
+                    self.cred_storage_label.setStyleSheet("color: #2e7d32; font-size: 0.9em;")
+                elif snap["earthdata_user"] or snap["earthdata_pass"]:
+                    self.cred_storage_label.setText(
+                        "Partial: incomplete Earthdata credentials in settings."
+                    )
+                    self.cred_storage_label.setStyleSheet("color: #e65100; font-size: 0.9em;")
+                else:
+                    self.cred_storage_label.setText(
+                        "Not stored: no Earthdata credentials in QGIS settings."
+                    )
+                    self.cred_storage_label.setStyleSheet("color: gray; font-size: 0.9em;")
             else:
-                self.cred_storage_label.setText(
-                    "Not stored: no CDSE credentials in QGIS settings."
-                )
-                self.cred_storage_label.setStyleSheet("color: gray; font-size: 0.9em;")
+                if snap["pc_key"]:
+                    self.cred_storage_label.setText(
+                        "Stored: Planetary Computer subscription key in settings (optional)."
+                    )
+                    self.cred_storage_label.setStyleSheet("color: #2e7d32; font-size: 0.9em;")
+                else:
+                    self.cred_storage_label.setText(
+                        "No PC key stored (optional). Anonymous access often works."
+                    )
+                    self.cred_storage_label.setStyleSheet("color: gray; font-size: 0.9em;")
         else:
             self.cred_storage_label.clear()
             self.cred_storage_label.setStyleSheet("font-size: 0.9em;")
@@ -2724,8 +590,12 @@ class PWTTControlsDock(QDockWidget):
             return {"project": self.gee_project.text().strip()}
         if backend_id == "local":
             return {
+                "source": self._local_data_source_id(),
                 "username": self.cdse_username.text().strip(),
                 "password": self.cdse_password.text(),
+                "earthdata_username": self.earthdata_username.text().strip(),
+                "earthdata_password": self.earthdata_password.text(),
+                "pc_subscription_key": self.pc_subscription_key.text().strip(),
             }
         return {}
 
@@ -2866,7 +736,7 @@ class PWTTControlsDock(QDockWidget):
         if job.get("post_interval"):
             self.post_interval.setValue(job["post_interval"])
 
-        fp_sources = _job_footprints_sources(job)
+        fp_sources = job_footprints_sources(job)
         self.include_footprints.setChecked(bool(fp_sources))
         self.fp_current_osm.setChecked("current_osm" in fp_sources)
         self.fp_historical_war_start.setChecked("historical_war_start" in fp_sources)
@@ -2928,6 +798,15 @@ class PWTTControlsDock(QDockWidget):
         self.openeo_verify_ssl.blockSignals(False)
         self.cdse_username.setText(s.value("cdse_username", ""))
         self.cdse_password.setText(s.value("cdse_password", ""))
+        self.earthdata_username.setText(s.value("earthdata_username", ""))
+        self.earthdata_password.setText(s.value("earthdata_password", ""))
+        self.pc_subscription_key.setText(s.value("pc_subscription_key", ""))
+        lsrc = (s.value("local_data_source", "cdse") or "cdse").strip().lower()
+        lidx = {"cdse": 0, "asf": 1, "pc": 2}.get(lsrc, 0)
+        self.local_source_combo.blockSignals(True)
+        self.local_source_combo.setCurrentIndex(lidx)
+        self.local_source_combo.blockSignals(False)
+        self.local_cred_stack.setCurrentIndex(lidx)
         out = s.value("output_dir", "")
         if out:
             self.output_dir.setFilePath(out)
@@ -2949,6 +828,10 @@ class PWTTControlsDock(QDockWidget):
         s.setValue("openeo_verify_ssl", self.openeo_verify_ssl.isChecked())
         s.setValue("cdse_username", self.cdse_username.text())
         s.setValue("cdse_password", self.cdse_password.text())
+        s.setValue("earthdata_username", self.earthdata_username.text())
+        s.setValue("earthdata_password", self.earthdata_password.text())
+        s.setValue("pc_subscription_key", self.pc_subscription_key.text())
+        s.setValue("local_data_source", self._local_data_source_id())
         s.setValue("output_dir", self.output_dir.filePath())
         s.setValue("damage_threshold", self.damage_threshold_spin.value())
         s.setValue("gee_map_preview", self.gee_map_preview_cb.isChecked())
@@ -2982,20 +865,21 @@ class PWTTControlsDock(QDockWidget):
             return
 
         backend_id = self.backend_combo.currentData()
+        local_src = self._local_data_source_id() if backend_id == "local" else None
 
         # ── Check backend dependencies (offer install if missing) ─────────
-        missing, pip_names = deps.backend_missing(backend_id)
+        missing, pip_names = deps.backend_missing(backend_id, local_src)
         if missing:
             reply = QMessageBox.question(
                 self, "PWTT",
                 f"Missing packages: {', '.join(pip_names)}\n\nInstall now?",
                 QMessageBox.Yes | QMessageBox.No,
             )
-            if _is_message_box_yes(reply):
+            if is_message_box_yes(reply):
                 if not deps.install_with_dialog(pip_names, parent=self):
                     return
                 # Re-check after install
-                missing, _ = deps.backend_missing(backend_id)
+                missing, _ = deps.backend_missing(backend_id, local_src)
             if missing:
                 QMessageBox.warning(
                     self, "PWTT",
@@ -3007,25 +891,18 @@ class PWTTControlsDock(QDockWidget):
 
         # ── Check footprint dependencies if enabled ───────────────────────
         if self.include_footprints.isChecked():
-            if not _ensure_footprint_dependencies(self):
+            if not ensure_footprint_dependencies(self):
                 return
 
-        # ── Create backend and authenticate ───────────────────────────────
-        BackendClass = _get_backend_class(backend_id)
-        if BackendClass is None:
-            QMessageBox.warning(
-                self, "PWTT",
-                f"Backend '{backend_id}' is not available.",
-            )
-            return
-        backend = BackendClass()
-        ok, msg = backend.check_dependencies()
-        if not ok:
-            QMessageBox.warning(self, "PWTT", msg)
-            return
+        # ── Create backend and authenticate (single source of truth) ──────
         credentials = self._get_credentials(backend_id)
         try:
-            _auth_with_progress(backend, credentials, backend_id, parent=self)
+            backend = backend_auth_create_and_auth_backend(
+                backend_id,
+                parent=self,
+                controls_dock=self,
+                local_data_source=credentials.get("source") if backend_id == "local" else None,
+            )
         except RuntimeError as e:
             if str(e) != "Authentication cancelled.":
                 QMessageBox.warning(self, "PWTT", str(e))
@@ -3069,6 +946,7 @@ class PWTTControlsDock(QDockWidget):
             footprints_sources=fp_sources,
             damage_threshold=self.damage_threshold_spin.value(),
             gee_viz=self.gee_map_preview_cb.isChecked() if backend_id == "gee" else False,
+            data_source=self._local_data_source_id() if backend_id == "local" else "cdse",
         )
         # Output folder: base_dir / job_id
         job["output_dir"] = os.path.join(base_dir, job["id"])

@@ -57,6 +57,19 @@ BACKEND_DEPS = {
     },
 }
 
+# Extra imports per local GRD source (import_name -> pip package for install dialog)
+LOCAL_SOURCE_EXTRA_IMPORTS = {
+    "cdse": [],
+    "asf": ["asf_search"],  # PyPI: asf-search
+    "pc": ["planetary_computer", "pystac_client"],
+}
+
+LOCAL_SOURCE_PIP_NAMES = {
+    "asf_search": "asf-search",
+    "planetary_computer": "planetary-computer",
+    "pystac_client": "pystac-client",
+}
+
 FOOTPRINT_DEPS = {
     "import": ["geopandas", "rasterstats"],
     "pip":    ["rasterstats"],  # geopandas is QGIS-provided
@@ -187,8 +200,37 @@ def find_missing(import_names):
     return missing
 
 
-def backend_missing(backend_id):
+def local_backend_missing(local_data_source: str = "cdse"):
+    """Return ``(missing_import_names, pip_names_to_install)`` for Local Processing.
+
+    *local_data_source* is ``cdse``, ``asf``, or ``pc``.
+    """
+    src = (local_data_source or "cdse").strip().lower()
+    if src not in ("cdse", "asf", "pc"):
+        src = "cdse"
+    base = BACKEND_DEPS["local"]["import"]
+    extra = LOCAL_SOURCE_EXTRA_IMPORTS.get(src, [])
+    names = list(base) + list(extra)
+    m = find_missing(names)
+    if not m:
+        return [], []
+    pip_out = []
+    for imp in m:
+        pip_out.append(LOCAL_SOURCE_PIP_NAMES.get(imp, imp))
+    # De-dup while preserving order
+    seen = set()
+    pip_unique = []
+    for p in pip_out:
+        if p not in seen:
+            seen.add(p)
+            pip_unique.append(p)
+    return m, pip_unique
+
+
+def backend_missing(backend_id, local_data_source=None):
     """Return ``(missing_import_names, pip_names_to_install)``."""
+    if backend_id == "local":
+        return local_backend_missing(local_data_source or "cdse")
     info = BACKEND_DEPS.get(backend_id)
     if not info:
         return [], []
