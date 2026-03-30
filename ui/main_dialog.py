@@ -69,6 +69,8 @@ class PWTTControlsDock(QDockWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self._sync_aoi_rubber_band()
+        # Re-probe imports (e.g. deps installed via MacOS/python while QGIS stayed open).
+        self._on_backend_changed(self.backend_combo.currentIndex())
 
     def hideEvent(self, event):
         super().hideEvent(event)

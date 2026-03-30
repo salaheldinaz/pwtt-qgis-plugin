@@ -31,6 +31,73 @@ def _deps_dir():
 
 # ── sys.path management ─────────────────────────────────────────────────────
 
+_macos_bundle_site_injected = False
+
+
+def _inject_macos_bundle_python_site_packages():
+    """Once: append site-packages dirs reported by ``Contents/MacOS/python``.
+
+    The QGIS GUI process often omits paths that ``MacOS/python -m pip`` uses, so
+    packages installed from the terminal look fine but ``import`` fails inside the
+    plugin and the panel keeps showing "Missing".
+    """
+    global _macos_bundle_site_injected
+    if _macos_bundle_site_injected:
+        return
+    if sys.platform != "darwin":
+        _macos_bundle_site_injected = True
+        return
+    ex = getattr(sys, "executable", "") or ""
+    marker = "/Contents/MacOS/"
+    if marker not in ex:
+        _macos_bundle_site_injected = True
+        return
+    app_root = os.path.normpath(ex.split(marker)[0] + "/Contents")
+    mac_py = None
+    for name in ("python", "python3"):
+        p = os.path.join(app_root, "MacOS", name)
+        if os.path.isfile(p):
+            mac_py = p
+            break
+    if not mac_py:
+        _macos_bundle_site_injected = True
+        return
+    try:
+        out = subprocess.check_output(
+            [
+                mac_py,
+                "-c",
+                "import os, site\n"
+                "paths = list(site.getsitepackages())\n"
+                "u = site.getusersitepackages()\n"
+                "if u:\n"
+                "    paths.append(u)\n"
+                "for p in paths:\n"
+                "    if p and os.path.isdir(p):\n"
+                "        print(p)",
+            ],
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.CalledProcessError, OSError, FileNotFoundError):
+        _macos_bundle_site_injected = True
+        return
+    app_prefix = app_root + os.sep
+    for line in out.splitlines():
+        p = line.strip()
+        if not p or p in sys.path:
+            continue
+        try:
+            norm = os.path.normpath(p) + os.sep
+        except Exception:
+            continue
+        if not norm.startswith(app_prefix):
+            continue
+        sys.path.append(p.rstrip(os.sep))
+    _macos_bundle_site_injected = True
+
+
 def ensure_on_path():
     """Append the deps directory to *sys.path* (idempotent).
 
@@ -38,6 +105,7 @@ def ensure_on_path():
     This means even if *uv* pulls in numpy as a transitive dep, QGIS's
     numpy is found first.
     """
+    _inject_macos_bundle_python_site_packages()
     d = _deps_dir()
     if os.path.isdir(d) and d not in sys.path:
         sys.path.append(d)
@@ -292,12 +360,13 @@ def _install_into_target(pip_names, target_dir):
         marker = "/Contents/MacOS/"
         if marker in ex:
             app_root = ex.split(marker)[0] + "/Contents"
+            # Prefer MacOS/python first: same binary users run for ``-m pip`` in Terminal.
             for candidate in (
+                "MacOS/python",
+                "MacOS/python3",
                 f"Frameworks/Python.framework/Versions/{sys.version_info.major}.{sys.version_info.minor}/bin/python3",
                 f"Frameworks/bin/python{sys.version_info.major}.{sys.version_info.minor}",
                 "Frameworks/bin/python3",
-                "MacOS/python",
-                "MacOS/python3",
                 "MacOS/bin/python3",
             ):
                 p = os.path.join(app_root, candidate)
