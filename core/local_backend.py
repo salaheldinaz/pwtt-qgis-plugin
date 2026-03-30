@@ -85,12 +85,20 @@ def _aoi_utm_grid(
 
 
 def _effective_src_geo(src) -> Tuple[object, object]:
-    """Affine + CRS for ``rasterio.warp.reproject`` (handles GCP-only GRD COGs)."""
+    """Affine + CRS for ``rasterio.warp.reproject`` (handles GCP-only GRD COGs).
+
+    Prefer **GCP** georeferencing when the file is pixel-index space (identity transform
+    or no CRS): some GDAL builds attach GeoKeys alongside GCPs; using the affine then
+    ``WarpedVRT`` can raise ``GDALWarpOptions.Validate(): no options currently initialized``.
+    """
     from rasterio.transform import from_gcps
 
-    if src.crs is not None and not _is_identity_pixel_transform(src.transform):
-        return src.transform, src.crs
     gcps, gcrs = src.gcps
+    identity = _is_identity_pixel_transform(src.transform)
+    if gcps and gcrs is not None and (src.crs is None or identity):
+        return from_gcps(gcps), gcrs
+    if src.crs is not None and not identity:
+        return src.transform, src.crs
     if gcps and gcrs is not None:
         return from_gcps(gcps), gcrs
     if src.crs is not None:
@@ -106,22 +114,15 @@ def _warp_band_to_aoi_grid(
     dst_width: int,
     resampling,
 ) -> np.ndarray:
-    """Warp one band onto the AOI UTM grid as ``float32`` (COG-friendly when georef is affine)."""
+    """Warp one band onto the AOI UTM grid as ``float32``.
+
+    Uses full-band read + ``reproject`` only. ``WarpedVRT`` is avoided: it fails on some
+    PC Sentinel-1 COGs (mixed GeoTIFF/GCP metadata) with GDALWarpOptions errors on Linux.
+    """
     import rasterio
-    from rasterio.vrt import WarpedVRT
     from rasterio.warp import reproject
 
     with rasterio.open(path) as src:
-        if src.crs is not None and not _is_identity_pixel_transform(src.transform):
-            with WarpedVRT(
-                src,
-                crs=dst_crs,
-                transform=dst_transform,
-                width=dst_width,
-                height=dst_height,
-                resampling=resampling,
-            ) as vrt:
-                return vrt.read(1).astype(np.float32, copy=False)
         src_transform, src_crs = _effective_src_geo(src)
         arr = src.read(1).astype(np.float32, copy=False)
     out = np.empty((dst_height, dst_width), dtype=np.float32)
