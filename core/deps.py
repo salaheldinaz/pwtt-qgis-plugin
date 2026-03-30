@@ -276,19 +276,33 @@ def _install_into_target(pip_names, target_dir):
             p = os.path.join(pfx, name)
             if os.path.isfile(p):
                 py_candidates.append(p)
-    # On macOS QGIS.app the Python lives under Contents/Frameworks/
+        # Windows (OSGeo4W / standalone installer): python is under apps\Python312\, not bin\python3
+        if sys.platform == "win32":
+            vi = sys.version_info
+            for rel in (
+                ("apps", f"Python{vi.major}{vi.minor}", "python.exe"),
+                ("apps", f"Python{vi.major}.{vi.minor}", "python.exe"),
+            ):
+                p = os.path.join(pfx, *rel)
+                if os.path.isfile(p) and p not in py_candidates:
+                    py_candidates.append(p)
+    # On macOS the bundle may be QGIS.app, QGIS-LTR.app, etc. — not only "QGIS.app"
     ex = getattr(sys, "executable", "") or ""
-    if "/QGIS.app/" in ex:
-        app_root = ex.split("/QGIS.app/")[0] + "/QGIS.app/Contents"
-        for candidate in (
-            f"Frameworks/Python.framework/Versions/{sys.version_info.major}.{sys.version_info.minor}/bin/python3",
-            f"Frameworks/bin/python{sys.version_info.major}.{sys.version_info.minor}",
-            "Frameworks/bin/python3",
-            "MacOS/bin/python3",
-        ):
-            p = os.path.join(app_root, candidate)
-            if os.path.isfile(p) and p not in py_candidates:
-                py_candidates.append(p)
+    if sys.platform == "darwin":
+        marker = "/Contents/MacOS/"
+        if marker in ex:
+            app_root = ex.split(marker)[0] + "/Contents"
+            for candidate in (
+                f"Frameworks/Python.framework/Versions/{sys.version_info.major}.{sys.version_info.minor}/bin/python3",
+                f"Frameworks/bin/python{sys.version_info.major}.{sys.version_info.minor}",
+                "Frameworks/bin/python3",
+                "MacOS/python",
+                "MacOS/python3",
+                "MacOS/bin/python3",
+            ):
+                p = os.path.join(app_root, candidate)
+                if os.path.isfile(p) and p not in py_candidates:
+                    py_candidates.append(p)
     # Only add sys.executable if it's actually a Python interpreter, not the QGIS binary
     if ex and os.path.isfile(ex) and ex not in py_candidates:
         basename = os.path.basename(ex).lower()
@@ -300,12 +314,16 @@ def _install_into_target(pip_names, target_dir):
         attempts.append([py] + pip_tail)
 
     if uv:
-        attempts.append(
-            [uv, "pip", "install", "--upgrade",
-             "--target", target_dir,
-             "--python-version", py_ver]
-            + list(pip_names)
-        )
+        # Prefer the same interpreter QGIS uses so wheels match; else uv's standalone Python.
+        uv_base = [
+            uv, "pip", "install", "--upgrade", "--target", target_dir,
+        ]
+        if py_candidates:
+            attempts.append(uv_base + ["--python", py_candidates[0]] + list(pip_names))
+        else:
+            attempts.append(
+                uv_base + ["--python-version", py_ver] + list(pip_names)
+            )
 
     attempts.append(
         ["python3", "-m", "pip", "install", "--upgrade", "--target", target_dir]
