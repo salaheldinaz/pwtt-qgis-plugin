@@ -3,12 +3,104 @@
 
 import os
 import json
+import sys
 import tempfile
 import time
 import requests
 from typing import Optional
 
 from .utils import wkt_to_bbox
+
+_proj_data_dir_searched = False
+_proj_data_dir_result = None  # str path, or None if not found
+
+
+def _discover_proj_data_dir():
+    """Directory containing ``proj.db`` for pip-installed pyproj/geopandas inside QGIS."""
+    global _proj_data_dir_searched, _proj_data_dir_result
+    if _proj_data_dir_searched:
+        return _proj_data_dir_result
+    _proj_data_dir_searched = True
+
+    def _ok(d):
+        return bool(d) and os.path.isfile(os.path.join(d, "proj.db"))
+
+    for key in ("PROJ_DATA", "PROJ_LIB"):
+        v = os.environ.get(key)
+        if _ok(v):
+            _proj_data_dir_result = os.path.abspath(v)
+            return _proj_data_dir_result
+
+    candidates = []
+    try:
+        from qgis.core import QgsApplication
+
+        pfx = (QgsApplication.prefixPath() or "").strip()
+        if pfx:
+            candidates.append(os.path.join(pfx, "share", "proj"))
+        try:
+            pkg = QgsApplication.pkgDataPath()
+            if pkg:
+                pkg = str(pkg).strip()
+                candidates.extend(
+                    [
+                        os.path.normpath(os.path.join(pkg, "..", "..", "share", "proj")),
+                        os.path.normpath(os.path.join(pkg, "..", "share", "proj")),
+                        os.path.join(pkg, "proj"),
+                    ]
+                )
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    sp = (getattr(sys, "prefix", None) or "").strip()
+    if sp:
+        candidates.append(os.path.join(sp, "share", "proj"))
+
+    ex = (getattr(sys, "executable", None) or "").replace("\\", "/")
+    if sys.platform == "darwin" and "/Contents/MacOS/" in ex:
+        root = ex.split("/Contents/MacOS/")[0] + "/Contents"
+        candidates.extend(
+            [
+                os.path.join(root, "Resources", "proj"),
+                os.path.join(root, "share", "proj"),
+            ]
+        )
+
+    candidates.append("/usr/share/proj")
+
+    seen = set()
+    for c in candidates:
+        if not c:
+            continue
+        c = os.path.normpath(c)
+        if c in seen:
+            continue
+        seen.add(c)
+        if _ok(c):
+            _proj_data_dir_result = c
+            return _proj_data_dir_result
+    _proj_data_dir_result = None
+    return None
+
+
+def _ensure_proj_data_for_geopandas():
+    """Pip pyproj in PWTT/deps does not see QGIS's PROJ DB unless PROJ_DATA / pyproj.datadir are set."""
+    path = _discover_proj_data_dir()
+    if not path:
+        return
+    os.environ["PROJ_DATA"] = path
+    prev_lib = os.environ.get("PROJ_LIB")
+    if not prev_lib or not os.path.isfile(os.path.join(prev_lib, "proj.db")):
+        os.environ["PROJ_LIB"] = path
+    try:
+        import pyproj
+
+        pyproj.datadir.set_data_dir(path)
+    except Exception:
+        pass
+
 
 _OVERPASS_ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
@@ -133,6 +225,7 @@ def compute_footprints(
     If date_iso (YYYY-MM-DD) is provided, fetch the historical OSM snapshot for that date
     instead of the current OSM data.
     """
+    _ensure_proj_data_for_geopandas()
     try:
         import geopandas as gpd
     except ImportError as e:
