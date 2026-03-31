@@ -116,16 +116,29 @@ def _warp_band_to_aoi_grid(
 ) -> np.ndarray:
     """Warp one band onto the AOI UTM grid as ``float32``.
 
-    Uses full-band read + ``reproject`` only. ``WarpedVRT`` is avoided: it fails on some
-    PC Sentinel-1 COGs (mixed GeoTIFF/GCP metadata) with GDALWarpOptions errors on Linux.
+    Prefer ``reproject`` from a **dataset band** (no ``src_transform``/``src_crs``): GDAL
+    then uses the file's native transformer (GCPs + GeoKeys). Passing ``from_gcps`` +
+    ndarray triggers ``GDALWarpOptions.Validate(): no options currently initialized`` on
+    some Linux GDAL builds. Fallback: full read + explicit affine/GCP transform.
     """
     import rasterio
     from rasterio.warp import reproject
 
+    out = np.empty((dst_height, dst_width), dtype=np.float32)
     with rasterio.open(path) as src:
+        try:
+            reproject(
+                rasterio.band(src, 1),
+                out,
+                dst_transform=dst_transform,
+                dst_crs=dst_crs,
+                resampling=resampling,
+            )
+            return out
+        except Exception:
+            pass
         src_transform, src_crs = _effective_src_geo(src)
         arr = src.read(1).astype(np.float32, copy=False)
-    out = np.empty((dst_height, dst_width), dtype=np.float32)
     reproject(
         arr,
         out,
