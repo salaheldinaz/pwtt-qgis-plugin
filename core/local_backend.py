@@ -84,26 +84,13 @@ def _aoi_utm_grid(
     return dst_crs, dst_transform, height, width
 
 
-def _effective_src_geo(src) -> Tuple[object, object]:
-    """Affine + CRS for ``rasterio.warp.reproject`` (handles GCP-only GRD COGs).
-
-    Prefer **GCP** georeferencing when the file is pixel-index space (identity transform
-    or no CRS): some GDAL builds attach GeoKeys alongside GCPs; using the affine then
-    ``WarpedVRT`` can raise ``GDALWarpOptions.Validate(): no options currently initialized``.
-    """
-    from rasterio.transform import from_gcps
-
+def _has_gcps(src) -> bool:
     gcps, gcrs = src.gcps
-    identity = _is_identity_pixel_transform(src.transform)
-    if gcps and gcrs is not None and (src.crs is None or identity):
-        return from_gcps(gcps), gcrs
-    if src.crs is not None and not identity:
-        return src.transform, src.crs
-    if gcps and gcrs is not None:
-        return from_gcps(gcps), gcrs
-    if src.crs is not None:
-        return src.transform, src.crs
-    raise ValueError("Raster has no usable georeferencing (affine+CRS or GCPs).")
+    return bool(gcps) and gcrs is not None
+
+
+def _has_real_affine(src) -> bool:
+    return src.crs is not None and not _is_identity_pixel_transform(src.transform)
 
 
 def _warp_band_to_aoi_grid(
@@ -116,38 +103,130 @@ def _warp_band_to_aoi_grid(
 ) -> np.ndarray:
     """Warp one band onto the AOI UTM grid as ``float32``.
 
-    Prefer ``reproject`` from a **dataset band** (no ``src_transform``/``src_crs``): GDAL
-    then uses the file's native transformer (GCPs + GeoKeys). Passing ``from_gcps`` +
-    ndarray triggers ``GDALWarpOptions.Validate(): no options currently initialized`` on
-    some Linux GDAL builds. Fallback: full read + explicit affine/GCP transform.
+    Three strategies, tried in order:
+
+    1. **GCP path** (PC Sentinel-1 COGs): pass ``gcps=`` + ``src_crs=`` to ``reproject``
+       (no ``src_transform``). This is the documented rasterio API for GCP files and
+       avoids the ``GDALWarpOptions.Validate()`` crash on Linux GDAL.
+    2. **Affine path** (CDSE / ASF .SAFE measurement TIFFs): normal ``src_transform`` +
+       ``src_crs``.
+    3. **osgeo.gdal.Warp fallback**: if both rasterio paths fail, use GDAL Python bindings
+       directly — handles GCPs natively on every platform/version.
     """
+    import logging
     import rasterio
     from rasterio.warp import reproject
 
+    _log = logging.getLogger("pwtt.warp")
+    fname = os.path.basename(path)
     out = np.empty((dst_height, dst_width), dtype=np.float32)
+
+    # --- Strategy 1: GCP-based reproject (PC COGs) ---
     with rasterio.open(path) as src:
-        try:
-            reproject(
-                rasterio.band(src, 1),
-                out,
-                dst_transform=dst_transform,
-                dst_crs=dst_crs,
-                resampling=resampling,
-            )
-            return out
-        except Exception:
-            pass
-        src_transform, src_crs = _effective_src_geo(src)
-        arr = src.read(1).astype(np.float32, copy=False)
-    reproject(
-        arr,
-        out,
-        src_transform=src_transform,
-        src_crs=src_crs,
-        dst_transform=dst_transform,
-        dst_crs=dst_crs,
-        resampling=resampling,
+        if _has_gcps(src):
+            gcps, gcrs = src.gcps
+            arr = src.read(1).astype(np.float32, copy=False)
+            try:
+                reproject(
+                    arr,
+                    out,
+                    gcps=gcps,
+                    src_crs=gcrs,
+                    dst_transform=dst_transform,
+                    dst_crs=dst_crs,
+                    resampling=resampling,
+                )
+                _log.info("%s: warped via GCP strategy", fname)
+                return out
+            except Exception as e1:
+                _log.warning("%s: GCP strategy failed: %s", fname, e1)
+
+    # --- Strategy 2: affine-based reproject (CDSE / ASF) ---
+    with rasterio.open(path) as src:
+        if _has_real_affine(src):
+            arr = src.read(1).astype(np.float32, copy=False)
+            try:
+                reproject(
+                    arr,
+                    out,
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=dst_transform,
+                    dst_crs=dst_crs,
+                    resampling=resampling,
+                )
+                _log.info("%s: warped via affine strategy", fname)
+                return out
+            except Exception as e2:
+                _log.warning("%s: affine strategy failed: %s", fname, e2)
+
+    # --- Strategy 3: osgeo.gdal.Warp (universal fallback) ---
+    _log.info("%s: falling back to osgeo.gdal.Warp", fname)
+    return _gdal_warp_band_fallback(
+        path, dst_crs, dst_transform, dst_height, dst_width, resampling
     )
+
+
+def _gdal_warp_band_fallback(
+    path: str,
+    dst_crs,
+    dst_transform,
+    dst_height: int,
+    dst_width: int,
+    resampling,
+) -> np.ndarray:
+    """Last-resort warp using ``osgeo.gdal.Warp`` — works on every GDAL build."""
+    from osgeo import gdal, osr
+
+    gdal.UseExceptions()
+
+    _RESAMP_MAP = {
+        0: gdal.GRA_NearestNeighbour,
+        1: gdal.GRA_Bilinear,
+        2: gdal.GRA_Cubic,
+        3: gdal.GRA_CubicSpline,
+        5: gdal.GRA_Average,
+    }
+    try:
+        from rasterio.enums import Resampling as _R
+        gra = _RESAMP_MAP.get(int(resampling), gdal.GRA_Bilinear)
+    except Exception:
+        gra = gdal.GRA_Bilinear
+
+    dst_crs_wkt = dst_crs.to_wkt() if hasattr(dst_crs, "to_wkt") else str(dst_crs)
+    gt = (
+        dst_transform.c,
+        dst_transform.a,
+        dst_transform.b,
+        dst_transform.f,
+        dst_transform.d,
+        dst_transform.e,
+    )
+
+    src_ds = gdal.Open(path, gdal.GA_ReadOnly)
+    if src_ds is None:
+        raise RuntimeError(f"GDAL cannot open {path}")
+
+    mem_drv = gdal.GetDriverByName("MEM")
+    dst_ds = mem_drv.Create("", dst_width, dst_height, 1, gdal.GDT_Float32)
+    dst_ds.SetGeoTransform(gt)
+    dst_ds.SetProjection(dst_crs_wkt)
+    dst_ds.GetRasterBand(1).Fill(0)
+
+    gdal.Warp(
+        dst_ds,
+        src_ds,
+        resampleAlg=gra,
+        dstSRS=dst_crs_wkt,
+        width=dst_width,
+        height=dst_height,
+        outputBounds=(gt[0], gt[3] + gt[5] * dst_height, gt[0] + gt[1] * dst_width, gt[3]),
+        outputBoundsSRS=dst_crs_wkt,
+    )
+
+    out = dst_ds.GetRasterBand(1).ReadAsArray().astype(np.float32, copy=False)
+    dst_ds = None
+    src_ds = None
     return out
 
 
