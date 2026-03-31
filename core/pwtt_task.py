@@ -28,6 +28,7 @@ class PWTTRunTask(QgsTask):
         remote_job_id=None,
         damage_threshold=3.3,
         gee_viz=False,
+        data_source=None,
     ):
         super().__init__("PWTT processing", QgsTask.CanCancel)
         self.backend = backend
@@ -49,6 +50,10 @@ class PWTTRunTask(QgsTask):
         self.remote_job_id = remote_job_id  # openEO job id for resume
         self.damage_threshold = float(damage_threshold)
         self.gee_viz = bool(gee_viz)
+        # Local GRD catalog (cdse/asf/pc); used in layer tree names.
+        self.data_source = (
+            (data_source or "").strip().lower() if data_source else None
+        )
         self.output_tif = None
         self.footprints_gpkg = None  # kept for backwards compat (first source)
         self.footprints_gpkgs = {}   # source -> gpkg path
@@ -211,25 +216,33 @@ class PWTTRunTask(QgsTask):
             from .qgis_output_style import style_pwtt_footprints_layer, style_pwtt_raster_layer
 
             backend_id = getattr(self.backend, "id", None)
+            ds = self.data_source
+            if backend_id == "local" and not ds:
+                ds = getattr(self.backend, "_data_source", None)
             project = QgsProject.instance()
-            label = pwtt_damage_layer_name(self.job_id, backend_id)
+            label = pwtt_damage_layer_name(self.job_id, backend_id, data_source=ds)
             layer = QgsRasterLayer(self.output_tif, label, "gdal")
             if layer.isValid():
                 style_pwtt_raster_layer(layer, damage_threshold=self.damage_threshold)
-                add_map_layer_to_pwtt_job_group(project, layer, self.job_id, backend_id)
+                add_map_layer_to_pwtt_job_group(
+                    project, layer, self.job_id, backend_id, data_source=ds
+                )
             for source, fp_path in self.footprints_gpkgs.items():
                 if os.path.isfile(fp_path):
                     fp_label = pwtt_footprints_layer_name(
                         self.job_id,
                         backend_id,
                         source,
+                        data_source=ds,
                         war_start=self.war_start,
                         inference_start=self.inference_start,
                     )
                     vl = QgsVectorLayer(fp_path, fp_label, "ogr")
                     if vl.isValid():
                         style_pwtt_footprints_layer(vl)
-                        add_map_layer_to_pwtt_job_group(project, vl, self.job_id, backend_id)
+                        add_map_layer_to_pwtt_job_group(
+                            project, vl, self.job_id, backend_id, data_source=ds
+                        )
             # GEE map preview must run on the main thread (webbrowser.open)
             if self.gee_viz:
                 viz_aoi = getattr(self.backend, "_viz_aoi", None)

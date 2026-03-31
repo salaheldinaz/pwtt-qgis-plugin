@@ -41,6 +41,8 @@ from .backend_auth import (
 )
 from .dock_common import STATUS_COLORS, STATUS_LABELS, dock_title, job_footprints_sources
 
+from ..core.qgis_layer_tree import job_backend_log_label
+
 # Leading "[YYYY-mm-dd HH:MM:SS] " on persisted activity lines (for color rules after strip).
 _PWTT_LOG_TS_PREFIX_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s*")
 
@@ -449,10 +451,7 @@ class PWTTJobsDock(QDockWidget):
             self.job_table.setItem(row, 0, item)
 
             # Backend
-            bname = {"openeo": "openEO", "gee": "GEE", "local": "Local"}.get(
-                job["backend_id"], job["backend_id"]
-            )
-            self.job_table.setItem(row, 1, QTableWidgetItem(bname))
+            self.job_table.setItem(row, 1, QTableWidgetItem(job_backend_log_label(job)))
 
             # Remote Job ID (e.g. openEO batch job id)
             remote_id = job.get("remote_job_id") or ""
@@ -821,13 +820,14 @@ class PWTTJobsDock(QDockWidget):
             remote_job_id=job.get("remote_job_id"),
             damage_threshold=job.get("damage_threshold", 3.3),
             gee_viz=job.get("gee_viz", False),
+            data_source=job.get("data_source")
+            if job.get("backend_id") == "local"
+            else None,
         )
 
         self._ensure_job_log_loaded(job)
         self._active_tasks[job_id] = task
-        bname = {"openeo": "openEO", "gee": "GEE", "local": "Local"}.get(
-            job["backend_id"], job["backend_id"]
-        )
+        bname = job_backend_log_label(job)
         remote_id = job.get("remote_job_id")
         log_parts = [f"Task started — backend: {bname}"]
         if remote_id:
@@ -1131,12 +1131,13 @@ class PWTTJobsDock(QDockWidget):
         )
 
         backend_id = job.get("backend_id")
+        grd_ds = job.get("data_source") if backend_id == "local" else None
         project = QgsProject.instance()
         thr = damage_threshold_from_job_meta(
             tif_path, default=float(job.get("damage_threshold", 3.3))
         )
 
-        label = pwtt_damage_layer_name(jid, backend_id)
+        label = pwtt_damage_layer_name(jid, backend_id, data_source=grd_ds)
         rlayer = QgsRasterLayer(tif_path, label, "gdal")
         if not rlayer.isValid():
             QMessageBox.warning(
@@ -1144,7 +1145,9 @@ class PWTTJobsDock(QDockWidget):
             )
             return
         style_pwtt_raster_layer(rlayer, damage_threshold=thr)
-        add_map_layer_to_pwtt_job_group(project, rlayer, jid, backend_id)
+        add_map_layer_to_pwtt_job_group(
+            project, rlayer, jid, backend_id, data_source=grd_ds
+        )
         log_parts = [f"Load Local: added {label}"]
 
         fp_items = []
@@ -1173,13 +1176,16 @@ class PWTTJobsDock(QDockWidget):
                 jid,
                 backend_id,
                 src,
+                data_source=grd_ds,
                 war_start=job.get("war_start"),
                 inference_start=job.get("inference_start"),
             )
             vl = QgsVectorLayer(pth, fp_label, "ogr")
             if vl.isValid():
                 style_pwtt_footprints_layer(vl)
-                add_map_layer_to_pwtt_job_group(project, vl, jid, backend_id)
+                add_map_layer_to_pwtt_job_group(
+                    project, vl, jid, backend_id, data_source=grd_ds
+                )
                 log_parts.append(f"Load Local: added {fp_label}")
             else:
                 log_parts.append(f"Load Local: skipped invalid footprints \u2014 {pth}")
@@ -1221,6 +1227,7 @@ class PWTTJobsDock(QDockWidget):
             return
         jid = job["id"]
         backend_id = job.get("backend_id")
+        grd_ds = job.get("data_source") if backend_id == "local" else None
         thr_default = float(job.get("damage_threshold", 3.3))
         tif_path = self._local_result_tif_path(job)
         try:
@@ -1236,7 +1243,7 @@ class PWTTJobsDock(QDockWidget):
             style_pwtt_raster_layer,
         )
 
-        expected_name = pwtt_damage_layer_name(jid, backend_id)
+        expected_name = pwtt_damage_layer_name(jid, backend_id, data_source=grd_ds)
         project = QgsProject.instance()
         matched = []
         for _lid, layer in project.mapLayers().items():
@@ -1402,17 +1409,21 @@ class PWTTJobsDock(QDockWidget):
         from ..core.qgis_output_style import style_pwtt_footprints_layer
 
         job = self._get_selected_job()
+        grd_ds = (job or {}).get("data_source") if backend_id == "local" else None
         label = pwtt_footprints_layer_name(
             job_id,
             backend_id,
             "current_osm",
+            data_source=grd_ds,
             war_start=(job or {}).get("war_start"),
             inference_start=(job or {}).get("inference_start"),
         )
         layer = QgsVectorLayer(path, label, "ogr")
         if layer.isValid():
             style_pwtt_footprints_layer(layer)
-            add_map_layer_to_pwtt_job_group(QgsProject.instance(), layer, job_id, backend_id)
+            add_map_layer_to_pwtt_job_group(
+                QgsProject.instance(), layer, job_id, backend_id, data_source=grd_ds
+            )
             msg = self._stamp_activity(f"Layer added: {label}")
             self._job_logs.setdefault(job_id, []).append(msg)
             self._schedule_activity_log_persist(job_id)

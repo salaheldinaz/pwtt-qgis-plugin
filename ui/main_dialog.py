@@ -743,9 +743,14 @@ class PWTTControlsDock(QDockWidget):
         """Populate controls from a saved job and show its AOI on the map."""
         from ..core.utils import wkt_to_bbox
 
-        # Backend
+        # Backend — for local jobs, apply saved GRD catalog (cdse/asf/pc) before switching
+        # backend so credential stack, QgsSettings, and deps match the job.
         backend_ids = [b[0] for b in BACKENDS]
         if job["backend_id"] in backend_ids:
+            if job["backend_id"] == "local":
+                ds = (job.get("data_source") or "cdse").strip().lower()
+                lidx = {"cdse": 0, "asf": 1, "pc": 2}.get(ds, 0)
+                self.local_source_combo.setCurrentIndex(lidx)
             self.backend_combo.setCurrentIndex(backend_ids.index(job["backend_id"]))
 
         # Dates & intervals
