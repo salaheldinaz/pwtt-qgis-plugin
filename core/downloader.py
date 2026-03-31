@@ -235,15 +235,32 @@ def remove_product_zip(product_name: str, out_dir: str, log: Optional[Callable[[
         pass
 
 
+def _is_s1_grd_geotiff(filename: str) -> bool:
+    """True for ESA-style GRD measurement rasters (.tif or .tiff, any common case)."""
+    ext = os.path.splitext(filename)[1].lower()
+    return ext in (".tif", ".tiff")
+
+
 def find_vv_vh_in_safe(safe_dir: str) -> Tuple[Optional[str], Optional[str]]:
     """Find paths to VV and VH GeoTIFFs in a S1 GRD .SAFE directory. Returns (path_vv, path_vh)."""
-    measurement = os.path.join(safe_dir, "measurement")
-    if not os.path.isdir(measurement):
+    if not os.path.isdir(safe_dir):
+        return None, None
+    measurement = None
+    for name in os.listdir(safe_dir):
+        if name.lower() == "measurement":
+            candidate = os.path.join(safe_dir, name)
+            if os.path.isdir(candidate):
+                measurement = candidate
+                break
+    if measurement is None:
         return None, None
     vv_path = vh_path = None
     for f in os.listdir(measurement):
-        if "-vv-" in f.lower() and f.endswith(".tif"):
+        if not _is_s1_grd_geotiff(f):
+            continue
+        fl = f.lower()
+        if "-vv-" in fl:
             vv_path = os.path.join(measurement, f)
-        if "-vh-" in f.lower() and f.endswith(".tif"):
+        if "-vh-" in fl:
             vh_path = os.path.join(measurement, f)
     return vv_path, vh_path
