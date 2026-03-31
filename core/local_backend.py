@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Full-local backend: GRD from CDSE / ASF / Planetary Computer, Lee filter, t-test, rasterio output."""
+"""Full-local backend: GRD from CDSE / ASF / Planetary Computer; openEO-aligned σ⁰ PWTT."""
 
 import math
 import os
@@ -14,9 +14,10 @@ from .base_backend import PWTTBackend
 from .downloader import get_token, search_s1_grd, download_product, find_vv_vh_in_safe
 from .local_numpy_ops import (
     convolve2d_edge,
-    gaussian_filter2d_edge,
-    two_sided_normal_p_value,
-    uniform_filter2d_edge,
+    openeo_style_p_value_bound,
+    welford_init,
+    welford_sample_variance,
+    welford_update,
 )
 from .utils import wkt_to_bbox
 
@@ -24,9 +25,21 @@ LOCAL_SOURCE_CDSE = "cdse"
 LOCAL_SOURCE_ASF = "asf"
 LOCAL_SOURCE_PC = "pc"
 
-# Maximum number of Sentinel-1 scenes to download per period (pre/post).
-# More scenes improve t-test accuracy but increase download time and memory.
-MAX_SCENES_PER_PERIOD = 3
+# Default cap on scenes per period (pre/post). Higher values track openEO (all acquisitions
+# in the window) better; can override via QgsSettings PWTT/local_max_scenes_per_period.
+_DEFAULT_MAX_SCENES_PER_PERIOD = 24
+
+
+def _max_scenes_per_period() -> int:
+    s = QgsSettings()
+    s.beginGroup("PWTT")
+    v = s.value("local_max_scenes_per_period", _DEFAULT_MAX_SCENES_PER_PERIOD)
+    s.endGroup()
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        n = _DEFAULT_MAX_SCENES_PER_PERIOD
+    return max(1, min(n, 80))
 
 # Default ground-range pixel spacing for AOI warp (~Sentinel-1 GRD IW).
 _AOI_RESOLUTION_M = 10.0
@@ -281,25 +294,6 @@ def _add_months_dt(d: datetime, months: int) -> datetime:
     return datetime(y, m, min(d.day, 28))
 
 
-def _lee_filter(band: np.ndarray, kernel_radius: int = 1, enl: float = 5.0) -> np.ndarray:
-    """Lee speckle filter (MMSE). band: 2D float. Returns filtered 2D array."""
-    ksz = 2 * kernel_radius + 1
-    eta = 1.0 / np.sqrt(enl)
-    mean = uniform_filter2d_edge(band, ksz)
-    mean_sq = uniform_filter2d_edge(band ** 2, ksz)
-    var = mean_sq - mean ** 2
-    var = np.maximum(var, 1e-12)
-    varx = (var - (mean ** 2) * (eta ** 2)) / (1 + eta ** 2)
-    b = np.clip(varx / var, 0, 1)
-    return (1 - b) * np.abs(mean) + b * band
-
-
-def _focal_median_gaussian(data: np.ndarray, sigma_m: float, pixel_size: float) -> np.ndarray:
-    """Gaussian smoothing approximating focal median in meters. sigma_m in meters."""
-    sigma_px = max(1.0, sigma_m / pixel_size)
-    return gaussian_filter2d_edge(data, sigma_px)
-
-
 def _circle_kernel(radius_m: float, pixel_size: float) -> np.ndarray:
     """Binary circle kernel in pixels."""
     r_px = int(np.ceil(radius_m / pixel_size))
@@ -468,9 +462,11 @@ class LocalBackend(PWTTBackend):
             f"post window {inference_start[:10]} … {post_end}"
         )
 
+        max_per_period = _max_scenes_per_period()
         self.run_metadata = {
             "collection": "SENTINEL-1 IW_GRDH_1S",
             "data_source": source,
+            "sar_backscatter": "sigma0-linear-grd (openEO-aligned; no Lee/log)",
             "pre_period": {"start": pre_start, "end": war_start},
             "post_period": {"start": inference_start, "end": post_end},
             "bbox": [west, south, east, north],
@@ -479,6 +475,7 @@ class LocalBackend(PWTTBackend):
             "pre_scenes_used": [],
             "post_scenes_used": [],
             "offline_scenes": [],
+            "local_max_scenes_per_period": max_per_period,
         }
 
         emit(5, "Searching pre-war products…")
@@ -489,7 +486,7 @@ class LocalBackend(PWTTBackend):
                 aoi_wkt,
                 pre_start,
                 war_start,
-                max_results=20,
+                max_results=80,
                 log=job_log,
             )
             emit(10, "Searching post-war products…")
@@ -498,7 +495,7 @@ class LocalBackend(PWTTBackend):
                 aoi_wkt,
                 inference_start,
                 post_end,
-                max_results=20,
+                max_results=80,
                 log=job_log,
             )
         elif source == LOCAL_SOURCE_ASF:
@@ -510,7 +507,7 @@ class LocalBackend(PWTTBackend):
                 aoi_wkt,
                 pre_start,
                 war_start,
-                max_results=20,
+                max_results=80,
                 log=job_log,
             )
             emit(10, "Searching post-war products…")
@@ -519,7 +516,7 @@ class LocalBackend(PWTTBackend):
                 aoi_wkt,
                 inference_start,
                 post_end,
-                max_results=20,
+                max_results=80,
                 log=job_log,
             )
         else:
@@ -531,7 +528,7 @@ class LocalBackend(PWTTBackend):
                 aoi_wkt,
                 pre_start,
                 war_start,
-                max_results=20,
+                max_results=80,
                 log=job_log,
             )
             emit(10, "Searching post-war products…")
@@ -540,7 +537,7 @@ class LocalBackend(PWTTBackend):
                 aoi_wkt,
                 inference_start,
                 post_end,
-                max_results=20,
+                max_results=80,
                 log=job_log,
             )
 
@@ -582,11 +579,9 @@ class LocalBackend(PWTTBackend):
         job_log(f"Local: pre search — {_preview_names(pre_products)}")
         job_log(f"Local: post search — {_preview_names(post_products)}")
         job_log(
-            f"Local: will try up to {MAX_SCENES_PER_PERIOD} pre + "
-            f"{MAX_SCENES_PER_PERIOD} post scenes (pre period, then post; AOI warp per scene)"
+            f"Local: will try up to {max_per_period} pre + {max_per_period} post scenes "
+            f"(openEO-aligned σ⁰ linear, pooled t; QgsSettings PWTT/local_max_scenes_per_period)"
         )
-
-        max_per_period = MAX_SCENES_PER_PERIOD
         pre_arrays = []
         post_arrays = []
         triggered_orders = [0]  # mutable container for thread-safe increment
@@ -800,66 +795,59 @@ class LocalBackend(PWTTBackend):
             f"~{pixel_size:.2f} m, CRS {ref_crs}"
         )
 
-        pre_vv_list = []
-        pre_vh_list = []
-        for vv, vh, prof, tr, crs in pre_arrays:
-            vv_f = _lee_filter(vv)
-            vh_f = _lee_filter(vh)
-            pre_vv_list.append(np.log(np.maximum(vv_f, 1e-12)))
-            pre_vh_list.append(np.log(np.maximum(vh_f, 1e-12)))
-        post_vv_list = []
-        post_vh_list = []
-        for vv, vh, prof, tr, crs in post_arrays:
-            vv_f = _lee_filter(vv)
-            vh_f = _lee_filter(vh)
-            post_vv_list.append(np.log(np.maximum(vv_f, 1e-12)))
-            post_vh_list.append(np.log(np.maximum(vh_f, 1e-12)))
+        def _accumulate_band(arrays, band_idx: int):
+            """band_idx 0 = VV, 1 = VH. σ⁰ linear on warped GRD (matches openEO sar_backscatter)."""
+            mean, m2, n = welford_init((height, width))
+            for tpl in arrays:
+                vv, vh = tpl[0], tpl[1]
+                x = vv if band_idx == 0 else vh
+                mean, m2, n = welford_update(mean, m2, n, x)
+            return mean, welford_sample_variance(m2, n), n.astype(np.float64)
 
         job_log(
-            "Local: Lee filter + log-amplitude — "
-            f"pre {len(pre_vv_list)} layers, post {len(post_vh_list)} layers"
+            f"Local: σ⁰ linear (no Lee/log), Welford mean/var — "
+            f"pre {len(pre_arrays)} scenes, post {len(post_arrays)} scenes"
         )
         emit(55, "Computing t-test…")
-        pre_vv = np.stack(pre_vv_list, axis=0)
-        pre_vh = np.stack(pre_vh_list, axis=0)
-        post_vv = np.stack(post_vv_list, axis=0)
-        post_vh = np.stack(post_vh_list, axis=0)
-        pre_n, post_n = pre_vv.shape[0], post_vv.shape[0]
-        pre_mean_vv = np.nanmean(pre_vv, axis=0)
-        pre_sd_vv = np.nanstd(pre_vv, axis=0)
-        pre_mean_vh = np.nanmean(pre_vh, axis=0)
-        pre_sd_vh = np.nanstd(pre_vh, axis=0)
-        post_mean_vv = np.nanmean(post_vv, axis=0)
-        post_sd_vv = np.nanstd(post_vv, axis=0)
-        post_mean_vh = np.nanmean(post_vh, axis=0)
-        post_sd_vh = np.nanstd(post_vh, axis=0)
+
         eps = 1e-12
-        # Degrees of freedom; eps prevents division by zero when pre_n + post_n == 2
-        df = max(pre_n + post_n - 2, 1)
-        pooled_vv = np.sqrt(
-            (pre_sd_vv ** 2 * (pre_n - 1) + post_sd_vv ** 2 * (post_n - 1)) / df + eps
+        pre_mean_vv, pre_var_vv, pre_n_vv = _accumulate_band(pre_arrays, 0)
+        pre_mean_vh, pre_var_vh, pre_n_vh = _accumulate_band(pre_arrays, 1)
+        post_mean_vv, post_var_vv, post_n_vv = _accumulate_band(post_arrays, 0)
+        post_mean_vh, post_var_vh, post_n_vh = _accumulate_band(post_arrays, 1)
+
+        df_vv = np.maximum(pre_n_vv + post_n_vv - 2.0, 1.0)
+        df_vh = np.maximum(pre_n_vh + post_n_vh - 2.0, 1.0)
+        pooled_var_vv = (
+            pre_var_vv * np.maximum(pre_n_vv - 1.0, 0.0)
+            + post_var_vv * np.maximum(post_n_vv - 1.0, 0.0)
+        ) / df_vv
+        pooled_var_vh = (
+            pre_var_vh * np.maximum(pre_n_vh - 1.0, 0.0)
+            + post_var_vh * np.maximum(post_n_vh - 1.0, 0.0)
+        ) / df_vh
+        pooled_sd_vv = np.sqrt(np.maximum(pooled_var_vv, 0.0)) + eps
+        pooled_sd_vh = np.sqrt(np.maximum(pooled_var_vh, 0.0)) + eps
+        inv_sqrt_n_vv = np.sqrt(
+            1.0 / np.maximum(pre_n_vv, 1.0) + 1.0 / np.maximum(post_n_vv, 1.0)
         )
-        pooled_vh = np.sqrt(
-            (pre_sd_vh ** 2 * (pre_n - 1) + post_sd_vh ** 2 * (post_n - 1)) / df + eps
+        inv_sqrt_n_vh = np.sqrt(
+            1.0 / np.maximum(pre_n_vh, 1.0) + 1.0 / np.maximum(post_n_vh, 1.0)
         )
-        denom_vv = pooled_vv * np.sqrt(1.0 / pre_n + 1.0 / post_n) + eps
-        denom_vh = pooled_vh * np.sqrt(1.0 / pre_n + 1.0 / post_n) + eps
-        t_vv = np.abs(post_mean_vv - pre_mean_vv) / denom_vv
-        t_vh = np.abs(post_mean_vh - pre_mean_vh) / denom_vh
+        se_vv = pooled_sd_vv * inv_sqrt_n_vv + eps
+        se_vh = pooled_sd_vh * inv_sqrt_n_vh + eps
+        t_vv = np.abs(post_mean_vv - pre_mean_vv) / se_vv
+        t_vh = np.abs(post_mean_vh - pre_mean_vh) / se_vh
         max_change = np.maximum(t_vv, t_vh)
         job_log(
-            f"Local: Welch-style t on means — pre_n={pre_n} post_n={post_n}, "
-            f"df={df}, damage |t| threshold={damage_threshold}"
+            f"Local: pooled t (openEO-style) — scenes pre={len(pre_arrays)} post={len(post_arrays)}, "
+            f"damage threshold={damage_threshold}"
         )
 
-        p_vv = two_sided_normal_p_value(t_vv)
-        p_vh = two_sided_normal_p_value(t_vh)
-        p_value = np.minimum(p_vv, p_vh)
-        p_value = np.clip(p_value, 1e-10, 1.0)
+        p_value = openeo_style_p_value_bound(max_change)
 
         emit(70, "Post-processing…")
-        job_log("Local: 10 m Gaussian on max |t|, then 50/100/150 m ring means (equal weight)")
-        max_change = _focal_median_gaussian(max_change, 10.0, pixel_size)
+        job_log("Local: 50/100/150 m circular means on max |t| (no extra Gaussian; openEO-aligned)")
 
         def _mean_kernel(radius_m):
             k = _circle_kernel(radius_m, pixel_size)

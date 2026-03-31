@@ -87,6 +87,44 @@ def convolve2d_edge(img: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     return out
 
 
+def openeo_style_p_value_bound(t_abs: np.ndarray) -> np.ndarray:
+    """Conservative p-style bound used by openEO PWTT graph: 2 * φ(|t|), φ = N(0,1) PDF.
+
+    Matches ``openeo_backend`` (``exp(-t²/2) / sqrt(2π)`` scaled by 2), then clipped.
+    """
+    import math
+
+    z = np.asarray(t_abs, dtype=np.float64)
+    inv_sqrt_2pi = 1.0 / math.sqrt(2.0 * math.pi)
+    p = np.exp(-0.5 * z * z) * (2.0 * inv_sqrt_2pi)
+    return np.clip(p, 1e-10, 1.0)
+
+
+def welford_init(shape):
+    """Return (mean, M2, n_count) arrays for Welford online variance (float64 / int32)."""
+    mean = np.zeros(shape, dtype=np.float64)
+    m2 = np.zeros(shape, dtype=np.float64)
+    n = np.zeros(shape, dtype=np.int32)
+    return mean, m2, n
+
+
+def welford_update(mean: np.ndarray, m2: np.ndarray, n: np.ndarray, x: np.ndarray):
+    """One Welford step over a 2D tile *x*; updates only finite samples per pixel."""
+    x = np.asarray(x, dtype=np.float64)
+    valid = np.isfinite(x)
+    n_new = n + valid.astype(np.int32)
+    delta = np.where(valid, x - mean, 0.0)
+    mean_new = mean + np.where(valid, delta / np.maximum(n_new.astype(np.float64), 1.0), 0.0)
+    delta2 = np.where(valid, x - mean_new, 0.0)
+    m2_new = m2 + np.where(valid, delta * delta2, 0.0)
+    return mean_new, m2_new, n_new
+
+
+def welford_sample_variance(m2: np.ndarray, n: np.ndarray) -> np.ndarray:
+    """Sample variance (ddof=1) per pixel; 0 where n < 2."""
+    return np.where(n > 1, m2 / np.maximum((n - 1).astype(np.float64), 1.0), 0.0)
+
+
 def two_sided_normal_p_value(t_abs: np.ndarray) -> np.ndarray:
     """Two-tailed normal p-value matching 2 * scipy.stats.norm.sf(t) for standard normal, t >= 0."""
     z = np.asarray(t_abs, dtype=np.float64)
