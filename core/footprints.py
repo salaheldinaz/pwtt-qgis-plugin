@@ -151,8 +151,11 @@ def compute_footprints(
     if zonal_stats is None or not callable(zonal_stats):
         import importlib, sys
         from .deps import (
-            _deps_dir, _find_real_rasterstats_dir,
-            _purge_rasterstats_modules, ensure_on_path,
+            _deps_dir,
+            _find_real_rasterstats_dir,
+            _path_without_qgis_python_plugins,
+            _purge_rasterstats_modules,
+            ensure_on_path,
         )
         ensure_on_path()
         real_dir = _find_real_rasterstats_dir()
@@ -170,7 +173,10 @@ def compute_footprints(
             for d in extra_dirs:
                 _purge_rasterstats_modules()
                 importlib.invalidate_caches()
-                sys.path[:] = [d] + [p for p in _saved if p != d]
+                filtered = _path_without_qgis_python_plugins(
+                    [p for p in _saved if p != d]
+                )
+                sys.path[:] = [d] + filtered
                 try:
                     from rasterstats import zonal_stats
                     if callable(zonal_stats):
@@ -186,8 +192,8 @@ def compute_footprints(
         if not loaded:
             raise RuntimeError(
                 "rasterstats is not installed or is shadowed by a QGIS plugin.\n"
-                "Use the Install Dependencies button or run:\n"
-                "  pip install rasterstats"
+                "Disable the **Raster stats** QGIS plugin (Plugins → Manage and Install Plugins), "
+                "then use Install Dependencies or: pip install rasterstats"
             )
 
     bbox = wkt_to_bbox(aoi_wkt)

@@ -14,6 +14,7 @@ import hashlib
 import importlib
 import os
 import re
+import sysconfig
 import shutil
 import subprocess
 import sys
@@ -286,11 +287,15 @@ FOOTPRINT_DEPS = {
     "pip":    ["rasterstats"],  # geopandas is QGIS-provided
 }
 
+# PyPI declares fiona/rasterio; resolving them often builds from source and needs
+# GDAL headers. QGIS already provides those — install only the Python package.
+PIP_INSTALL_NO_DEPS = frozenset({"rasterstats"})
+
 
 # ── Deps hash tracking ──────────────────────────────────────────────────────
 
 # Bump when install logic changes significantly to force a re-check.
-_INSTALL_LOGIC_VERSION = "3"
+_INSTALL_LOGIC_VERSION = "4"
 
 
 def _deps_hash_file():
@@ -345,6 +350,23 @@ def _try_import_zonal_stats():
     if not callable(zonal_stats):
         raise ImportError("rasterstats.zonal_stats is not callable")
     return True
+
+
+def _path_without_qgis_python_plugins(path_list):
+    """Drop QGIS *python/plugins* entries so a *rasterstats* plugin cannot shadow PyPI.
+
+    QGIS ships a \"Raster stats\" plugin whose top-level package is also named
+    ``rasterstats`` but is not the PyPI library (no ``zonal_stats``).
+    """
+    out = []
+    for p in path_list:
+        if not p:
+            continue
+        norm = os.path.normpath(p).replace("\\", "/")
+        if "/python/plugins" in norm:
+            continue
+        out.append(p)
+    return out
 
 
 def _find_real_rasterstats_dir():
@@ -409,7 +431,10 @@ def _rasterstats_probe():
         for d in extra_dirs:
             _purge_rasterstats_modules()
             importlib.invalidate_caches()
-            sys.path[:] = [d] + [p for p in _saved_path if p != d]
+            filtered = _path_without_qgis_python_plugins(
+                [p for p in _saved_path if p != d]
+            )
+            sys.path[:] = [d] + filtered
             try:
                 _try_import_zonal_stats()
                 return True, ""
@@ -417,7 +442,14 @@ def _rasterstats_probe():
                 errors.append(f"from {d}: {e}")
                 continue
 
-        return False, "\n".join(errors)
+        detail = "\n".join(errors)
+        if "python/plugins/rasterstats" in detail.replace("\\", "/"):
+            detail += (
+                "\n\nA QGIS plugin also named \"rasterstats\" is shadowing the PyPI package. "
+                "Disable or remove the **Raster stats** plugin "
+                "(Plugins → Manage and Install Plugins → Installed), then retry."
+            )
+        return False, detail
     finally:
         sys.path[:] = _saved_path
         _purge_rasterstats_modules()
@@ -694,20 +726,40 @@ def _find_python_candidates():
     """Return list of Python interpreter paths bundled with this QGIS."""
     py_candidates = []
     pfx = getattr(sys, "prefix", "") or ""
+
+    def _append_interpreter(path):
+        if path and os.path.isfile(path) and path not in py_candidates:
+            py_candidates.append(path)
+
     if pfx:
         for name in ("bin/python3", "bin/python"):
-            p = os.path.join(pfx, name)
-            if os.path.isfile(p):
-                py_candidates.append(p)
+            _append_interpreter(os.path.join(pfx, name))
         if sys.platform == "win32":
             vi = sys.version_info
             for rel in (
                 ("apps", f"Python{vi.major}{vi.minor}", "python.exe"),
                 ("apps", f"Python{vi.major}.{vi.minor}", "python.exe"),
             ):
-                p = os.path.join(pfx, *rel)
-                if os.path.isfile(p) and p not in py_candidates:
-                    py_candidates.append(p)
+                _append_interpreter(os.path.join(pfx, *rel))
+
+    # Linux / embedded: running interpreter may report prefix/bindir even when
+    # sys.executable is the qgis binary (so ``python`` not in basename).
+    base_pfx = getattr(sys, "base_prefix", None) or ""
+    if base_pfx and os.path.normpath(base_pfx) != os.path.normpath(pfx):
+        for name in ("bin/python3", "bin/python"):
+            _append_interpreter(os.path.join(base_pfx, name))
+
+    try:
+        bindir = sysconfig.get_config_var("BINDIR")
+        if bindir:
+            for name in ("python3", "python"):
+                _append_interpreter(os.path.join(bindir, name))
+    except Exception:
+        pass
+
+    base_ex = getattr(sys, "_base_executable", None)
+    if base_ex:
+        _append_interpreter(base_ex)
 
     ex = getattr(sys, "executable", "") or ""
     if sys.platform == "darwin":
@@ -892,68 +944,86 @@ def _run_install_command(cmd, timeout, label, progress_start, progress_end,
             pass
 
 
-def _install_into_target(pip_names, target_dir,
-                         progress_callback=None, cancel_check=None):
-    """Install packages into *target_dir* using uv (preferred) or pip.
+def _install_pip_batch_into_target(
+    pip_names,
+    target_dir,
+    *,
+    no_deps,
+    progress_callback=None,
+    cancel_check=None,
+    progress_base=0,
+    progress_span=100,
+):
+    """Run the full uv / QGIS-pip / system-pip chain for one batch.
 
-    Safe to call from a ``QThread`` — no QGIS/Qt calls.
+    *no_deps*: if True, pass ``--no-deps`` (use QGIS-provided fiona/rasterio/…).
+    *progress_base* / *progress_span*: map this batch onto a slice of 0–100 for the dialog.
     """
     pip_names = list(pip_names)
     if not pip_names:
-        raise RuntimeError("No packages specified for install.")
-
-    os.makedirs(target_dir, exist_ok=True)
+        return
 
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
     py_candidates = _find_python_candidates()
     uv_path = _ensure_uv()
 
-    # --- Build ordered list of install commands to try ---
+    nd = ["--no-deps"] if no_deps else []
+
     attempts = []
 
-    # 1) uv with QGIS python (best: fast + correct wheels)
     if uv_path and py_candidates:
         attempts.append((
-            [uv_path, "pip", "install", "--upgrade", "--target", target_dir,
-             "--python", py_candidates[0]] + _uv_ssl_flags() + list(pip_names),
+            [uv_path, "pip", "install", "--upgrade", "--target", target_dir]
+            + nd
+            + ["--python", py_candidates[0]]
+            + _uv_ssl_flags()
+            + list(pip_names),
             f"uv + {os.path.basename(py_candidates[0])}"
         ))
 
-    # 2) uv with auto python version (if no QGIS python found)
     if uv_path and not py_candidates:
         attempts.append((
-            [uv_path, "pip", "install", "--upgrade", "--target", target_dir,
-             "--python-version", py_ver] + _uv_ssl_flags() + list(pip_names),
+            [uv_path, "pip", "install", "--upgrade", "--target", target_dir]
+            + nd
+            + ["--python-version", py_ver]
+            + _uv_ssl_flags()
+            + list(pip_names),
             "uv (auto python)"
         ))
 
-    # 3) QGIS python + pip
-    pip_tail = ["-m", "pip", "install", "--upgrade", "--target", target_dir,
-                "--prefer-binary", "--no-warn-script-location",
-                "--disable-pip-version-check"] + _pip_proxy_args() + list(pip_names)
+    pip_common = (
+        ["-m", "pip", "install", "--upgrade", "--target", target_dir]
+        + nd
+        + ["--prefer-binary", "--no-warn-script-location",
+           "--disable-pip-version-check"]
+        + _pip_proxy_args()
+        + list(pip_names)
+    )
     for py in py_candidates:
-        attempts.append(([py] + pip_tail, f"pip via {os.path.basename(py)}"))
+        attempts.append(([py] + pip_common, f"pip via {os.path.basename(py)}"))
 
-    # 4) System python3 + pip (last resort)
     attempts.append((
-        ["python3", "-m", "pip", "install", "--upgrade", "--target", target_dir,
-         "--prefer-binary", "--no-warn-script-location",
-         "--disable-pip-version-check"] + _pip_proxy_args() + list(pip_names),
+        ["python3", "-m", "pip", "install", "--upgrade", "--target", target_dir]
+        + nd
+        + ["--prefer-binary", "--no-warn-script-location",
+           "--disable-pip-version-check"]
+        + _pip_proxy_args()
+        + list(pip_names),
         "system python3"
     ))
 
     label = ", ".join(pip_names)
+    if no_deps:
+        label += " (no-deps; QGIS GDAL stack)"
     n = len(attempts)
     last_output = ""
-    last_exc = None
     ssl_retry_done = False
 
     for i, (cmd, desc) in enumerate(attempts):
-        _log(f"Install attempt {i + 1}/{n}: {desc}")
+        _log(f"Install attempt {i + 1}/{n}: {desc}" + (" [no-deps]" if no_deps else ""))
 
-        # Progress: split the 15–90 range across attempts
-        p_start = 15 + int(75 * i / n)
-        p_end = 15 + int(75 * (i + 1) / n)
+        p_start = progress_base + int(progress_span * i / n)
+        p_end = progress_base + int(progress_span * (i + 1) / n)
 
         try:
             rc, stdout, stderr = _run_install_command(
@@ -971,7 +1041,6 @@ def _install_into_target(pip_names, target_dir,
             last_output = combined
             _log_warn(f"Attempt {desc} failed (rc={rc}): {combined[-500:]}")
 
-            # SSL error → retry same command with SSL bypass flags (once)
             if _is_ssl_error(combined) and not ssl_retry_done:
                 ssl_retry_done = True
                 _log("Retrying with SSL bypass flags…")
@@ -990,7 +1059,6 @@ def _install_into_target(pip_names, target_dir,
                     return
                 last_output = (stdout2 + "\n" + stderr2).strip()
 
-            # Transient network error → retry once with backoff
             if _is_network_error(combined):
                 _log("Transient network error, retrying after 5 s…")
                 if progress_callback:
@@ -1011,7 +1079,6 @@ def _install_into_target(pip_names, target_dir,
                 raise RuntimeError("Installation cancelled.")
 
         except FileNotFoundError:
-            last_exc = True
             _log_warn(f"Attempt {desc}: interpreter not found")
             continue
         except subprocess.TimeoutExpired:
@@ -1019,19 +1086,64 @@ def _install_into_target(pip_names, target_dir,
             _log_warn(last_output)
             continue
 
-    # All attempts failed
     friendly = _friendly_error(last_output, pip_names)
     if friendly:
         raise RuntimeError(friendly)
 
     hint_py = py_candidates[0] if py_candidates else "python3"
+    tail = last_output[-500:] if last_output else ""
+    pip_hint = ""
+    if "no module named pip" in (last_output or "").lower():
+        pip_hint = (
+            "\nThe fallback interpreter has no pip. Install pip for that Python "
+            "(e.g. on Debian/Ubuntu: sudo apt install python3-pip), or fix network/proxy "
+            "so PWTT can download its bundled **uv** tool (check QGIS log panel → PWTT).\n"
+        )
+    nd_flag = " --no-deps" if no_deps else ""
     raise RuntimeError(
         f"Failed to install {', '.join(pip_names)} "
         f"(tried uv, QGIS python, system python3).\n\n"
         f"Manual install:\n"
-        f'  "{hint_py}" -m pip install --target "{target_dir}" {" ".join(pip_names)}\n\n'
-        f"Last output:\n{last_output[-500:]}"
+        f'  "{hint_py}" -m pip install --target "{target_dir}"{nd_flag} '
+        f'{" ".join(pip_names)}\n'
+        f"{pip_hint}\n"
+        f"Last output:\n{tail}"
     )
+
+
+def _install_into_target(pip_names, target_dir,
+                         progress_callback=None, cancel_check=None):
+    """Install packages into *target_dir* using uv (preferred) or pip.
+
+    Safe to call from a ``QThread`` — no QGIS/Qt calls.
+    """
+    pip_names = list(pip_names)
+    if not pip_names:
+        raise RuntimeError("No packages specified for install.")
+
+    os.makedirs(target_dir, exist_ok=True)
+
+    with_deps = [p for p in pip_names if p not in PIP_INSTALL_NO_DEPS]
+    no_deps_only = [p for p in pip_names if p in PIP_INSTALL_NO_DEPS]
+
+    if with_deps:
+        _install_pip_batch_into_target(
+            with_deps, target_dir,
+            no_deps=False,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+            progress_base=0,
+            progress_span=75 if no_deps_only else 100,
+        )
+    if no_deps_only:
+        _install_pip_batch_into_target(
+            no_deps_only, target_dir,
+            no_deps=True,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+            progress_base=75 if with_deps else 0,
+            progress_span=25 if with_deps else 100,
+        )
 
 
 def _finalize_install(pip_names):
