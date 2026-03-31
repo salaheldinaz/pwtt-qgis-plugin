@@ -256,7 +256,7 @@ def deps_priority():
 # ── Package / backend mapping ────────────────────────────────────────────────
 
 # Packages shipped inside QGIS — we only *check* these; we never install them.
-QGIS_PROVIDED = {"numpy", "scipy", "rasterio", "requests", "geopandas"}
+QGIS_PROVIDED = {"numpy", "scipy", "rasterio", "requests"}
 
 BACKEND_DEPS = {
     "openeo": {"import": ["openeo"], "pip": ["openeo"]},
@@ -282,9 +282,25 @@ LOCAL_SOURCE_PIP_NAMES = {
     "pystac": "pystac",
 }
 
+# rasterstats is --no-deps (avoid pip building fiona/rasterio against GDAL).
+# geopandas is optional in many QGIS builds (e.g. stock .deb) — offer pip into PWTT/deps.
 FOOTPRINT_DEPS = {
-    "import": ["geopandas", "rasterstats"],
-    "pip":    ["rasterstats"],  # geopandas is QGIS-provided
+    "import": [
+        "geopandas",
+        "rasterstats",
+        "simplejson",
+        "affine",
+        "click",
+        "cligj",
+    ],
+    "pip": [
+        "geopandas",
+        "rasterstats",
+        "simplejson",
+        "affine",
+        "click",
+        "cligj",
+    ],
 }
 
 # PyPI declares fiona/rasterio; resolving them often builds from source and needs
@@ -295,7 +311,7 @@ PIP_INSTALL_NO_DEPS = frozenset({"rasterstats"})
 # ── Deps hash tracking ──────────────────────────────────────────────────────
 
 # Bump when install logic changes significantly to force a re-check.
-_INSTALL_LOGIC_VERSION = "4"
+_INSTALL_LOGIC_VERSION = "6"
 
 
 def _deps_hash_file():
