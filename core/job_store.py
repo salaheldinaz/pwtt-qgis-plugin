@@ -5,13 +5,12 @@ import copy
 import json
 import os
 import uuid
+import zipfile
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 PWTT_JOBS_EXPORT_FORMAT = "pwtt_jobs_export"
 PWTT_JOBS_EXPORT_VERSION = 1
-
-from qgis.core import QgsApplication
 
 # ── Status constants ─────────────────────────────────────────────────────────
 STATUS_PENDING = "pending"
@@ -28,6 +27,7 @@ RESUMABLE_STATUSES = {STATUS_STOPPED, STATUS_WAITING_ORDERS, STATUS_FAILED}
 
 # ── File I/O ─────────────────────────────────────────────────────────────────
 def _jobs_path() -> str:
+    from qgis.core import QgsApplication
     d = os.path.join(QgsApplication.qgisSettingsDirPath(), "PWTT")
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, "jobs.json")
@@ -175,6 +175,45 @@ def export_jobs_to_file(path: str) -> int:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
     return len(jobs)
+
+
+def export_single_job_zip(job: dict, dest_path: str) -> dict:
+    """Write job metadata + output files to a zip archive.
+
+    Files are stored flat (no subdirectory) so they can be found by name on import.
+    Returns {"files_included": n, "files_missing": m}.
+    """
+    payload = {
+        "format": PWTT_JOBS_EXPORT_FORMAT,
+        "version": PWTT_JOBS_EXPORT_VERSION,
+        "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "jobs": [job],
+    }
+    json_bytes = json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")
+
+    # Collect output file paths: arcname (flat) → source path
+    output_files = {}
+    for field in ("output_tif", "footprints_gpkg"):
+        p = (job.get(field) or "").strip()
+        if p:
+            output_files[os.path.basename(p)] = p
+    for p in (job.get("footprints_gpkgs") or {}).values():
+        p = (p or "").strip()
+        if p:
+            output_files[os.path.basename(p)] = p
+
+    included = 0
+    missing = 0
+    with zipfile.ZipFile(dest_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("job.json", json_bytes)
+        for arcname, src_path in output_files.items():
+            if src_path and os.path.isfile(src_path):
+                zf.write(src_path, arcname)
+                included += 1
+            else:
+                missing += 1
+
+    return {"files_included": included, "files_missing": missing}
 
 
 def merge_jobs_from_file(path: str) -> Dict[str, int]:
