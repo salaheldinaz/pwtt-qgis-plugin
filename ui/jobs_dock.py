@@ -30,7 +30,7 @@ from qgis.PyQt.QtWidgets import (
     QGroupBox,
     QSizePolicy,
 )
-from qgis.PyQt.QtCore import Qt, QUrl, pyqtSignal, QTimer, QSize
+from qgis.PyQt.QtCore import Qt, QUrl, pyqtSignal, QTimer, QSize, QLocale, QDateTime
 from qgis.PyQt.QtGui import QColor, QDesktopServices, QIcon, QPalette
 from qgis.core import QgsApplication, QgsProject, QgsSettings
 
@@ -56,6 +56,16 @@ _JOBS_IO_FILES_HINT = (
 def pwtt_activity_ts_prefix() -> str:
     """Local-time bracket prefix for Jobs / activity log lines."""
     return datetime.now().strftime("[%Y-%m-%d %H:%M:%S] ")
+
+
+def _format_local_datetime(iso_str: str) -> str:
+    """Format an ISO datetime string using the device's locale (short format)."""
+    if not iso_str:
+        return ""
+    dt = QDateTime.fromString(iso_str, Qt.ISODate)
+    if not dt.isValid():
+        return iso_str[:16].replace("T", " ")
+    return QLocale.system().toString(dt, QLocale.ShortFormat)
 
 
 def _jobs_dock_btn_icon(*theme_paths: str, resource_fallback: str = None) -> QIcon:
@@ -277,6 +287,7 @@ class PWTTJobsDock(QDockWidget):
         self.delete_btn = QPushButton("Delete")
         self.export_jobs_btn = QPushButton("Export jobs…")
         self.import_jobs_btn = QPushButton("Import jobs…")
+        self.export_job_btn = QPushButton("Export job…")
 
         self.load_btn.setIcon(
             _jobs_dock_btn_icon(
@@ -335,6 +346,9 @@ class PWTTJobsDock(QDockWidget):
         self.import_jobs_btn.setIcon(
             _jobs_dock_btn_icon("/mActionFileOpen.svg", "/mActionAddOgrLayer.svg")
         )
+        self.export_job_btn.setIcon(
+            _jobs_dock_btn_icon("/mActionFileSaveAs.svg", "/mActionSaveEdits.svg")
+        )
 
         _primary_btns = (
             self.load_btn,
@@ -348,6 +362,7 @@ class PWTTJobsDock(QDockWidget):
             self.cancel_btn,
             self.rerun_btn,
             self.delete_btn,
+            self.export_job_btn,
         )
         for btn in _primary_btns:
             btn.setEnabled(False)
@@ -376,6 +391,9 @@ class PWTTJobsDock(QDockWidget):
         self.import_jobs_btn.setToolTip(
             "Add jobs from a JSON export or another machine\u2019s jobs list (merge into this profile)"
         )
+        self.export_job_btn.setToolTip(
+            "Export this job's parameters and output files to a zip archive"
+        )
 
         self.load_btn.clicked.connect(self._load_selected)
         self.open_output_btn.clicked.connect(self._open_output_folder)
@@ -390,6 +408,7 @@ class PWTTJobsDock(QDockWidget):
         self.delete_btn.clicked.connect(self._delete_selected)
         self.export_jobs_btn.clicked.connect(self._export_jobs)
         self.import_jobs_btn.clicked.connect(self._import_jobs)
+        self.export_job_btn.clicked.connect(self._export_single_job)
 
         g_inspect, row_inspect = self._jobs_button_group("Inspect")
         for btn in (self.load_btn, self.open_output_btn, self.view_logs_btn):
@@ -410,7 +429,7 @@ class PWTTJobsDock(QDockWidget):
         layout.addWidget(g_run)
 
         g_manage, row_manage = self._jobs_button_group("Manage")
-        for btn in (self.export_jobs_btn, self.import_jobs_btn, self.delete_btn):
+        for btn in (self.export_job_btn, self.export_jobs_btn, self.import_jobs_btn, self.delete_btn):
             row_manage.addWidget(btn)
         row_manage.addStretch(1)
         layout.addWidget(g_manage)
@@ -491,7 +510,7 @@ class PWTTJobsDock(QDockWidget):
             self.job_table.setItem(row, 6, QTableWidgetItem(dates))
 
             # Created
-            created = job.get("created_at", "")[:16].replace("T", " ")
+            created = _format_local_datetime(job.get("created_at", ""))
             self.job_table.setItem(row, 7, QTableWidgetItem(created))
 
         # Restore selection
@@ -743,7 +762,7 @@ class PWTTJobsDock(QDockWidget):
         job = self._get_selected_job()
         if not job:
             for btn in (self.load_btn, self.open_output_btn, self.view_logs_btn, self.load_local_btn, self.apply_style_btn, self.footprints_btn, self.resume_btn, self.stop_btn,
-                         self.cancel_btn, self.rerun_btn, self.delete_btn):
+                         self.cancel_btn, self.rerun_btn, self.delete_btn, self.export_job_btn):
                 btn.setEnabled(False)
             self.log_text.clear()
             self.progress_bar.setValue(0)
@@ -756,6 +775,7 @@ class PWTTJobsDock(QDockWidget):
         self.open_output_btn.setEnabled(bool(out_dir and os.path.isdir(out_dir)))
         self.load_local_btn.setEnabled(True)
         self.apply_style_btn.setEnabled(True)
+        self.export_job_btn.setEnabled(True)
         self.footprints_btn.setEnabled(self._local_result_tif_path(job) is not None)
         self.resume_btn.setEnabled(st in job_store.RESUMABLE_STATUSES)
         self.stop_btn.setEnabled(st == job_store.STATUS_RUNNING)
@@ -1578,6 +1598,35 @@ class PWTTJobsDock(QDockWidget):
             "Jobs exported",
             f"Exported {n} job(s) to:\n{path}\n\n{_JOBS_IO_FILES_HINT}",
         )
+
+    def _export_single_job(self):
+        from ..core import job_store
+
+        job = self._get_selected_job()
+        if not job:
+            return
+        jid = job["id"]
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export PWTT job",
+            f"pwtt_job_{jid}.zip",
+            "ZIP archive (*.zip);;All files (*)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".zip"):
+            path += ".zip"
+        try:
+            result = job_store.export_single_job_zip(job, path)
+        except OSError as e:
+            QMessageBox.critical(self, "Export job", str(e))
+            return
+        n = result["files_included"]
+        m = result["files_missing"]
+        msg = f"Job {jid} exported to:\n{path}\n\nOutput files included: {n}"
+        if m:
+            msg += f"\nOutput files not found on disk (skipped): {m}"
+        QMessageBox.information(self, "Job exported", msg)
 
     def _import_jobs(self):
         from ..core import job_store
