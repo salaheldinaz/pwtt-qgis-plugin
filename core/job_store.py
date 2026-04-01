@@ -244,6 +244,61 @@ def _write_job_folder_json(job: dict):
         pass
 
 
+def find_broken_path_jobs(jobs: List[dict]) -> List[dict]:
+    """Return entries for jobs that have any path field pointing to a missing location.
+
+    Each entry is {"job": job_dict, "broken_fields": [field_name, ...]}.
+    Empty/None paths are not checked (they are expected to be unset).
+    """
+    _PATH_FIELDS = ("output_dir", "output_tif", "footprints_gpkg")
+    result = []
+    for job in jobs:
+        broken = []
+        for field in _PATH_FIELDS:
+            p = (job.get(field) or "").strip()
+            if p and not os.path.exists(p):
+                broken.append(field)
+        for key, p in (job.get("footprints_gpkgs") or {}).items():
+            p = (p or "").strip()
+            if p and not os.path.isfile(p):
+                broken.append(f"footprints_gpkgs[{key}]")
+        if broken:
+            result.append({"job": job, "broken_fields": broken})
+    return result
+
+
+def repair_job_paths(job: dict, new_output_dir: str) -> dict:
+    """Reconstruct path fields by scanning new_output_dir for expected filenames.
+
+    Modifies *job* in place and returns it.
+    output_tif  → pwtt_{job_id}.tif
+    footprints_gpkg → pwtt_footprints.gpkg
+    footprints_gpkgs values → matched by basename
+    """
+    jid = job.get("id", "")
+    job["output_dir"] = new_output_dir
+    try:
+        entries = {f: os.path.join(new_output_dir, f) for f in os.listdir(new_output_dir)}
+    except OSError:
+        return job
+
+    tif_name = f"pwtt_{jid}.tif"
+    if tif_name in entries:
+        job["output_tif"] = entries[tif_name]
+
+    gpkg_name = "pwtt_footprints.gpkg"
+    if gpkg_name in entries:
+        job["footprints_gpkg"] = entries[gpkg_name]
+
+    old_gpkgs = job.get("footprints_gpkgs") or {}
+    new_gpkgs = {}
+    for key, old_path in old_gpkgs.items():
+        basename = os.path.basename((old_path or "").strip())
+        new_gpkgs[key] = entries[basename] if (basename and basename in entries) else old_path
+    job["footprints_gpkgs"] = new_gpkgs
+    return job
+
+
 def merge_jobs_from_file(path: str) -> Dict[str, int]:
     """Append jobs from an export or legacy jobs.json array; avoid id collisions.
 
