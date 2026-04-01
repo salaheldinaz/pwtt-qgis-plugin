@@ -240,7 +240,7 @@ def _write_job_folder_json(job: dict):
         dest = os.path.join(out_dir, "pwtt_job.json")
         with open(dest, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
-    except OSError:
+    except (OSError, ValueError):
         pass
 
 
