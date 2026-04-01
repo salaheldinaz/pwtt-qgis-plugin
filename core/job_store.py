@@ -111,9 +111,11 @@ def save_job(job: dict):
         if j["id"] == job["id"]:
             jobs[i] = job
             _write(jobs)
+            _write_job_folder_json(job)
             return
     jobs.insert(0, job)
     _write(jobs)
+    _write_job_folder_json(job)
 
 
 def update_job(job_id: str, **fields):
@@ -217,6 +219,29 @@ def export_single_job_zip(job: dict, dest_path: str) -> dict:
                 missing += 1
 
     return {"files_included": included, "files_missing": missing}
+
+
+def _write_job_folder_json(job: dict):
+    """Write pwtt_job.json into the job's output_dir (import-compatible envelope).
+
+    Called as a side-effect of save_job(). Errors are silently swallowed so a
+    read-only or missing output_dir never breaks job persistence.
+    """
+    out_dir = (job.get("output_dir") or "").strip()
+    if not out_dir or not os.path.isdir(out_dir):
+        return
+    payload = {
+        "format": PWTT_JOBS_EXPORT_FORMAT,
+        "version": PWTT_JOBS_EXPORT_VERSION,
+        "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "jobs": [job],
+    }
+    try:
+        dest = os.path.join(out_dir, "pwtt_job.json")
+        with open(dest, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+    except OSError:
+        pass
 
 
 def merge_jobs_from_file(path: str) -> Dict[str, int]:
