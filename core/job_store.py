@@ -250,13 +250,15 @@ def find_broken_path_jobs(jobs: List[dict]) -> List[dict]:
     Each entry is {"job": job_dict, "broken_fields": [field_name, ...]}.
     Empty/None paths are not checked (they are expected to be unset).
     """
-    _PATH_FIELDS = ("output_dir", "output_tif", "footprints_gpkg")
     result = []
     for job in jobs:
         broken = []
-        for field in _PATH_FIELDS:
+        p = (job.get("output_dir") or "").strip()
+        if p and not os.path.isdir(p):
+            broken.append("output_dir")
+        for field in ("output_tif", "footprints_gpkg"):
             p = (job.get(field) or "").strip()
-            if p and not os.path.exists(p):
+            if p and not os.path.isfile(p):
                 broken.append(field)
         for key, p in (job.get("footprints_gpkgs") or {}).items():
             p = (p or "").strip()
@@ -270,10 +272,13 @@ def find_broken_path_jobs(jobs: List[dict]) -> List[dict]:
 def repair_job_paths(job: dict, new_output_dir: str) -> dict:
     """Reconstruct path fields by scanning new_output_dir for expected filenames.
 
-    Modifies *job* in place and returns it.
+    Modifies *job* in place and returns it. Fields whose expected filename is not
+    found in new_output_dir are left unchanged (caller should re-run
+    find_broken_path_jobs to identify remaining broken paths).
+
     output_tif  → pwtt_{job_id}.tif
     footprints_gpkg → pwtt_footprints.gpkg
-    footprints_gpkgs values → matched by basename
+    footprints_gpkgs values → matched by basename (case-sensitive on Linux)
     """
     jid = job.get("id", "")
     job["output_dir"] = new_output_dir
