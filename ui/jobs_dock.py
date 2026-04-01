@@ -247,26 +247,34 @@ class PathRepairDialog(QDialog):
             job = entry["job"]
             jid = job.get("id", "")
             working = dict(self._repaired.get(jid, job))
+            changed = False
 
             tif_name = f"pwtt_{jid}.tif"
             if tif_name in file_index:
                 working["output_tif"] = file_index[tif_name]
                 working["output_dir"] = os.path.dirname(file_index[tif_name])
+                changed = True
 
+            # Note: pwtt_footprints.gpkg is not job-ID-keyed, so when multiple
+            # broken jobs share this filename the same path is assigned to all.
+            # For single-job imports (the common case) this is correct.
             gpkg_name = "pwtt_footprints.gpkg"
             if gpkg_name in file_index:
                 working["footprints_gpkg"] = file_index[gpkg_name]
+                changed = True
 
             old_gpkgs = working.get("footprints_gpkgs") or {}
             new_gpkgs = {}
             for key, old_path in old_gpkgs.items():
                 basename = os.path.basename((old_path or "").strip())
-                new_gpkgs[key] = (
-                    file_index[basename] if (basename and basename in file_index) else old_path
-                )
+                resolved = file_index[basename] if (basename and basename in file_index) else old_path
+                new_gpkgs[key] = resolved
+                if resolved != old_path:
+                    changed = True
             working["footprints_gpkgs"] = new_gpkgs
 
-            self._repaired[jid] = working
+            if changed:
+                self._repaired[jid] = working
             self._update_row_status(row, working)
 
     def _browse_row(self):
