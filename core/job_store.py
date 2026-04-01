@@ -191,7 +191,10 @@ def export_single_job_zip(job: dict, dest_path: str) -> dict:
     }
     json_bytes = json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")
 
-    # Collect output file paths: arcname (flat) → source path
+    # Collect output file paths: arcname (flat) → source path.
+    # Basenames are used as flat arcnames. If two fields resolve to the same
+    # basename (e.g. footprints_gpkg and a footprints_gpkgs entry pointing to
+    # the same file), the last path wins — they are the same physical file.
     output_files = {}
     for field in ("output_tif", "footprints_gpkg"):
         p = (job.get(field) or "").strip()
@@ -207,7 +210,7 @@ def export_single_job_zip(job: dict, dest_path: str) -> dict:
     with zipfile.ZipFile(dest_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("job.json", json_bytes)
         for arcname, src_path in output_files.items():
-            if src_path and os.path.isfile(src_path):
+            if os.path.isfile(src_path):
                 zf.write(src_path, arcname)
                 included += 1
             else:
