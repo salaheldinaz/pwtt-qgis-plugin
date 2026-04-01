@@ -422,6 +422,7 @@ class PWTTJobsDock(QDockWidget):
         self.view_logs_btn = QPushButton("View logs…")
         self.load_local_btn = QPushButton("Load Local")
         self.apply_style_btn = QPushButton("Apply styling")
+        self.apply_style_active_btn = QPushButton("Apply Styling (active layer)")
         self.footprints_btn = QPushButton("Per-building (OSM)")
         self.resume_btn = QPushButton("Resume")
         self.stop_btn = QPushButton("Stop")
@@ -458,6 +459,10 @@ class PWTTJobsDock(QDockWidget):
         self.apply_style_btn.setIcon(
             _jobs_dock_btn_icon("/mActionStyleManager.svg", "/mActionEditSymbol.svg")
         )
+        self.apply_style_active_btn.setIcon(
+            _jobs_dock_btn_icon("/mActionStyleManager.svg", "/mActionEditSymbol.svg")
+        )
+        self.apply_style_active_btn.setIconSize(_JOBS_BTN_ICON_SIZE)
         self.footprints_btn.setIcon(
             _jobs_dock_btn_icon(
                 "/mIconPolygonLayer.svg",
@@ -525,6 +530,11 @@ class PWTTJobsDock(QDockWidget):
             "Re-apply PWTT band-1 pseudocolor (3\u20135) and layer opacity to this job\u2019s "
             "result raster already in the project (matches layer name or GeoTIFF path)"
         )
+        self.apply_style_active_btn.setToolTip(
+            "Apply PWTT band-1 pseudocolor styling to the raster layer currently "
+            "selected in the QGIS Layers panel (reads threshold from job_info.json "
+            "if present, otherwise asks)"
+        )
         self.footprints_btn.setToolTip(
             "Fetch OSM buildings and mean damage (T-stat) per polygon using the job\u2019s result GeoTIFF"
         )
@@ -543,6 +553,7 @@ class PWTTJobsDock(QDockWidget):
         self.view_logs_btn.clicked.connect(self._view_logs_selected)
         self.load_local_btn.clicked.connect(self._load_local_selected)
         self.apply_style_btn.clicked.connect(self._apply_styling_to_result_selected)
+        self.apply_style_active_btn.clicked.connect(self._apply_styling_to_active_layer)
         self.footprints_btn.clicked.connect(self._footprints_for_local_selected)
         self.resume_btn.clicked.connect(self._resume_selected)
         self.stop_btn.clicked.connect(self._stop_selected)
@@ -560,7 +571,7 @@ class PWTTJobsDock(QDockWidget):
         layout.addWidget(g_inspect)
 
         g_map, row_map = self._jobs_button_group("Map && layers")
-        for btn in (self.load_local_btn, self.apply_style_btn, self.footprints_btn):
+        for btn in (self.load_local_btn, self.apply_style_btn, self.apply_style_active_btn, self.footprints_btn):
             row_map.addWidget(btn)
         row_map.addStretch(1)
         layout.addWidget(g_map)
@@ -1451,6 +1462,53 @@ class PWTTJobsDock(QDockWidget):
                 qgis_iface.mapCanvas().refresh()
         except ImportError:
             pass
+
+    def _apply_styling_to_active_layer(self):
+        """Apply PWTT pseudocolor styling to whichever raster is active in the Layers panel."""
+        try:
+            from qgis.utils import iface as qgis_iface
+        except ImportError:
+            qgis_iface = None
+
+        if qgis_iface is None:
+            return
+
+        from qgis.core import QgsRasterLayer
+        from ..core.qgis_output_style import damage_threshold_from_job_meta, style_pwtt_raster_layer
+
+        layer = qgis_iface.activeLayer()
+        if layer is None or not isinstance(layer, QgsRasterLayer):
+            qgis_iface.messageBar().pushWarning(
+                "PWTT", "Please select a raster layer in the Layers panel first."
+            )
+            return
+
+        src = layer.source() or ""
+        src_dir = os.path.dirname(src) if src else ""
+        meta_path = os.path.join(src_dir, "job_info.json") if src_dir else ""
+        found_meta = bool(meta_path and os.path.isfile(meta_path))
+
+        if found_meta:
+            thr = damage_threshold_from_job_meta(src, default=3.3)
+        else:
+            val, ok = QInputDialog.getDouble(
+                self,
+                "Damage threshold",
+                "Enter damage threshold (T-statistic):",
+                3.3,
+                0.0,
+                20.0,
+                1,
+            )
+            if not ok:
+                return
+            thr = val
+
+        style_pwtt_raster_layer(layer, damage_threshold=thr)
+        qgis_iface.mapCanvas().refresh()
+        qgis_iface.messageBar().pushSuccess(
+            "PWTT", f"Styling applied to '{layer.name()}'"
+        )
 
     def _footprints_for_local_selected(self):
         """OSM buildings + zonal mean T-stat for this job\u2019s on-disk result raster."""
