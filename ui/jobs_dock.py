@@ -1477,19 +1477,21 @@ class PWTTJobsDock(QDockWidget):
         from ..core.qgis_output_style import damage_threshold_from_job_meta, style_pwtt_raster_layer
 
         layer = qgis_iface.activeLayer()
-        if layer is None or not isinstance(layer, QgsRasterLayer):
+        if layer is None or not isinstance(layer, QgsRasterLayer) or not layer.isValid():
             qgis_iface.messageBar().pushWarning(
-                "PWTT", "Please select a raster layer in the Layers panel first."
+                "PWTT", "Please select a valid raster layer in the Layers panel first."
             )
             return
 
         src = layer.source() or ""
-        src_dir = os.path.dirname(src) if src else ""
+        # Strip GDAL URI parameters (e.g. "path.tif|layerid=0") before path operations.
+        src_file = src.split("|")[0].strip() if "|" in src else src
+        src_dir = os.path.dirname(src_file) if src_file else ""
         meta_path = os.path.join(src_dir, "job_info.json") if src_dir else ""
         found_meta = bool(meta_path and os.path.isfile(meta_path))
 
         if found_meta:
-            thr = damage_threshold_from_job_meta(src, default=3.3)
+            thr = damage_threshold_from_job_meta(src_file, default=3.3)
         else:
             val, ok = QInputDialog.getDouble(
                 self,
