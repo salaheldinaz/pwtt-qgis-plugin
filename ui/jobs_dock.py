@@ -28,6 +28,7 @@ from qgis.PyQt.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QGroupBox,
+    QInputDialog,
     QSizePolicy,
 )
 from qgis.PyQt.QtCore import Qt, QUrl, pyqtSignal, QTimer, QSize, QLocale, QDateTime
@@ -165,6 +166,140 @@ def _remove_job_output_from_disk(job: dict) -> None:
                 os.remove(p)
             except OSError:
                 pass
+
+
+class PathRepairDialog(QDialog):
+    """Dialog shown after import when imported jobs have broken file paths.
+
+    Offers auto-search (recursive folder scan) and per-job manual browse.
+    """
+
+    def __init__(self, broken_jobs, parent=None):
+        """
+        Parameters
+        ----------
+        broken_jobs : list of {"job": dict, "broken_fields": list[str]}
+        """
+        super().__init__(parent)
+        self.setWindowTitle("Path Repair")
+        self.setMinimumWidth(660)
+        self._broken_jobs = broken_jobs
+        self._repaired = {}  # job_id -> in-memory copy with repaired paths
+
+        layout = QVBoxLayout(self)
+
+        n = len(broken_jobs)
+        layout.addWidget(QLabel(f"{n} imported job(s) have missing file paths."))
+
+        self._auto_search_btn = QPushButton("Auto-search folder…")
+        self._auto_search_btn.setToolTip(
+            "Recursively scan a folder for matching output files and fill in resolved paths"
+        )
+        self._auto_search_btn.clicked.connect(self._auto_search)
+        layout.addWidget(self._auto_search_btn)
+
+        self._table = QTableWidget(n, 4)
+        self._table.setHorizontalHeaderLabels(["Job ID", "Missing files", "Status", "Action"])
+        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self._table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setSelectionMode(QTableWidget.NoSelection)
+        layout.addWidget(self._table)
+
+        for row, entry in enumerate(broken_jobs):
+            jid = entry["job"].get("id", "?")
+            broken_fields = entry["broken_fields"]
+            self._table.setItem(row, 0, QTableWidgetItem(jid))
+            self._table.setItem(row, 1, QTableWidgetItem(", ".join(broken_fields)))
+            self._table.setItem(row, 2, QTableWidgetItem("✗ Missing"))
+            browse_btn = QPushButton("Browse…")
+            browse_btn.setProperty("_row", row)
+            browse_btn.clicked.connect(self._browse_row)
+            self._table.setCellWidget(row, 3, browse_btn)
+
+        btn_box = QDialogButtonBox()
+        self._apply_btn = btn_box.addButton("Apply Repairs", QDialogButtonBox.AcceptRole)
+        self._skip_btn = btn_box.addButton("Skip", QDialogButtonBox.RejectRole)
+        btn_box.accepted.connect(self.accept)
+        btn_box.rejected.connect(self.reject)
+        layout.addWidget(btn_box)
+
+    # ── internal helpers ──────────────────────────────────────────────────────
+
+    def _auto_search(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select folder to search for job output files"
+        )
+        if not folder:
+            return
+
+        # Build filename → path index by walking the tree
+        file_index = {}
+        for root, _dirs, files in os.walk(folder):
+            for fname in files:
+                # First occurrence wins (shallowest path)
+                file_index.setdefault(fname, os.path.join(root, fname))
+
+        for row, entry in enumerate(self._broken_jobs):
+            job = entry["job"]
+            jid = job.get("id", "")
+            working = dict(self._repaired.get(jid, job))
+
+            tif_name = f"pwtt_{jid}.tif"
+            if tif_name in file_index:
+                working["output_tif"] = file_index[tif_name]
+                working["output_dir"] = os.path.dirname(file_index[tif_name])
+
+            gpkg_name = "pwtt_footprints.gpkg"
+            if gpkg_name in file_index:
+                working["footprints_gpkg"] = file_index[gpkg_name]
+
+            old_gpkgs = working.get("footprints_gpkgs") or {}
+            new_gpkgs = {}
+            for key, old_path in old_gpkgs.items():
+                basename = os.path.basename((old_path or "").strip())
+                new_gpkgs[key] = (
+                    file_index[basename] if (basename and basename in file_index) else old_path
+                )
+            working["footprints_gpkgs"] = new_gpkgs
+
+            self._repaired[jid] = working
+            self._update_row_status(row, working)
+
+    def _browse_row(self):
+        btn = self.sender()
+        if btn is None:
+            return
+        row = btn.property("_row")
+        entry = self._broken_jobs[row]
+        job = entry["job"]
+        jid = job.get("id", "")
+        folder = QFileDialog.getExistingDirectory(
+            self, f"Select output folder for job {jid}"
+        )
+        if not folder:
+            return
+        from ..core import job_store
+        working = dict(self._repaired.get(jid, job))
+        job_store.repair_job_paths(working, folder)
+        self._repaired[jid] = working
+        self._update_row_status(row, working)
+
+    def _update_row_status(self, row: int, job: dict):
+        tif = (job.get("output_tif") or "").strip()
+        if tif and os.path.isfile(tif):
+            self._table.item(row, 2).setText("✓ Resolved")
+        elif (job.get("output_dir") or "").strip() and os.path.isdir(job["output_dir"]):
+            self._table.item(row, 2).setText("~ Partial")
+        else:
+            self._table.item(row, 2).setText("✗ Missing")
+
+    def get_repaired_jobs(self):
+        """Return list of repaired job dicts (only jobs that had at least one path repaired)."""
+        return list(self._repaired.values())
 
 
 class PWTTJobsDock(QDockWidget):
@@ -1639,6 +1774,10 @@ class PWTTJobsDock(QDockWidget):
         )
         if not path:
             return
+
+        # Snapshot existing IDs so we can identify newly imported jobs afterwards
+        pre_import_ids = {j["id"] for j in job_store.load_jobs()}
+
         try:
             stats = job_store.merge_jobs_from_file(path)
         except ValueError as e:
@@ -1666,9 +1805,7 @@ class PWTTJobsDock(QDockWidget):
             return
 
         self._refresh_job_list()
-        lines = [
-            f"Added {added} job(s) from:\n{path}",
-        ]
+        lines = [f"Added {added} job(s) from:\n{path}"]
         if stats["skipped_invalid"]:
             lines.append(f"Skipped {stats['skipped_invalid']} invalid entr(y/ies).")
         if stats["ids_rewritten"]:
@@ -1679,6 +1816,17 @@ class PWTTJobsDock(QDockWidget):
         lines.append("")
         lines.append(_JOBS_IO_FILES_HINT)
         QMessageBox.information(self, "Jobs imported", "\n".join(lines))
+
+        # Path repair: check only the newly added jobs
+        all_jobs = job_store.load_jobs()
+        new_jobs = [j for j in all_jobs if j["id"] not in pre_import_ids]
+        broken = job_store.find_broken_path_jobs(new_jobs)
+        if broken:
+            dlg = PathRepairDialog(broken, parent=self)
+            if dlg.exec_() == QDialog.Accepted:
+                for repaired_job in dlg.get_repaired_jobs():
+                    job_store.save_job(repaired_job)
+                self._refresh_job_list()
 
     def _delete_selected(self):
         from ..core import job_store
