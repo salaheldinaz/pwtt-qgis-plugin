@@ -25,17 +25,11 @@ class GEEBackend(PWTTBackend):
         return True, ""
 
     def authenticate(self, credentials: dict) -> bool:
-        import builtins
         import ee
         project = (credentials.get("project") or "").strip()
         try:
             if not getattr(ee.data, "_credentials", None):
-                _orig_input = builtins.input
-                builtins.input = lambda *a, **kw: ""
-                try:
-                    ee.Authenticate(auth_mode="localhost")
-                finally:
-                    builtins.input = _orig_input
+                ee.Authenticate(auth_mode="localhost")
             ee.Initialize(project=project if project else None)
             return True
         except Exception as e:
