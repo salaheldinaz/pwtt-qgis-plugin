@@ -673,9 +673,14 @@ def _get_clean_env():
 
 def _get_subprocess_kwargs():
     """Platform kwargs: hide Windows console, set safe cwd."""
-    base_dir = _base_dir()
-    os.makedirs(base_dir, exist_ok=True)
-    kwargs = {"cwd": base_dir}
+    # Use the system temp directory as cwd — NOT the PWTT settings directory.
+    # The PWTT directory lives inside QGIS's qgisSettingsDirPath(), which QGIS
+    # monitors.  Subprocess activity there (cwd-relative path resolution by
+    # child processes that happen to be QGIS-bundled executables) causes QGIS
+    # to emit spurious "Invalid Data Source" warnings for command-line flags
+    # and script fragments that look like relative paths.
+    import tempfile
+    kwargs = {"cwd": tempfile.gettempdir()}
     if sys.platform == "win32":
         si = subprocess.STARTUPINFO()
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -774,7 +779,7 @@ def _find_python_candidates():
         pass
 
     base_ex = getattr(sys, "_base_executable", None)
-    if base_ex:
+    if base_ex and "python" in os.path.basename(base_ex).lower():
         _append_interpreter(base_ex)
 
     ex = getattr(sys, "executable", "") or ""
@@ -1165,6 +1170,11 @@ def _install_into_target(pip_names, target_dir,
 def _finalize_install(pip_names):
     """Update ``sys.path`` and drop stale *rasterstats* imports (main thread only)."""
     ensure_on_path()
+    # Clear the entire path-importer cache so Python's FileFinder picks up the
+    # newly-installed packages in deps_dir on the very first import attempt.
+    # importlib.invalidate_caches() only invalidates existing finders; it does
+    # not force creation of a new finder for dirs that were just added to sys.path.
+    sys.path_importer_cache.clear()
     importlib.invalidate_caches()
     pip_names = list(pip_names)
     if "rasterstats" in pip_names:
