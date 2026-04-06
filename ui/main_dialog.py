@@ -2,6 +2,7 @@
 """PWTT dock panels: controls (damage detection)."""
 
 import os
+import webbrowser
 
 from qgis.PyQt.QtWidgets import (
     QDockWidget,
@@ -148,13 +149,17 @@ class PWTTControlsDock(QDockWidget):
 
         oe_page = QWidget()
         oe_layout = QFormLayout(oe_page)
-        oe_layout.addRow(QLabel("Use 'Run' to sign in in browser (OIDC), or set client credentials below:"))
+        oe_layout.addRow(QLabel("Create OAuth2 client credentials at the Copernicus Data Space dashboard:"))
+        _cdse_url = "https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings"
+        _get_creds_btn = QPushButton("Get credentials \u2192")
+        _get_creds_btn.clicked.connect(lambda: webbrowser.open(_cdse_url))
+        oe_layout.addRow(_get_creds_btn)
         self.openeo_client_id = QLineEdit()
-        self.openeo_client_id.setPlaceholderText("Client ID (optional)")
+        self.openeo_client_id.setPlaceholderText("Client ID")
         oe_layout.addRow("Client ID:", self.openeo_client_id)
         self.openeo_client_secret = QLineEdit()
         self.openeo_client_secret.setEchoMode(QLineEdit.Password)
-        self.openeo_client_secret.setPlaceholderText("Client secret (optional)")
+        self.openeo_client_secret.setPlaceholderText("Client Secret")
         oe_layout.addRow("Client secret:", self.openeo_client_secret)
         self.openeo_verify_ssl = QCheckBox("Verify TLS certificates (HTTPS)")
         self.openeo_verify_ssl.setChecked(True)
@@ -514,7 +519,7 @@ class PWTTControlsDock(QDockWidget):
                 self.cred_storage_label.setStyleSheet("color: #e65100; font-size: 0.9em;")
             else:
                 self.cred_storage_label.setText(
-                    "Not stored: no client credentials in settings — Run uses browser sign-in (OIDC)."
+                    "Not stored: enter Client ID and Client Secret above."
                 )
                 self.cred_storage_label.setStyleSheet("color: gray; font-size: 0.9em;")
         elif bid == "gee":
