@@ -8,7 +8,7 @@ from qgis.core import QgsSettings
 import threading
 import time
 
-AUTH_TIMEOUT_SEC = 300  # 5 min — browser OIDC flows are user-driven
+AUTH_TIMEOUT_SEC = 300  # 5 min — GEE uses a browser OIDC flow; openEO uses client credentials
 
 
 def _run_with_timeout(fn, timeout_sec, cancel_event=None):
@@ -174,7 +174,6 @@ def auth_with_progress(backend, credentials, backend_id, parent=None):
 
     if is_oidc and parent is not None:
         _backend_label = {
-            "openeo": ("openEO Sign In", "Connecting to openEO CDSE…"),
             "gee": ("Google Earth Engine Sign In", "Connecting to Google Earth Engine…"),
         }
         _title, _connecting = _backend_label.get(backend_id, ("Sign In", "Connecting…"))
