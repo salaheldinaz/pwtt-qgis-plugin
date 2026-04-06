@@ -35,7 +35,7 @@ def _run_with_timeout(fn, timeout_sec, cancel_event=None):
         if remaining <= 0:
             raise RuntimeError(
                 f"Authentication timed out after {timeout_sec}s. "
-                "The server may be unreachable or the browser sign-in was not completed."
+                "The server may be unreachable or the operation took too long."
             )
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Authentication cancelled.")
