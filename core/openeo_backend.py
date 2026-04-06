@@ -9,6 +9,20 @@ from typing import Any, Optional
 from .base_backend import PWTTBackend
 from .utils import wkt_to_bbox
 
+import requests as _requests
+
+
+class _TimeoutSession(_requests.Session):
+    """requests.Session that injects a default timeout on every request."""
+
+    def __init__(self, default_timeout=30):
+        super().__init__()
+        self.default_timeout = default_timeout
+
+    def request(self, *args, **kwargs):
+        kwargs.setdefault("timeout", self.default_timeout)
+        return super().request(*args, **kwargs)
+
 
 def download_job_geotiff(results: Any, out_path: str, scratch_dir: str) -> str:
     """
@@ -82,7 +96,7 @@ class OpenEOBackend(PWTTBackend):
             verify_ssl = credentials.get("verify_ssl", True)
             if verify_ssl is None:
                 verify_ssl = True
-            session = None
+            session = _TimeoutSession(default_timeout=30)
             if not verify_ssl:
                 if not credentials.get("_ssl_bypass_confirmed"):
                     raise RuntimeError(
@@ -90,21 +104,18 @@ class OpenEOBackend(PWTTBackend):
                         "Enable 'Verify TLS certificates' or confirm the bypass in the UI."
                     )
                 import urllib3
-                import requests
                 import logging
 
                 logging.getLogger("pwtt").warning(
                     "TLS certificate verification DISABLED for openEO connection. "
                     "Traffic is vulnerable to interception."
                 )
-                session = requests.Session()
                 session.verify = False
                 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-            connect_kw = {"session": session} if session is not None else {}
             self._conn = openeo.connect(
                 "https://openeo.dataspace.copernicus.eu",
-                **connect_kw,
+                session=session,
             )
             client_id = credentials.get("client_id")
             client_secret = credentials.get("client_secret")
