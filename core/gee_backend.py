@@ -31,7 +31,12 @@ class GEEBackend(PWTTBackend):
         try:
             if not getattr(ee.data, "_credentials", None):
                 _orig_input = builtins.input
-                builtins.input = lambda *a, **kw: ""
+                builtins.input = lambda *a, **kw: (_ for _ in ()).throw(
+                    RuntimeError(
+                        "Browser authentication did not complete. "
+                        "Ensure your browser opened and you approved the request."
+                    )
+                )
                 try:
                     ee.Authenticate(auth_mode="localhost")
                 finally:
