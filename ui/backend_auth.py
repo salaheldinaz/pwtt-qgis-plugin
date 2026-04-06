@@ -11,6 +11,17 @@ import time
 AUTH_TIMEOUT_SEC = 300  # 5 min — GEE uses a browser OIDC flow; openEO uses client credentials
 
 
+def save_gee_credentials_to_settings(project, client_id, client_secret, api_key):
+    """Persist GEE credentials to QgsSettings (PWTT group)."""
+    s = QgsSettings()
+    s.beginGroup("PWTT")
+    s.setValue("gee_project", (project or "").strip())
+    s.setValue("gee_client_id", (client_id or "").strip())
+    s.setValue("gee_client_secret", (client_secret or "").strip())
+    s.setValue("gee_api_key", (api_key or "").strip())
+    s.endGroup()
+
+
 def save_openeo_credentials_to_settings(client_id, client_secret, verify_ssl):
     """Persist openEO OAuth client-credentials to QgsSettings (PWTT group)."""
     s = QgsSettings()
@@ -241,7 +252,16 @@ def auth_with_progress(backend, credentials, backend_id, parent=None):
 
         def _on_open():
             if detected_url[0]:
-                _orig_open(detected_url[0])
+                # webbrowser.get is still patched to _DummyBrowser, so calling
+                # _orig_open() directly would crash: webbrowser.open() calls
+                # webbrowser.get() internally and tries browser.open() on the
+                # result, which _DummyBrowser doesn't have.  Restore the real
+                # webbrowser.get just for this call.
+                _wb.get = _orig_get
+                try:
+                    _orig_open(detected_url[0])
+                finally:
+                    _wb.get = lambda *a, **kw: _DummyBrowser()
 
         def _on_cancel():
             canceled[0] = True
@@ -415,7 +435,12 @@ def create_and_auth_backend(
             "verify_ssl": s.value("openeo_verify_ssl", True, type=bool),
         }
     elif backend_id == "gee":
-        creds = {"project": s.value("gee_project", "")}
+        creds = {
+            "project": s.value("gee_project", ""),
+            "client_id": s.value("gee_client_id", "") or None,
+            "client_secret": s.value("gee_client_secret", "") or None,
+            "api_key": s.value("gee_api_key", "") or None,
+        }
     elif backend_id == "local":
         creds = {
             "source": (s.value("local_data_source", "cdse") or "cdse"),
@@ -467,6 +492,13 @@ def create_and_auth_backend(
             raise
         except Exception as e:
             raise RuntimeError(str(e)) from e
+    if backend_id == "gee":
+        save_gee_credentials_to_settings(
+            creds.get("project") or "",
+            creds.get("client_id") or "",
+            creds.get("client_secret") or "",
+            creds.get("api_key") or "",
+        )
     if backend_id == "openeo":
         save_openeo_credentials_to_settings(
             creds.get("client_id") or "",

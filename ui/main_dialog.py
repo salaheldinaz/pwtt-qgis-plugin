@@ -179,6 +179,23 @@ class PWTTControlsDock(QDockWidget):
         self.gee_project = QLineEdit()
         self.gee_project.setPlaceholderText("your-gee-project")
         gee_layout.addRow("GEE project name:", self.gee_project)
+        # OAuth 2.0 client credentials (preferred)
+        # Create at: https://console.cloud.google.com/apis/credentials
+        # → Create credentials → OAuth client ID → Desktop app
+        self.gee_client_id = QLineEdit()
+        self.gee_client_id.setPlaceholderText(
+            "123456-abc.apps.googleusercontent.com (preferred)"
+        )
+        gee_layout.addRow("Client ID:", self.gee_client_id)
+        self.gee_client_secret = QLineEdit()
+        self.gee_client_secret.setEchoMode(QLineEdit.Password)
+        self.gee_client_secret.setPlaceholderText("Client secret")
+        gee_layout.addRow("Client secret:", self.gee_client_secret)
+        # API key (optional, no browser required)
+        self.gee_api_key = QLineEdit()
+        self.gee_api_key.setEchoMode(QLineEdit.Password)
+        self.gee_api_key.setPlaceholderText("AIzaSy… (optional, no browser needed)")
+        gee_layout.addRow("API key:", self.gee_api_key)
         self.cred_stacked.addWidget(gee_page)
 
         local_page = QWidget()
@@ -486,6 +503,9 @@ class PWTTControlsDock(QDockWidget):
         cid = (s.value("openeo_client_id", "") or "").strip()
         csec = (s.value("openeo_client_secret", "") or "").strip()
         gee = (s.value("gee_project", "") or "").strip()
+        gee_cid = (s.value("gee_client_id", "") or "").strip()
+        gee_csec = (s.value("gee_client_secret", "") or "").strip()
+        gee_key = (s.value("gee_api_key", "") or "").strip()
         cu = (s.value("cdse_username", "") or "").strip()
         cp = (s.value("cdse_password", "") or "").strip()
         eu = (s.value("earthdata_username", "") or "").strip()
@@ -496,6 +516,9 @@ class PWTTControlsDock(QDockWidget):
             "openeo_id": bool(cid),
             "openeo_secret": bool(csec),
             "gee_project": bool(gee),
+            "gee_client_id": bool(gee_cid),
+            "gee_client_secret": bool(gee_csec),
+            "gee_api_key": bool(gee_key),
             "cdse_user": bool(cu),
             "cdse_pass": bool(cp),
             "earthdata_user": bool(eu),
@@ -526,14 +549,27 @@ class PWTTControlsDock(QDockWidget):
                 )
                 self.cred_storage_label.setStyleSheet("color: gray; font-size: 0.9em;")
         elif bid == "gee":
-            if snap["gee_project"]:
+            has_oauth = snap["gee_client_id"] and snap["gee_client_secret"]
+            has_key = snap["gee_api_key"]
+            if has_oauth:
                 self.cred_storage_label.setText(
-                    "Stored: GEE project name in QGIS settings."
+                    "Stored: OAuth 2.0 client ID & secret in QGIS settings (preferred)."
                 )
                 self.cred_storage_label.setStyleSheet("color: #2e7d32; font-size: 0.9em;")
+            elif has_key:
+                self.cred_storage_label.setText(
+                    "Stored: API key in QGIS settings."
+                )
+                self.cred_storage_label.setStyleSheet("color: #2e7d32; font-size: 0.9em;")
+            elif snap["gee_project"]:
+                self.cred_storage_label.setText(
+                    "Stored: project name only — add Client ID & Secret or API key."
+                )
+                self.cred_storage_label.setStyleSheet("color: #e65100; font-size: 0.9em;")
             else:
                 self.cred_storage_label.setText(
-                    "Not stored: no GEE project in settings yet."
+                    "Not stored: enter credentials above. "
+                    "Create at console.cloud.google.com/apis/credentials"
                 )
                 self.cred_storage_label.setStyleSheet("color: gray; font-size: 0.9em;")
         elif bid == "local":
@@ -619,7 +655,12 @@ class PWTTControlsDock(QDockWidget):
                 "verify_ssl": self.openeo_verify_ssl.isChecked(),
             }
         if backend_id == "gee":
-            return {"project": self.gee_project.text().strip()}
+            return {
+                "project": self.gee_project.text().strip(),
+                "client_id": self.gee_client_id.text().strip() or None,
+                "client_secret": self.gee_client_secret.text().strip() or None,
+                "api_key": self.gee_api_key.text().strip() or None,
+            }
         if backend_id == "local":
             return {
                 "source": self._local_data_source_id(),
@@ -851,6 +892,9 @@ class PWTTControlsDock(QDockWidget):
         s = QgsSettings()
         s.beginGroup("PWTT")
         self.gee_project.setText(s.value("gee_project", ""))
+        self.gee_client_id.setText(s.value("gee_client_id", ""))
+        self.gee_client_secret.setText(s.value("gee_client_secret", ""))
+        self.gee_api_key.setText(s.value("gee_api_key", ""))
         s.endGroup()
         self._sync_openeo_widgets_from_settings()
         s = QgsSettings()
@@ -882,6 +926,9 @@ class PWTTControlsDock(QDockWidget):
         s = QgsSettings()
         s.beginGroup("PWTT")
         s.setValue("gee_project", self.gee_project.text())
+        s.setValue("gee_client_id", self.gee_client_id.text())
+        s.setValue("gee_client_secret", self.gee_client_secret.text())
+        s.setValue("gee_api_key", self.gee_api_key.text())
         s.setValue("openeo_client_id", self.openeo_client_id.text())
         s.setValue("openeo_client_secret", self.openeo_client_secret.text())
         s.setValue("openeo_verify_ssl", self.openeo_verify_ssl.isChecked())
