@@ -93,6 +93,16 @@ class OpenEOBackend(PWTTBackend):
         try:
             import openeo
 
+            client_id = credentials.get("client_id")
+            client_secret = credentials.get("client_secret")
+            if not (client_id and client_secret):
+                raise RuntimeError(
+                    "Client ID and Client Secret are required. "
+                    "Create OAuth2 credentials at the Copernicus Data Space dashboard "
+                    "(Account Settings → OAuth clients): "
+                    "https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings"
+                )
+
             verify_ssl = credentials.get("verify_ssl", True)
             if verify_ssl is None:
                 verify_ssl = True
@@ -117,28 +127,21 @@ class OpenEOBackend(PWTTBackend):
                 "https://openeo.dataspace.copernicus.eu",
                 session=session,
             )
-            client_id = credentials.get("client_id")
-            client_secret = credentials.get("client_secret")
-            if client_id and client_secret:
-                try:
-                    self._conn.authenticate_oidc_client_credentials(
-                        client_id=client_id, client_secret=client_secret
-                    )
-                except Exception as cred_err:
-                    msg = str(cred_err)
-                    if "invalid_client" in msg or "401" in msg:
-                        raise RuntimeError(
-                            "openEO client-credentials authentication failed: "
-                            "the Client ID / Client Secret were rejected by CDSE. "
-                            "Make sure you registered an OAuth2 client at the "
-                            "Copernicus Data Space Ecosystem portal "
-                            "(regular CDSE username/password will NOT work here). "
-                            "Alternatively, leave both fields empty to use "
-                            "interactive browser sign-in."
-                        ) from cred_err
-                    raise
-            else:
-                self._conn.authenticate_oidc()
+            try:
+                self._conn.authenticate_oidc_client_credentials(
+                    client_id=client_id, client_secret=client_secret
+                )
+            except Exception as cred_err:
+                msg = str(cred_err)
+                if "invalid_client" in msg or "401" in msg:
+                    raise RuntimeError(
+                        "openEO client-credentials authentication failed: "
+                        "the Client ID / Client Secret were rejected by CDSE. "
+                        "Make sure you registered an OAuth2 client at the "
+                        "Copernicus Data Space Ecosystem portal "
+                        "(regular CDSE username/password will NOT work here)."
+                    ) from cred_err
+                raise
             return True
         except RuntimeError:
             raise
