@@ -11,6 +11,20 @@ import time
 AUTH_TIMEOUT_SEC = 300  # 5 min — GEE uses a browser OIDC flow; openEO uses client credentials
 
 
+def save_openeo_credentials_to_settings(client_id, client_secret, verify_ssl):
+    """Persist openEO OAuth client-credentials to QgsSettings (PWTT group)."""
+    s = QgsSettings()
+    s.beginGroup("PWTT")
+    cid = (client_id or "").strip() if isinstance(client_id, str) else ""
+    csec = (client_secret or "").strip() if isinstance(client_secret, str) else ""
+    s.setValue("openeo_client_id", cid)
+    s.setValue("openeo_client_secret", csec)
+    if verify_ssl is None:
+        verify_ssl = True
+    s.setValue("openeo_verify_ssl", bool(verify_ssl))
+    s.endGroup()
+
+
 def _run_with_timeout(fn, timeout_sec, cancel_event=None):
     """Run *fn()* in a daemon thread with timeout and cancellation.
 
@@ -453,4 +467,14 @@ def create_and_auth_backend(
             raise
         except Exception as e:
             raise RuntimeError(str(e)) from e
+    if backend_id == "openeo":
+        save_openeo_credentials_to_settings(
+            creds.get("client_id") or "",
+            creds.get("client_secret") or "",
+            creds.get("verify_ssl", True),
+        )
+        if controls_dock is not None and hasattr(
+            controls_dock, "_sync_openeo_widgets_from_settings"
+        ):
+            controls_dock._sync_openeo_widgets_from_settings()
     return backend

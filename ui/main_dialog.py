@@ -44,6 +44,7 @@ from .backend_auth import (
     confirm_local_processing_storage,
     ensure_footprint_dependencies,
     is_message_box_yes,
+    save_openeo_credentials_to_settings,
 )
 from .dock_common import BACKENDS, dock_title, job_footprints_sources
 
@@ -161,6 +162,8 @@ class PWTTControlsDock(QDockWidget):
         self.openeo_client_secret.setEchoMode(QLineEdit.Password)
         self.openeo_client_secret.setPlaceholderText("Client secret")
         oe_layout.addRow("Client secret:", self.openeo_client_secret)
+        self.openeo_client_id.editingFinished.connect(self._persist_openeo_credentials)
+        self.openeo_client_secret.editingFinished.connect(self._persist_openeo_credentials)
         self.openeo_verify_ssl = QCheckBox("Verify TLS certificates (HTTPS)")
         self.openeo_verify_ssl.setChecked(True)
         self.openeo_verify_ssl.setToolTip(
@@ -808,23 +811,50 @@ class PWTTControlsDock(QDockWidget):
     # ── Settings ──────────────────────────────────────────────────────────────
 
     def _persist_openeo_verify_ssl(self, _state=None):
-        s = QgsSettings()
-        s.beginGroup("PWTT")
-        s.setValue("openeo_verify_ssl", self.openeo_verify_ssl.isChecked())
-        s.endGroup()
+        save_openeo_credentials_to_settings(
+            self.openeo_client_id.text(),
+            self.openeo_client_secret.text(),
+            self.openeo_verify_ssl.isChecked(),
+        )
+        self._refresh_cred_storage_indicator()
         od = getattr(self, "openeo_dock", None)
         if od is not None:
             od._conn = None
 
-    def _load_settings(self):
+    def _persist_openeo_credentials(self):
+        save_openeo_credentials_to_settings(
+            self.openeo_client_id.text(),
+            self.openeo_client_secret.text(),
+            self.openeo_verify_ssl.isChecked(),
+        )
+        self._refresh_cred_storage_indicator()
+        od = getattr(self, "openeo_dock", None)
+        if od is not None:
+            od._conn = None
+
+    def _sync_openeo_widgets_from_settings(self):
         s = QgsSettings()
         s.beginGroup("PWTT")
-        self.gee_project.setText(s.value("gee_project", ""))
+        self.openeo_client_id.blockSignals(True)
+        self.openeo_client_secret.blockSignals(True)
         self.openeo_client_id.setText(s.value("openeo_client_id", ""))
         self.openeo_client_secret.setText(s.value("openeo_client_secret", ""))
         self.openeo_verify_ssl.blockSignals(True)
         self.openeo_verify_ssl.setChecked(s.value("openeo_verify_ssl", True, type=bool))
         self.openeo_verify_ssl.blockSignals(False)
+        self.openeo_client_id.blockSignals(False)
+        self.openeo_client_secret.blockSignals(False)
+        s.endGroup()
+        self._refresh_cred_storage_indicator()
+
+    def _load_settings(self):
+        s = QgsSettings()
+        s.beginGroup("PWTT")
+        self.gee_project.setText(s.value("gee_project", ""))
+        s.endGroup()
+        self._sync_openeo_widgets_from_settings()
+        s = QgsSettings()
+        s.beginGroup("PWTT")
         self.cdse_username.setText(s.value("cdse_username", ""))
         self.cdse_password.setText(s.value("cdse_password", ""))
         self.earthdata_username.setText(s.value("earthdata_username", ""))
