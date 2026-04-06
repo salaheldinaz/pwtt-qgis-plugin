@@ -159,7 +159,7 @@ class PWTTControlsDock(QDockWidget):
         oe_layout.addRow("Client ID:", self.openeo_client_id)
         self.openeo_client_secret = QLineEdit()
         self.openeo_client_secret.setEchoMode(QLineEdit.Password)
-        self.openeo_client_secret.setPlaceholderText("Client Secret")
+        self.openeo_client_secret.setPlaceholderText("Client secret")
         oe_layout.addRow("Client secret:", self.openeo_client_secret)
         self.openeo_verify_ssl = QCheckBox("Verify TLS certificates (HTTPS)")
         self.openeo_verify_ssl.setChecked(True)
