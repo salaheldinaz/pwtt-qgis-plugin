@@ -155,10 +155,18 @@ def auth_with_progress(backend, credentials, backend_id, parent=None):
             self.c = c
             self.ok = False
             self.error_msg = ""
+            self._cancel_event = threading.Event()
+
+        def cancel(self):
+            self._cancel_event.set()
 
         def run(self):
             try:
-                self.ok = self.b.authenticate(self.c)
+                self.ok = _run_with_timeout(
+                    lambda: self.b.authenticate(self.c),
+                    AUTH_TIMEOUT_SEC,
+                    self._cancel_event,
+                )
                 if not self.ok:
                     self.error_msg = "Authentication failed. Check your credentials."
             except Exception as e:
@@ -228,6 +236,7 @@ def auth_with_progress(backend, credentials, backend_id, parent=None):
 
         def _on_cancel():
             canceled[0] = True
+            worker.cancel()
             try:
                 worker.finished.disconnect()
             except Exception:
@@ -276,7 +285,7 @@ def auth_with_progress(backend, credentials, backend_id, parent=None):
                 pass
 
         if canceled[0]:
-            worker.wait(2000)
+            worker.wait(5000)
             raise RuntimeError("Authentication cancelled.")
         worker.wait()
     else:
@@ -288,6 +297,7 @@ def auth_with_progress(backend, credentials, backend_id, parent=None):
 
         def _on_progress_dialog_cancel():
             prog_cancel_clicked[0] = True
+            worker.cancel()
 
         dlg.canceled.connect(_on_progress_dialog_cancel)
 
@@ -303,7 +313,7 @@ def auth_with_progress(backend, credentials, backend_id, parent=None):
         dlg.exec_()
 
         if prog_cancel_clicked[0]:
-            worker.wait(2000)
+            worker.wait(5000)
             raise RuntimeError("Authentication cancelled.")
         worker.wait()
 
