@@ -5,6 +5,46 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QMessageBox
 from qgis.core import QgsSettings
 
+import threading
+import time
+
+AUTH_TIMEOUT_SEC = 300  # 5 min — browser OIDC flows are user-driven
+
+
+def _run_with_timeout(fn, timeout_sec, cancel_event=None):
+    """Run *fn()* in a daemon thread with timeout and cancellation.
+
+    Returns the result of fn(). Raises RuntimeError on timeout or cancel.
+    Re-raises any exception thrown by fn().
+    """
+    result = [None]
+    error = [None]
+
+    def _target():
+        try:
+            result[0] = fn()
+        except Exception as exc:
+            error[0] = exc
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+
+    deadline = time.monotonic() + timeout_sec
+    while t.is_alive():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(
+                f"Authentication timed out after {timeout_sec}s. "
+                "The server may be unreachable or the browser sign-in was not completed."
+            )
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Authentication cancelled.")
+        t.join(timeout=min(1.0, remaining))
+
+    if error[0] is not None:
+        raise error[0]
+    return result[0]
+
 
 def is_message_box_yes(reply):
     """Reliable Yes detection across PyQt5/6."""
@@ -101,7 +141,8 @@ def auth_with_progress(backend, credentials, backend_id, parent=None):
     )
 
     is_oidc = (
-        (backend_id == "openeo" and not (credentials or {}).get("client_id"))
+        (backend_id == "openeo"
+         and not ((credentials or {}).get("client_id") and (credentials or {}).get("client_secret")))
         or backend_id == "gee"
     )
 

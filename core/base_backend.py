@@ -27,7 +27,8 @@ class PWTTBackend(ABC):
     (scenes used, date ranges, etc.) for inclusion in the job metadata file.
     """
 
-    run_metadata: dict = None  # populated by run()
+    def __init__(self):
+        self.run_metadata = None  # populated by run()
 
     @property
     @abstractmethod
