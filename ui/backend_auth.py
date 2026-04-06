@@ -5,6 +5,7 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QMessageBox
 from qgis.core import QgsSettings
 
+import os
 import threading
 import time
 
@@ -33,6 +34,38 @@ def save_openeo_credentials_to_settings(client_id, client_secret, verify_ssl):
     if verify_ssl is None:
         verify_ssl = True
     s.setValue("openeo_verify_ssl", bool(verify_ssl))
+    s.endGroup()
+
+
+def clear_gee_credentials_from_storage():
+    """Remove GEE fields from QgsSettings, EE persistent token file, and session state."""
+    s = QgsSettings()
+    s.beginGroup("PWTT")
+    for key in ("gee_project", "gee_client_id", "gee_client_secret", "gee_api_key"):
+        s.remove(key)
+    s.endGroup()
+    try:
+        from ..core import deps
+
+        deps.ensure_on_path()
+        from ee import oauth as _ee_oauth
+        import ee
+
+        path = _ee_oauth.get_credentials_path()
+        if path and os.path.isfile(path):
+            os.unlink(path)
+        if hasattr(ee, "data"):
+            setattr(ee.data, "_credentials", None)
+    except Exception:
+        pass
+
+
+def clear_openeo_credentials_from_storage():
+    """Remove openEO client ID and secret from QgsSettings (keeps verify_ssl preference)."""
+    s = QgsSettings()
+    s.beginGroup("PWTT")
+    s.remove("openeo_client_id")
+    s.remove("openeo_client_secret")
     s.endGroup()
 
 

@@ -41,6 +41,8 @@ from qgis.gui import QgsFileWidget, QgsRubberBand
 
 from .backend_auth import (
     create_and_auth_backend as backend_auth_create_and_auth_backend,
+    clear_gee_credentials_from_storage,
+    clear_openeo_credentials_from_storage,
     confirm_local_processing_storage,
     ensure_footprint_dependencies,
     is_message_box_yes,
@@ -172,6 +174,12 @@ class PWTTControlsDock(QDockWidget):
         )
         self.openeo_verify_ssl.stateChanged.connect(self._persist_openeo_verify_ssl)
         oe_layout.addRow(self.openeo_verify_ssl)
+        self.openeo_clear_creds_btn = QPushButton("Clear saved openEO credentials")
+        self.openeo_clear_creds_btn.setToolTip(
+            "Remove Client ID and Client Secret from QGIS settings and reset the openEO connection."
+        )
+        self.openeo_clear_creds_btn.clicked.connect(self._clear_saved_openeo_credentials)
+        oe_layout.addRow(self.openeo_clear_creds_btn)
         self.cred_stacked.addWidget(oe_page)
 
         gee_page = QWidget()
@@ -196,6 +204,13 @@ class PWTTControlsDock(QDockWidget):
         self.gee_api_key.setEchoMode(QLineEdit.Password)
         self.gee_api_key.setPlaceholderText("AIzaSy… (optional, no browser needed)")
         gee_layout.addRow("API key:", self.gee_api_key)
+        self.gee_clear_creds_btn = QPushButton("Clear saved GEE credentials")
+        self.gee_clear_creds_btn.setToolTip(
+            "Remove project, OAuth client, and API key from QGIS settings; delete the Earth Engine "
+            "token file (used by browser OAuth and installed-app OAuth); clear in-memory EE state."
+        )
+        self.gee_clear_creds_btn.clicked.connect(self._clear_saved_gee_credentials)
+        gee_layout.addRow(self.gee_clear_creds_btn)
         self.cred_stacked.addWidget(gee_page)
 
         local_page = QWidget()
@@ -861,6 +876,42 @@ class PWTTControlsDock(QDockWidget):
         od = getattr(self, "openeo_dock", None)
         if od is not None:
             od._conn = None
+
+    def _clear_saved_openeo_credentials(self):
+        reply = QMessageBox.question(
+            self,
+            "PWTT",
+            "Remove openEO Client ID and Client Secret from QGIS settings?\n\n"
+            "The openEO connection in this session will be reset.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if not is_message_box_yes(reply):
+            return
+        clear_openeo_credentials_from_storage()
+        self._sync_openeo_widgets_from_settings()
+        od = getattr(self, "openeo_dock", None)
+        if od is not None:
+            od._conn = None
+
+    def _clear_saved_gee_credentials(self):
+        reply = QMessageBox.question(
+            self,
+            "PWTT",
+            "Remove all GEE credentials from QGIS settings and delete the Earth Engine "
+            "credentials file (OAuth refresh token) if it exists?\n\n"
+            "This covers API key, OAuth client, and default browser login flows.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if not is_message_box_yes(reply):
+            return
+        clear_gee_credentials_from_storage()
+        self.gee_project.setText("")
+        self.gee_client_id.setText("")
+        self.gee_client_secret.setText("")
+        self.gee_api_key.setText("")
+        self._refresh_cred_storage_indicator()
 
     def _persist_openeo_credentials(self):
         save_openeo_credentials_to_settings(
