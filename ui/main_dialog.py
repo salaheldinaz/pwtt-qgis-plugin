@@ -873,6 +873,58 @@ class PWTTControlsDock(QDockWidget):
 
     # ── Run ───────────────────────────────────────────────────────────────────
 
+    def _run_confirmation_summary_text(self):
+        """Human-readable summary of current panel settings (no secrets)."""
+        backend_id = self.backend_combo.currentData()
+        backend_name = next((n for bid, n in BACKENDS if bid == backend_id), str(backend_id))
+
+        lines = [
+            "Start this damage detection run with the following settings?",
+            "",
+            f"Backend: {backend_name}",
+        ]
+        if backend_id == "local":
+            lines.append(f"GRD data source: {self.local_source_combo.currentText()}")
+
+        if self.aoi_rect is not None:
+            lines.append(
+                f"AOI (WGS84): {self.aoi_rect.xMinimum():.4f}, {self.aoi_rect.yMinimum():.4f} "
+                f"\u2014 {self.aoi_rect.xMaximum():.4f}, {self.aoi_rect.yMaximum():.4f}"
+            )
+
+        lines.append(f"War start: {self.war_start.date().toString('yyyy-MM-dd')}")
+        lines.append(f"Inference start: {self.inference_start.date().toString('yyyy-MM-dd')}")
+        lines.append(f"Pre-war interval: {self.pre_interval.value()} month(s)")
+        lines.append(f"Post-war interval: {self.post_interval.value()} month(s)")
+        lines.append(f"Damage mask: T-statistic > {self.damage_threshold_spin.value():.2f}")
+
+        if self.include_footprints.isChecked():
+            fp_labels = []
+            if self.fp_current_osm.isChecked():
+                fp_labels.append("current OSM buildings")
+            if self.fp_historical_war_start.isChecked():
+                fp_labels.append("historical OSM at war start")
+            if self.fp_historical_inference_start.isChecked():
+                fp_labels.append("historical OSM at inference start")
+            if not fp_labels:
+                fp_labels.append("current OSM buildings")
+            lines.append("Building footprints: " + ", ".join(fp_labels))
+        else:
+            lines.append("Building footprints: off")
+
+        if backend_id == "gee":
+            prev = "on" if self.gee_map_preview_cb.isChecked() else "off"
+            lines.append(f"Earth Engine browser preview: {prev}")
+
+        base_dir = (self.output_dir.filePath() or "").strip()
+        if not base_dir:
+            proj_path = QgsProject.instance().absolutePath()
+            base_dir = proj_path if proj_path else os.path.expanduser("~/PWTT")
+        lines.append(f"Output base folder:\n{base_dir}")
+        lines.append("(A new job subfolder will be created under this path.)")
+
+        return "\n".join(lines)
+
     def _run(self):
         from ..core import deps
 
@@ -897,6 +949,15 @@ class PWTTControlsDock(QDockWidget):
         local_src = self._local_data_source_id() if backend_id == "local" else None
 
         if backend_id == "local" and not confirm_local_processing_storage(self):
+            return
+
+        confirm = QMessageBox.question(
+            self,
+            "PWTT \u2014 Confirm run",
+            self._run_confirmation_summary_text(),
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if not is_message_box_yes(confirm):
             return
 
         # ── Check backend dependencies (offer install if missing) ─────────
