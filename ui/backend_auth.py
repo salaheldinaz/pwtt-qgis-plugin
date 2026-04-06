@@ -140,11 +140,7 @@ def auth_with_progress(backend, credentials, backend_id, parent=None):
         QApplication,
     )
 
-    is_oidc = (
-        (backend_id == "openeo"
-         and not ((credentials or {}).get("client_id") and (credentials or {}).get("client_secret")))
-        or backend_id == "gee"
-    )
+    is_oidc = (backend_id == "gee")
 
     class _Worker(QThread):
         auth_url_ready = pyqtSignal(str)
@@ -422,6 +418,12 @@ def create_and_auth_backend(
 
     if backend_id == "openeo":
         creds = merge_openeo_creds_from_controls_dock(creds, controls_dock)
+        if not (creds.get("client_id") and creds.get("client_secret")):
+            raise RuntimeError(
+                "Client ID and Client Secret are required for openEO.\n"
+                "Create OAuth2 credentials at the Copernicus Data Space dashboard:\n"
+                "https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings"
+            )
         # SSL bypass: require explicit user confirmation before proceeding
         if not creds.get("verify_ssl", True):
             reply = QMessageBox.warning(
