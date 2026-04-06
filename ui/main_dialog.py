@@ -190,6 +190,19 @@ class PWTTControlsDock(QDockWidget):
         # OAuth 2.0 client credentials (preferred)
         # Create at: https://console.cloud.google.com/apis/credentials
         # → Create credentials → OAuth client ID → Desktop app
+        gee_layout.addRow(
+            QLabel(
+                "Create OAuth 2.0 client credentials (Desktop app) in Google Cloud Console:"
+            )
+        )
+        _gee_creds_url = "https://console.cloud.google.com/apis/credentials"
+        _gee_get_creds_btn = QPushButton("Get credentials \u2192")
+        _gee_get_creds_btn.setToolTip(
+            "Opens the Google Cloud APIs & Services credentials page. "
+            "Create credentials → OAuth client ID → Desktop app, then paste Client ID and secret below."
+        )
+        _gee_get_creds_btn.clicked.connect(lambda: webbrowser.open(_gee_creds_url))
+        gee_layout.addRow(_gee_get_creds_btn)
         self.gee_client_id = QLineEdit()
         self.gee_client_id.setPlaceholderText(
             "123456-abc.apps.googleusercontent.com (preferred)"
