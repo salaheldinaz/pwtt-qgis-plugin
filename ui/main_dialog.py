@@ -63,6 +63,7 @@ class PWTTControlsDock(QDockWidget):
         self.jobs_dock = jobs_dock
         self.aoi_wkt = None
         self.aoi_rect = None
+        self._aoi_map_visible = True
         self.map_tool = None
         self._previous_map_tool = None
 
@@ -85,7 +86,10 @@ class PWTTControlsDock(QDockWidget):
 
     def _sync_aoi_rubber_band(self):
         """Keep canvas overlay aligned with AOI state (handles hide/show without closeEvent)."""
-        if self.aoi_wkt and self.aoi_rect is not None:
+        self._sync_aoi_map_overlay()
+
+    def _sync_aoi_map_overlay(self):
+        if self.aoi_wkt and self.aoi_rect is not None and self._aoi_map_visible:
             self._draw_rubber_band(self.aoi_rect)
         else:
             self._clear_rubber_band()
@@ -345,10 +349,19 @@ class PWTTControlsDock(QDockWidget):
         self.set_aoi_coords_btn = QPushButton("Set AOI from coordinates")
         self.set_aoi_coords_btn.clicked.connect(self._apply_aoi_from_coordinates)
         aoi_layout.addWidget(self.set_aoi_coords_btn)
+        aoi_btn_row = QHBoxLayout()
         self.clear_aoi_btn = QPushButton("Clear AOI")
         self.clear_aoi_btn.clicked.connect(self._clear_aoi)
         self.clear_aoi_btn.setEnabled(False)
-        aoi_layout.addWidget(self.clear_aoi_btn)
+        aoi_btn_row.addWidget(self.clear_aoi_btn)
+        self.toggle_aoi_map_btn = QPushButton("Hide on map")
+        self.toggle_aoi_map_btn.setToolTip(
+            "Hide or show the orange AOI rectangle on the map (coordinates are unchanged)."
+        )
+        self.toggle_aoi_map_btn.clicked.connect(self._toggle_aoi_map_visibility)
+        self.toggle_aoi_map_btn.setEnabled(False)
+        aoi_btn_row.addWidget(self.toggle_aoi_map_btn)
+        aoi_layout.addLayout(aoi_btn_row)
         self.aoi_label = QLabel(
             "No area set. Draw on the map or enter coordinates and click \u201cSet AOI from coordinates\u201d."
         )
@@ -833,13 +846,16 @@ class PWTTControlsDock(QDockWidget):
         """Set AOI from WKT and rectangle in EPSG:4326 (axis-aligned bbox)."""
         self.aoi_wkt = wkt
         self.aoi_rect = rect
+        self._aoi_map_visible = True
         self.aoi_label.setText(
             f"AOI: {rect.xMinimum():.4f}, {rect.yMinimum():.4f} \u2014 "
             f"{rect.xMaximum():.4f}, {rect.yMaximum():.4f} (WGS84)"
         )
         self.clear_aoi_btn.setEnabled(True)
+        self.toggle_aoi_map_btn.setEnabled(True)
+        self._update_toggle_aoi_map_button_label()
         self._sync_aoi_coord_spinboxes(rect)
-        self._draw_rubber_band(rect)
+        self._sync_aoi_map_overlay()
 
     def _on_aoi_drawn(self, wkt, rect):
         if wkt is None or rect is None:
@@ -905,7 +921,22 @@ class PWTTControlsDock(QDockWidget):
             self._rubber_band.reset(QgsWkbTypes.PolygonGeometry)
             self._rubber_band = None
 
+    def _update_toggle_aoi_map_button_label(self):
+        if self._aoi_map_visible:
+            self.toggle_aoi_map_btn.setText("Hide on map")
+        else:
+            self.toggle_aoi_map_btn.setText("Show on map")
+
+    def _toggle_aoi_map_visibility(self):
+        if not self.aoi_wkt or self.aoi_rect is None:
+            return
+        self._aoi_map_visible = not self._aoi_map_visible
+        self._update_toggle_aoi_map_button_label()
+        self._sync_aoi_map_overlay()
+
     def _clear_aoi(self):
+        self._aoi_map_visible = True
+        self._update_toggle_aoi_map_button_label()
         self._clear_rubber_band()
         self.aoi_wkt = None
         self.aoi_rect = None
@@ -913,6 +944,7 @@ class PWTTControlsDock(QDockWidget):
             "No area set. Draw on the map or enter coordinates and click \u201cSet AOI from coordinates\u201d."
         )
         self.clear_aoi_btn.setEnabled(False)
+        self.toggle_aoi_map_btn.setEnabled(False)
 
     # ── Load job parameters ──────────────────────────────────────────────────
 
@@ -1395,4 +1427,5 @@ class PWTTControlsDock(QDockWidget):
         job["output_dir"] = os.path.join(base_dir, job["id"])
         os.makedirs(job["output_dir"], exist_ok=True)
         job_store.save_job(job)
-        self.jobs_dock.launch_job(job, backend)
+        if self.jobs_dock.launch_job(job, backend):
+            self._clear_aoi()

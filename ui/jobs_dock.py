@@ -962,7 +962,10 @@ class PWTTJobsDock(QDockWidget):
     # ── Launch / lifecycle ────────────────────────────────────────────────────
 
     def launch_job(self, job, backend):
-        """Start a task for the given job. Called from controls dock or resume."""
+        """Start a task for the given job. Called from controls dock or resume.
+
+        Returns True if a new task was queued, False if the job was already running.
+        """
         job_id = job["id"]
         if job_id in self._active_tasks:
             note = self._stamp_activity(
@@ -971,7 +974,7 @@ class PWTTJobsDock(QDockWidget):
             self._job_logs.setdefault(job_id, []).append(note)
             self._schedule_activity_log_persist(job_id)
             self._refresh_job_log_panel_if_selected(job_id)
-            return
+            return False
         from ..core.pwtt_task import PWTTRunTask
         from ..core import job_store
 
@@ -1038,6 +1041,7 @@ class PWTTJobsDock(QDockWidget):
         self._on_job_selected()
         self.show()
         self.raise_()
+        return True
 
     # ── Task callbacks (main thread) ──────────────────────────────────────────
 
