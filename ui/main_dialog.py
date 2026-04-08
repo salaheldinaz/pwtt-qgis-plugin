@@ -443,6 +443,69 @@ class PWTTControlsDock(QDockWidget):
             "T>3.3 balanced default; T>4 fewer false positives; T>5 only strongest change. "
             "See github.com/oballinger/PWTT#recommended-thresholds"
         ))
+        # ── GEE: Detection method ──────────────────────────────────────────
+        self.gee_method_group = QGroupBox("Detection method (GEE only)")
+        gm_layout = QVBoxLayout(self.gee_method_group)
+        self.gee_method_combo = QComboBox()
+        _method_items = [
+            ("stouffer",     "Stouffer weighted Z  (default — recommended)"),
+            ("max",          "Max t-value across orbits"),
+            ("ztest",        "Z-test: latest image vs baseline"),
+            ("hotelling",    "Hotelling T²  (joint VV+VH)"),
+            ("mahalanobis",  "Mahalanobis effect size  (n-invariant)"),
+        ]
+        for value, label in _method_items:
+            self.gee_method_combo.addItem(label, value)
+        gm_layout.addWidget(self.gee_method_combo)
+        self._gee_method_hint = self._hint("")
+        gm_layout.addWidget(self._gee_method_hint)
+        self.gee_method_combo.currentIndexChanged.connect(self._on_gee_method_changed)
+        params_layout.addRow(self.gee_method_group)
+
+        # ── GEE: Advanced options (collapsed) ─────────────────────────────
+        self.gee_advanced_group = QGroupBox("Advanced GEE options")
+        ga_outer = QVBoxLayout(self.gee_advanced_group)
+
+        self._gee_advanced_toggle_btn = QPushButton("▶  Advanced options")
+        self._gee_advanced_toggle_btn.setCheckable(True)
+        self._gee_advanced_toggle_btn.setChecked(False)
+        self._gee_advanced_toggle_btn.setFlat(True)
+        ga_outer.addWidget(self._gee_advanced_toggle_btn)
+
+        self._gee_advanced_widget = QWidget()
+        ga_adv = QFormLayout(self._gee_advanced_widget)
+        ga_adv.setVerticalSpacing(4)
+
+        self.gee_ttest_type_combo = QComboBox()
+        self.gee_ttest_type_combo.addItem("welch  (default — unequal variance)", "welch")
+        self.gee_ttest_type_combo.addItem("pooled  (assumes equal variance)", "pooled")
+        ga_adv.addRow("T-test type:", self.gee_ttest_type_combo)
+
+        self.gee_smoothing_combo = QComboBox()
+        self.gee_smoothing_combo.addItem("default  (focal median + 50/100/150 m kernels)", "default")
+        self.gee_smoothing_combo.addItem("focal_only  (focal median only, no convolution)", "focal_only")
+        ga_adv.addRow("Smoothing:", self.gee_smoothing_combo)
+
+        self.gee_mask_before_smooth_cb = QCheckBox("Mask urban pixels before focal median")
+        self.gee_mask_before_smooth_cb.setChecked(True)
+        ga_adv.addRow(self.gee_mask_before_smooth_cb)
+
+        self.gee_lee_mode_combo = QComboBox()
+        self.gee_lee_mode_combo.addItem("per_image  (default — filter each scene)", "per_image")
+        self.gee_lee_mode_combo.addItem("composite  (filter composites only, ~37% less cost)", "composite")
+        ga_adv.addRow("Lee filter mode:", self.gee_lee_mode_combo)
+
+        ga_adv.addRow(self._hint(
+            "T-test type: Welch does not assume equal variance (more robust). "
+            "Smoothing: 'default' applies multi-scale convolutions after focal median. "
+            "Lee mode: 'composite' saves EE compute units on large AOIs."
+        ))
+
+        self._gee_advanced_widget.setVisible(False)
+        ga_outer.addWidget(self._gee_advanced_widget)
+        self._gee_advanced_toggle_btn.toggled.connect(self._on_gee_advanced_toggled)
+        params_layout.addRow(self.gee_advanced_group)
+
         params_layout.addRow(self.damage_mask_group)
 
         self.gee_preview_group = QGroupBox("Earth Engine preview")
@@ -501,6 +564,39 @@ class PWTTControlsDock(QDockWidget):
             self._on_backend_changed(self.backend_combo.currentIndex())
             self._refresh_cred_storage_indicator()
 
+    _GEE_METHOD_HINTS = {
+        "stouffer": (
+            "Stouffer's weighted Z-score: combines orbits by √df. "
+            "Statistically principled default."
+        ),
+        "max": (
+            "Takes the maximum t-value across orbits and Bonferroni-corrects. "
+            "Original PWTT behavior."
+        ),
+        "ztest": (
+            "Compares the single most-recent post-war image to the pre-war baseline. "
+            "Useful for near-real-time monitoring."
+        ),
+        "hotelling": (
+            "Hotelling T²: joint multivariate test on VV and VH simultaneously. "
+            "More powerful when both polarizations change together."
+        ),
+        "mahalanobis": (
+            "Mahalanobis effect size: n-invariant, useful for comparing areas with "
+            "different image counts."
+        ),
+    }
+
+    def _on_gee_method_changed(self, _index):
+        method = self.gee_method_combo.currentData()
+        self._gee_method_hint.setText(self._GEE_METHOD_HINTS.get(method, ""))
+
+    def _on_gee_advanced_toggled(self, checked: bool):
+        self._gee_advanced_widget.setVisible(checked)
+        self._gee_advanced_toggle_btn.setText(
+            "▼  Advanced options" if checked else "▶  Advanced options"
+        )
+
     def _on_backend_changed(self, index):
         from ..core import deps
         backend_id = self.backend_combo.currentData()
@@ -530,6 +626,8 @@ class PWTTControlsDock(QDockWidget):
 
         self.damage_mask_group.setVisible(True)
         self.gee_preview_group.setVisible(backend_id == "gee")
+        self.gee_method_group.setVisible(backend_id == "gee")
+        self.gee_advanced_group.setVisible(backend_id == "gee")
         self._refresh_cred_storage_indicator()
 
     @staticmethod
@@ -852,6 +950,21 @@ class PWTTControlsDock(QDockWidget):
         self.damage_threshold_spin.setValue(float(job.get("damage_threshold", 3.3)))
         self.gee_map_preview_cb.setChecked(job.get("gee_viz", False))
 
+        _method_val = job.get("gee_method", "stouffer")
+        _method_idx = next(
+            (i for i in range(self.gee_method_combo.count())
+             if self.gee_method_combo.itemData(i) == _method_val),
+            0,
+        )
+        self.gee_method_combo.setCurrentIndex(_method_idx)
+        _ttest_val = job.get("gee_ttest_type", "welch")
+        self.gee_ttest_type_combo.setCurrentIndex(0 if _ttest_val == "welch" else 1)
+        _smoothing_val = job.get("gee_smoothing", "default")
+        self.gee_smoothing_combo.setCurrentIndex(0 if _smoothing_val == "default" else 1)
+        self.gee_mask_before_smooth_cb.setChecked(job.get("gee_mask_before_smooth", True))
+        _lee_val = job.get("gee_lee_mode", "per_image")
+        self.gee_lee_mode_combo.setCurrentIndex(0 if _lee_val == "per_image" else 1)
+
         # AOI — parse WKT, set rubber band, zoom
         aoi_wkt = job.get("aoi_wkt")
         if aoi_wkt:
@@ -1035,6 +1148,28 @@ class PWTTControlsDock(QDockWidget):
         self.gee_map_preview_cb.setChecked(
             s.value("gee_map_preview", False, type=bool)
         )
+        _method_val = s.value("gee_method", "stouffer")
+        _method_idx = next(
+            (i for i in range(self.gee_method_combo.count())
+             if self.gee_method_combo.itemData(i) == _method_val),
+            0,
+        )
+        self.gee_method_combo.setCurrentIndex(_method_idx)
+        _ttest_val = s.value("gee_ttest_type", "welch")
+        self.gee_ttest_type_combo.setCurrentIndex(
+            0 if _ttest_val == "welch" else 1
+        )
+        _smoothing_val = s.value("gee_smoothing", "default")
+        self.gee_smoothing_combo.setCurrentIndex(
+            0 if _smoothing_val == "default" else 1
+        )
+        self.gee_mask_before_smooth_cb.setChecked(
+            s.value("gee_mask_before_smooth", True, type=bool)
+        )
+        _lee_val = s.value("gee_lee_mode", "per_image")
+        self.gee_lee_mode_combo.setCurrentIndex(
+            0 if _lee_val == "per_image" else 1
+        )
         s.endGroup()
         self._refresh_cred_storage_indicator()
 
@@ -1056,6 +1191,11 @@ class PWTTControlsDock(QDockWidget):
         s.setValue("output_dir", self.output_dir.filePath())
         s.setValue("damage_threshold", self.damage_threshold_spin.value())
         s.setValue("gee_map_preview", self.gee_map_preview_cb.isChecked())
+        s.setValue("gee_method", self.gee_method_combo.currentData())
+        s.setValue("gee_ttest_type", self.gee_ttest_type_combo.currentData())
+        s.setValue("gee_smoothing", self.gee_smoothing_combo.currentData())
+        s.setValue("gee_mask_before_smooth", self.gee_mask_before_smooth_cb.isChecked())
+        s.setValue("gee_lee_mode", self.gee_lee_mode_combo.currentData())
         s.endGroup()
         self._refresh_cred_storage_indicator()
 
@@ -1232,6 +1372,11 @@ class PWTTControlsDock(QDockWidget):
             damage_threshold=self.damage_threshold_spin.value(),
             gee_viz=self.gee_map_preview_cb.isChecked() if backend_id == "gee" else False,
             data_source=self._local_data_source_id() if backend_id == "local" else "cdse",
+            gee_method=self.gee_method_combo.currentData() if backend_id == "gee" else "stouffer",
+            gee_ttest_type=self.gee_ttest_type_combo.currentData() if backend_id == "gee" else "welch",
+            gee_smoothing=self.gee_smoothing_combo.currentData() if backend_id == "gee" else "default",
+            gee_mask_before_smooth=self.gee_mask_before_smooth_cb.isChecked() if backend_id == "gee" else True,
+            gee_lee_mode=self.gee_lee_mode_combo.currentData() if backend_id == "gee" else "per_image",
         )
         # Output folder: base_dir / job_id
         job["output_dir"] = os.path.join(base_dir, job["id"])
