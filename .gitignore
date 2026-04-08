@@ -1,0 +1,11 @@
+data/
+code/*.ipynb
+website
+.DS_Store
+releases/
+__pycache__/
+*.pyc
+.venv/
+.claude/
+.cursor/
+.pytest_cache/
