@@ -997,6 +997,11 @@ class PWTTJobsDock(QDockWidget):
             data_source=job.get("data_source")
             if job.get("backend_id") == "local"
             else None,
+            gee_method=job.get("gee_method", "stouffer"),
+            gee_ttest_type=job.get("gee_ttest_type", "welch"),
+            gee_smoothing=job.get("gee_smoothing", "default"),
+            gee_mask_before_smooth=job.get("gee_mask_before_smooth", True),
+            gee_lee_mode=job.get("gee_lee_mode", "per_image"),
         )
 
         self._ensure_job_log_loaded(job)
