@@ -9,7 +9,10 @@
 # Optional secret MATTERMOST_WEBHOOK_URL: incoming webhook URL — posts success/failure
 # (skipped if unset).
 #
-# Gitea: do not set generate_release_notes — that calls GitHub-only API and fails (405).
+# Gitea: do not use softprops for upload — API returns upload_url on ROOT_URL (e.g. gitea.lan);
+# runners often only resolve github.api_url. scripts/publish-forge-release.sh uploads via API host.
+#
+# Still set Gitea [server] ROOT_URL to a browser/git URL users and runners share when possible.
 
 name: Release
 
@@ -87,28 +90,23 @@ jobs:
           git push origin "${{ steps.ver.outputs.tag }}"
 
       - name: Release description from latest commit
-        id: relbody
         run: |
           {
-            echo 'body<<RELBODY_EOF'
             echo "**${{ steps.ver.outputs.tag }}** — $(git log -1 --pretty=%s)"
             echo ""
             echo '```'
             git log -1 --pretty=%B
             echo '```'
-            echo 'RELBODY_EOF'
-          } >> "$GITHUB_OUTPUT"
+          } > release-body.md
 
-      - name: Create GitHub/Gitea release with ZIP
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.ver.outputs.tag }}
-          name: ${{ steps.ver.outputs.tag }}
-          body: ${{ steps.relbody.outputs.body }}
-          generate_release_notes: false
-          files: build/pwtt_qgis-${{ steps.ver.outputs.version }}.zip
+      - name: Create forge release with ZIP
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          RELEASE_NAME: ${{ steps.ver.outputs.tag }}
+          BODY_FILE: release-body.md
+          ZIP: build/pwtt_qgis-${{ steps.ver.outputs.version }}.zip
+        run: bash scripts/publish-forge-release.sh
 
   notify-mattermost:
     needs: release
