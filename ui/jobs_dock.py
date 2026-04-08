@@ -532,8 +532,8 @@ class PWTTJobsDock(QDockWidget):
         )
         self.apply_style_active_btn.setToolTip(
             "Apply PWTT band-1 pseudocolor styling to the raster layer currently "
-            "selected in the QGIS Layers panel (reads threshold from job_info.json "
-            "if present, otherwise asks)"
+            "selected in the QGIS Layers panel (reads T-statistic cutoff from "
+            "job_info.json damage_threshold if present, otherwise asks)"
         )
         self.footprints_btn.setToolTip(
             "Fetch OSM buildings and mean damage (T-stat) per polygon using the job\u2019s result GeoTIFF"
@@ -1517,8 +1517,8 @@ class PWTTJobsDock(QDockWidget):
         else:
             val, ok = QInputDialog.getDouble(
                 self,
-                "Damage threshold",
-                "Enter damage threshold (T-statistic):",
+                "T-statistic cutoff",
+                "Enter T-statistic cutoff for band 2 (binary damage; not a probability):",
                 3.3,
                 0.0,
                 20.0,
