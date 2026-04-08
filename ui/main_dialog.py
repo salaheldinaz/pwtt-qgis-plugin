@@ -63,6 +63,7 @@ class PWTTControlsDock(QDockWidget):
         self.jobs_dock = jobs_dock
         self.aoi_wkt = None
         self.aoi_rect = None
+        self._aoi_map_visible = True
         self.map_tool = None
         self._previous_map_tool = None
 
@@ -85,7 +86,10 @@ class PWTTControlsDock(QDockWidget):
 
     def _sync_aoi_rubber_band(self):
         """Keep canvas overlay aligned with AOI state (handles hide/show without closeEvent)."""
-        if self.aoi_wkt and self.aoi_rect is not None:
+        self._sync_aoi_map_overlay()
+
+    def _sync_aoi_map_overlay(self):
+        if self.aoi_wkt and self.aoi_rect is not None and self._aoi_map_visible:
             self._draw_rubber_band(self.aoi_rect)
         else:
             self._clear_rubber_band()
@@ -345,10 +349,19 @@ class PWTTControlsDock(QDockWidget):
         self.set_aoi_coords_btn = QPushButton("Set AOI from coordinates")
         self.set_aoi_coords_btn.clicked.connect(self._apply_aoi_from_coordinates)
         aoi_layout.addWidget(self.set_aoi_coords_btn)
+        aoi_btn_row = QHBoxLayout()
         self.clear_aoi_btn = QPushButton("Clear AOI")
         self.clear_aoi_btn.clicked.connect(self._clear_aoi)
         self.clear_aoi_btn.setEnabled(False)
-        aoi_layout.addWidget(self.clear_aoi_btn)
+        aoi_btn_row.addWidget(self.clear_aoi_btn)
+        self.toggle_aoi_map_btn = QPushButton("Hide on map")
+        self.toggle_aoi_map_btn.setToolTip(
+            "Hide or show the orange AOI rectangle on the map (coordinates are unchanged)."
+        )
+        self.toggle_aoi_map_btn.clicked.connect(self._toggle_aoi_map_visibility)
+        self.toggle_aoi_map_btn.setEnabled(False)
+        aoi_btn_row.addWidget(self.toggle_aoi_map_btn)
+        aoi_layout.addLayout(aoi_btn_row)
         self.aoi_label = QLabel(
             "No area set. Draw on the map or enter coordinates and click \u201cSet AOI from coordinates\u201d."
         )
@@ -443,6 +456,70 @@ class PWTTControlsDock(QDockWidget):
             "T>3.3 balanced default; T>4 fewer false positives; T>5 only strongest change. "
             "See github.com/oballinger/PWTT#recommended-thresholds"
         ))
+        # ── GEE: Detection method ──────────────────────────────────────────
+        self.gee_method_group = QGroupBox("Detection method (GEE only)")
+        gm_layout = QVBoxLayout(self.gee_method_group)
+        self.gee_method_combo = QComboBox()
+        _method_items = [
+            ("stouffer",     "Stouffer weighted Z  (default — recommended)"),
+            ("max",          "Max t-value across orbits"),
+            ("ztest",        "Z-test: latest image vs baseline"),
+            ("hotelling",    "Hotelling T²  (joint VV+VH)"),
+            ("mahalanobis",  "Mahalanobis effect size  (n-invariant)"),
+        ]
+        for value, label in _method_items:
+            self.gee_method_combo.addItem(label, value)
+        gm_layout.addWidget(self.gee_method_combo)
+        self._gee_method_hint = self._hint("")
+        gm_layout.addWidget(self._gee_method_hint)
+        self.gee_method_combo.currentIndexChanged.connect(self._on_gee_method_changed)
+        self._on_gee_method_changed(0)  # populate hint for default selection
+        params_layout.addRow(self.gee_method_group)
+
+        # ── GEE: Advanced options (collapsed) ─────────────────────────────
+        self.gee_advanced_group = QGroupBox("Advanced GEE options")
+        ga_outer = QVBoxLayout(self.gee_advanced_group)
+
+        self._gee_advanced_toggle_btn = QPushButton("▶  Advanced options")
+        self._gee_advanced_toggle_btn.setCheckable(True)
+        self._gee_advanced_toggle_btn.setChecked(False)
+        self._gee_advanced_toggle_btn.setFlat(True)
+        ga_outer.addWidget(self._gee_advanced_toggle_btn)
+
+        self._gee_advanced_widget = QWidget()
+        ga_adv = QFormLayout(self._gee_advanced_widget)
+        ga_adv.setVerticalSpacing(4)
+
+        self.gee_ttest_type_combo = QComboBox()
+        self.gee_ttest_type_combo.addItem("welch  (default — unequal variance)", "welch")
+        self.gee_ttest_type_combo.addItem("pooled  (assumes equal variance)", "pooled")
+        ga_adv.addRow("T-test type:", self.gee_ttest_type_combo)
+
+        self.gee_smoothing_combo = QComboBox()
+        self.gee_smoothing_combo.addItem("default  (focal median + 50/100/150 m kernels)", "default")
+        self.gee_smoothing_combo.addItem("focal_only  (focal median only, no convolution)", "focal_only")
+        ga_adv.addRow("Smoothing:", self.gee_smoothing_combo)
+
+        self.gee_mask_before_smooth_cb = QCheckBox("Mask urban pixels before focal median")
+        self.gee_mask_before_smooth_cb.setChecked(True)
+        ga_adv.addRow(self.gee_mask_before_smooth_cb)
+
+        self.gee_lee_mode_combo = QComboBox()
+        self.gee_lee_mode_combo.addItem("per_image  (default — filter each scene)", "per_image")
+        self.gee_lee_mode_combo.addItem("composite  (filter composites only, ~37% less cost)", "composite")
+        ga_adv.addRow("Lee filter mode:", self.gee_lee_mode_combo)
+
+        ga_adv.addRow(self._hint(
+            "T-test type: Welch does not assume equal variance (more robust). "
+            "Smoothing: 'default' applies multi-scale convolutions after focal median. "
+            "Lee mode: 'composite' saves EE compute units on large AOIs."
+        ))
+
+        self._gee_advanced_widget.setVisible(False)
+        ga_outer.addWidget(self._gee_advanced_widget)
+        self._gee_advanced_toggle_btn.toggled.connect(self._on_gee_advanced_toggled)
+        params_layout.addRow(self.gee_advanced_group)
+
         params_layout.addRow(self.damage_mask_group)
 
         self.gee_preview_group = QGroupBox("Earth Engine preview")
@@ -501,6 +578,39 @@ class PWTTControlsDock(QDockWidget):
             self._on_backend_changed(self.backend_combo.currentIndex())
             self._refresh_cred_storage_indicator()
 
+    _GEE_METHOD_HINTS = {
+        "stouffer": (
+            "Stouffer's weighted Z-score: combines orbits by √df. "
+            "Statistically principled default."
+        ),
+        "max": (
+            "Takes the maximum t-value across orbits and Bonferroni-corrects. "
+            "Original PWTT behavior."
+        ),
+        "ztest": (
+            "Compares the single most-recent post-war image to the pre-war baseline. "
+            "Useful for near-real-time monitoring."
+        ),
+        "hotelling": (
+            "Hotelling T²: joint multivariate test on VV and VH simultaneously. "
+            "More powerful when both polarizations change together."
+        ),
+        "mahalanobis": (
+            "Mahalanobis effect size: n-invariant, useful for comparing areas with "
+            "different image counts."
+        ),
+    }
+
+    def _on_gee_method_changed(self, _index):
+        method = self.gee_method_combo.currentData()
+        self._gee_method_hint.setText(self._GEE_METHOD_HINTS.get(method, ""))
+
+    def _on_gee_advanced_toggled(self, checked: bool):
+        self._gee_advanced_widget.setVisible(checked)
+        self._gee_advanced_toggle_btn.setText(
+            "▼  Advanced options" if checked else "▶  Advanced options"
+        )
+
     def _on_backend_changed(self, index):
         from ..core import deps
         backend_id = self.backend_combo.currentData()
@@ -530,6 +640,8 @@ class PWTTControlsDock(QDockWidget):
 
         self.damage_mask_group.setVisible(True)
         self.gee_preview_group.setVisible(backend_id == "gee")
+        self.gee_method_group.setVisible(backend_id == "gee")
+        self.gee_advanced_group.setVisible(backend_id == "gee")
         self._refresh_cred_storage_indicator()
 
     @staticmethod
@@ -734,13 +846,16 @@ class PWTTControlsDock(QDockWidget):
         """Set AOI from WKT and rectangle in EPSG:4326 (axis-aligned bbox)."""
         self.aoi_wkt = wkt
         self.aoi_rect = rect
+        self._aoi_map_visible = True
         self.aoi_label.setText(
             f"AOI: {rect.xMinimum():.4f}, {rect.yMinimum():.4f} \u2014 "
             f"{rect.xMaximum():.4f}, {rect.yMaximum():.4f} (WGS84)"
         )
         self.clear_aoi_btn.setEnabled(True)
+        self.toggle_aoi_map_btn.setEnabled(True)
+        self._update_toggle_aoi_map_button_label()
         self._sync_aoi_coord_spinboxes(rect)
-        self._draw_rubber_band(rect)
+        self._sync_aoi_map_overlay()
 
     def _on_aoi_drawn(self, wkt, rect):
         if wkt is None or rect is None:
@@ -806,7 +921,22 @@ class PWTTControlsDock(QDockWidget):
             self._rubber_band.reset(QgsWkbTypes.PolygonGeometry)
             self._rubber_band = None
 
+    def _update_toggle_aoi_map_button_label(self):
+        if self._aoi_map_visible:
+            self.toggle_aoi_map_btn.setText("Hide on map")
+        else:
+            self.toggle_aoi_map_btn.setText("Show on map")
+
+    def _toggle_aoi_map_visibility(self):
+        if not self.aoi_wkt or self.aoi_rect is None:
+            return
+        self._aoi_map_visible = not self._aoi_map_visible
+        self._update_toggle_aoi_map_button_label()
+        self._sync_aoi_map_overlay()
+
     def _clear_aoi(self):
+        self._aoi_map_visible = True
+        self._update_toggle_aoi_map_button_label()
         self._clear_rubber_band()
         self.aoi_wkt = None
         self.aoi_rect = None
@@ -814,6 +944,7 @@ class PWTTControlsDock(QDockWidget):
             "No area set. Draw on the map or enter coordinates and click \u201cSet AOI from coordinates\u201d."
         )
         self.clear_aoi_btn.setEnabled(False)
+        self.toggle_aoi_map_btn.setEnabled(False)
 
     # ── Load job parameters ──────────────────────────────────────────────────
 
@@ -851,6 +982,30 @@ class PWTTControlsDock(QDockWidget):
 
         self.damage_threshold_spin.setValue(float(job.get("damage_threshold", 3.3)))
         self.gee_map_preview_cb.setChecked(job.get("gee_viz", False))
+
+        _method_val = job.get("gee_method", "stouffer")
+        _method_idx = next(
+            (i for i in range(self.gee_method_combo.count())
+             if self.gee_method_combo.itemData(i) == _method_val),
+            0,
+        )
+        self.gee_method_combo.setCurrentIndex(_method_idx)
+        _ttest_val = job.get("gee_ttest_type", "welch")
+        self.gee_ttest_type_combo.setCurrentIndex(
+            next((i for i in range(self.gee_ttest_type_combo.count())
+                  if self.gee_ttest_type_combo.itemData(i) == _ttest_val), 0)
+        )
+        _smoothing_val = job.get("gee_smoothing", "default")
+        self.gee_smoothing_combo.setCurrentIndex(
+            next((i for i in range(self.gee_smoothing_combo.count())
+                  if self.gee_smoothing_combo.itemData(i) == _smoothing_val), 0)
+        )
+        self.gee_mask_before_smooth_cb.setChecked(job.get("gee_mask_before_smooth", True))
+        _lee_val = job.get("gee_lee_mode", "per_image")
+        self.gee_lee_mode_combo.setCurrentIndex(
+            next((i for i in range(self.gee_lee_mode_combo.count())
+                  if self.gee_lee_mode_combo.itemData(i) == _lee_val), 0)
+        )
 
         # AOI — parse WKT, set rubber band, zoom
         aoi_wkt = job.get("aoi_wkt")
@@ -1035,6 +1190,31 @@ class PWTTControlsDock(QDockWidget):
         self.gee_map_preview_cb.setChecked(
             s.value("gee_map_preview", False, type=bool)
         )
+        _method_val = s.value("gee_method", "stouffer")
+        _method_idx = next(
+            (i for i in range(self.gee_method_combo.count())
+             if self.gee_method_combo.itemData(i) == _method_val),
+            0,
+        )
+        self.gee_method_combo.setCurrentIndex(_method_idx)
+        _ttest_val = s.value("gee_ttest_type", "welch")
+        self.gee_ttest_type_combo.setCurrentIndex(
+            next((i for i in range(self.gee_ttest_type_combo.count())
+                  if self.gee_ttest_type_combo.itemData(i) == _ttest_val), 0)
+        )
+        _smoothing_val = s.value("gee_smoothing", "default")
+        self.gee_smoothing_combo.setCurrentIndex(
+            next((i for i in range(self.gee_smoothing_combo.count())
+                  if self.gee_smoothing_combo.itemData(i) == _smoothing_val), 0)
+        )
+        self.gee_mask_before_smooth_cb.setChecked(
+            s.value("gee_mask_before_smooth", True, type=bool)
+        )
+        _lee_val = s.value("gee_lee_mode", "per_image")
+        self.gee_lee_mode_combo.setCurrentIndex(
+            next((i for i in range(self.gee_lee_mode_combo.count())
+                  if self.gee_lee_mode_combo.itemData(i) == _lee_val), 0)
+        )
         s.endGroup()
         self._refresh_cred_storage_indicator()
 
@@ -1056,6 +1236,11 @@ class PWTTControlsDock(QDockWidget):
         s.setValue("output_dir", self.output_dir.filePath())
         s.setValue("damage_threshold", self.damage_threshold_spin.value())
         s.setValue("gee_map_preview", self.gee_map_preview_cb.isChecked())
+        s.setValue("gee_method", self.gee_method_combo.currentData())
+        s.setValue("gee_ttest_type", self.gee_ttest_type_combo.currentData())
+        s.setValue("gee_smoothing", self.gee_smoothing_combo.currentData())
+        s.setValue("gee_mask_before_smooth", self.gee_mask_before_smooth_cb.isChecked())
+        s.setValue("gee_lee_mode", self.gee_lee_mode_combo.currentData())
         s.endGroup()
         self._refresh_cred_storage_indicator()
 
@@ -1232,9 +1417,15 @@ class PWTTControlsDock(QDockWidget):
             damage_threshold=self.damage_threshold_spin.value(),
             gee_viz=self.gee_map_preview_cb.isChecked() if backend_id == "gee" else False,
             data_source=self._local_data_source_id() if backend_id == "local" else "cdse",
+            gee_method=self.gee_method_combo.currentData() if backend_id == "gee" else "stouffer",
+            gee_ttest_type=self.gee_ttest_type_combo.currentData() if backend_id == "gee" else "welch",
+            gee_smoothing=self.gee_smoothing_combo.currentData() if backend_id == "gee" else "default",
+            gee_mask_before_smooth=self.gee_mask_before_smooth_cb.isChecked() if backend_id == "gee" else True,
+            gee_lee_mode=self.gee_lee_mode_combo.currentData() if backend_id == "gee" else "per_image",
         )
         # Output folder: base_dir / job_id
         job["output_dir"] = os.path.join(base_dir, job["id"])
         os.makedirs(job["output_dir"], exist_ok=True)
         job_store.save_job(job)
-        self.jobs_dock.launch_job(job, backend)
+        if self.jobs_dock.launch_job(job, backend):
+            self._clear_aoi()
