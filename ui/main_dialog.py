@@ -438,7 +438,7 @@ class PWTTControlsDock(QDockWidget):
             "Overlay OpenStreetMap building footprints on the result to assess per-building damage."
         ))
 
-        self.damage_mask_group = QGroupBox("Damage mask (T-statistic threshold)")
+        self.damage_mask_group = QGroupBox("Damage mask (T-statistic cutoff)")
         dm_form = QFormLayout(self.damage_mask_group)
         self.damage_threshold_spin = QDoubleSpinBox()
         self.damage_threshold_spin.setRange(0.5, 20.0)
@@ -446,12 +446,15 @@ class PWTTControlsDock(QDockWidget):
         self.damage_threshold_spin.setSingleStep(0.1)
         self.damage_threshold_spin.setValue(3.3)
         self.damage_threshold_spin.setToolTip(
-            "Smoothed T-statistic cutoff for the binary damage band (band 2). "
-            "Same statistic for openEO, GEE, and local backends."
+            "Cutoff on the smoothed T-statistic for binary damage (band 2). "
+            "Higher \u2192 fewer pixels flagged (stricter). Not a probability. "
+            "Same statistic family for openEO, GEE, and local backends."
         )
         dm_form.addRow("T-statistic >", self.damage_threshold_spin)
         dm_form.addRow(self._hint(
-            "All backends classify damage where T exceeds this value after smoothing. "
+            "Higher \u2192 fewer pixels flagged (stricter mask). "
+            "This is a test-statistic cutoff, not a damage probability. "
+            "All backends set band 2 where T exceeds this value after smoothing. "
             "Reference (UNOSAT building footprints): T>2 \u2248 max sensitivity; "
             "T>3.3 balanced default; T>4 fewer false positives; T>5 only strongest change. "
             "See github.com/oballinger/PWTT#recommended-thresholds"
@@ -1273,7 +1276,9 @@ class PWTTControlsDock(QDockWidget):
         lines.append(f"Inference start: {self.inference_start.date().toString('yyyy-MM-dd')}")
         lines.append(f"Pre-war interval: {self.pre_interval.value()} month(s)")
         lines.append(f"Post-war interval: {self.post_interval.value()} month(s)")
-        lines.append(f"Damage mask: T-statistic > {self.damage_threshold_spin.value():.2f}")
+        lines.append(
+            f"Damage mask cutoff: T-statistic > {self.damage_threshold_spin.value():.2f}"
+        )
 
         if self.include_footprints.isChecked():
             fp_labels = []

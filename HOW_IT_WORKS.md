@@ -4,7 +4,7 @@ This document describes what the plugin does end-to-end: user inputs, job handli
 
 ## Overview
 
-The plugin estimates **building-related damage** from **Sentinel-1 GRD** backscatter (VV and VH) by comparing a **pre-war (baseline)** period to a **post-war** period over your **area of interest (AOI)**. Output is a GeoTIFF (`pwtt_result.tif` or `pwtt_<job_id>.tif`) with **three bands** in normal use: continuous **`T_statistic`**, binary **`damage`**, and **`p_value`**. The **damage** mask uses your **T-statistic threshold** in the controls (default **3.3**). On **all three backends**, band 2 is **`T_statistic` > threshold** on the **same band 1** that is exported — the backends still **build** `T_statistic` differently (radiometry, stacking, smoothing, *p*-values), so maps are not pixel-identical — see [GEE vs openEO vs Local](#gee-vs-openeo-vs-local-why-results-differ-for-the-same-aoi).
+The plugin estimates **building-related damage** from **Sentinel-1 GRD** backscatter (VV and VH) by comparing a **pre-war (baseline)** period to a **post-war** period over your **area of interest (AOI)**. Output is a GeoTIFF (`pwtt_result.tif` or `pwtt_<job_id>.tif`) with **three bands** in normal use: continuous **`T_statistic`**, binary **`damage`**, and **`p_value`**. The **damage** mask uses your **T-statistic cutoff** in the controls (default **3.3**; stored as `damage_threshold` on jobs). On **all three backends**, band 2 is **`T_statistic` > cutoff** on the **same band 1** that is exported — the backends still **build** `T_statistic` differently (radiometry, stacking, smoothing, *p*-values), so maps are not pixel-identical — see [GEE vs openEO vs Local](#gee-vs-openeo-vs-local-why-results-differ-for-the-same-aoi).
 
 **GEE**, **openEO**, and **Local** all use a **pooled *t*-test–style** comparison for their primary change signal. In this plugin, **openEO** and **Local** are intentionally **aligned** on σ⁰ linear radiometry and composite/kernel structure; **GEE** (bundled `gee_pwtt`, synced with upstream [PWTT](https://github.com/oballinger/PWTT)) differs: **Lee + log** on `COPERNICUS/S1_GRD_FLOAT`, **per-orbit** tests combined by a selectable **detection method**, **Dynamic World** urban masking, and **focal median** plus multi-scale kernels before the exported **`T_statistic`**. Expect **similar patterns**, not **pixel-identical** rasters, for the same AOI and dates.
 
@@ -14,7 +14,7 @@ The plugin estimates **building-related damage** from **Sentinel-1 GRD** backsca
 
 Default **multiband RGB** (R=band 1, G=band 2, B=band 3) does **not** give a literal damage legend — it blends three different products. For change strength on **band 1**, use **singleband pseudocolor**: the plugin default is **yellow → red → purple** with min **3.0** / max **5.0** (`core/viz_constants.py`), i.e. **higher** `T_statistic` in that window is **more purple**, **lower** is **more yellow** — see [README.md — Reading colors on the map](README.md#reading-colors-on-the-map). Binary **damage** is band 2; use singleband/classified symbology there for a strict mask.
 
-**After the result is on the map:** Edits under **Layer Properties → Symbology** (min/max stretch, opacity, ramp) affect **display only** — `T_statistic` and `damage` pixel values in the GeoTIFF do not change. A **lower** max on band 1 (with the default yellow→red→purple ramp) maps the same values further toward the **red–purple** end, so change can look stronger on screen without changing band 2. To change **which** pixels are 1 in the damage mask, **re-run** with a different threshold or derive a new mask from band 1 (e.g. Raster Calculator).
+**After the result is on the map:** Edits under **Layer Properties → Symbology** (min/max stretch, opacity, ramp) affect **display only** — `T_statistic` and `damage` pixel values in the GeoTIFF do not change. A **lower** max on band 1 (with the default yellow→red→purple ramp) maps the same values further toward the **red–purple** end, so change can look stronger on screen without changing band 2. To change **which** pixels are 1 in the damage mask, **re-run** with a different cutoff or derive a new mask from band 1 (e.g. Raster Calculator).
 
 ---
 
@@ -29,7 +29,7 @@ Default **multiband RGB** (R=band 1, G=band 2, B=band 3) does **not** give a lit
 | **Post-war interval** | **Months** (integer). Post window extends roughly that many months **after** inference start. |
 | **Output directory** | Folder for `pwtt_<job_id>.tif` (or `pwtt_result.tif` without a job id), optional footprint GeoPackages (`pwtt_<job_id>_footprints_*.gpkg`), **`job_info.json`**, and **`pwtt_job.json`**. |
 | **Building footprints** | Optional; one or more OSM snapshot modes (current / historical at war start / historical at inference start). Each mode writes its own `.gpkg` with a **`T_statistic`** column. |
-| **T-statistic threshold** | Default 3.3; binary **damage** (band 2) where **`T_statistic` > threshold** on all backends (same rule on the exported band 1). |
+| **T-statistic cutoff** | Default 3.3; binary **damage** (band 2) where **`T_statistic` > cutoff** on all backends (same rule on the exported band 1). Higher value → stricter mask; not a probability. |
 | **GEE detection method** | **GEE only.** How per-orbit statistics are combined: **Stouffer** (default), **Max** across orbits, **Z-test** (latest post image vs baseline), **Hotelling T²**, or **Mahalanobis** effect size. Stored on the job as `gee_method`. |
 | **GEE advanced options** | **GEE only** (expand **Advanced options** in the Controls dock): **T-test type** (Welch vs pooled), **Smoothing** (default multi-scale vs focal-only), **Mask urban pixels before focal median**, **Lee filter mode** (per-image vs composite). Persisted as `gee_ttest_type`, `gee_smoothing`, `gee_mask_before_smooth`, `gee_lee_mode`. |
 
@@ -44,7 +44,7 @@ Default **multiband RGB** (R=band 1, G=band 2, B=band 3) does **not** give a lit
 1. **Controls dock** — You set parameters and click **Run**. With **Google Earth Engine** selected, **Detection method** and collapsible **Advanced GEE options** appear; other backends ignore those fields.
 2. **Job record** — A job is created and appended to the persistent job list (`PWTT/jobs.json` under the active profile’s [QGIS settings directory](https://docs.qgis.org/latest/en/docs/user_manual/introduction/qgis_configuration.html#user-profiles) from `QgsApplication.qgisSettingsDirPath()`—**not** inside the `.qgz` project file).
 3. **`PWTTRunTask` (QgsTask)** — Runs in the background: creates the output directory if needed, calls `backend.authenticate()` then `backend.run(...)` with `output_path = <output_dir>/pwtt_<job_id>.tif` when a job id exists, otherwise `pwtt_result.tif`.
-4. **On success** — Job status is set to completed; `output_tif` is stored on the job; **`job_info.json`** is written beside the GeoTIFF (parameters, threshold, optional backend `processing_details`); the raster (and footprint layers if any) is **added to the current QGIS project**. **`pwtt_job.json`** is also written in the output folder when the job record is saved (same envelope as export/import).
+4. **On success** — Job status is set to completed; `output_tif` is stored on the job; **`job_info.json`** is written beside the GeoTIFF (parameters, `damage_threshold`, optional backend `processing_details`); the raster (and footprint layers if any) is **added to the current QGIS project**. **`pwtt_job.json`** is also written in the output folder when the job record is saved (same envelope as export/import).
 5. **Jobs dock** — Lists jobs, **Resume** / **Rerun** / **Delete**, export/import job JSON, zip single-job bundles, **View logs**, and progress. **Rerun** clones parameters (including **GEE** method and advanced options when present) into a **new** job id.
 
 **openEO batch jobs:** While running, the log shows a server **batch job id** (`j-…`). The plugin **persists** that id on the job record in `jobs.json` when the backend reports it (for **Resume**). To re-download results from the API you still need that id (or list jobs via the openEO client) within the provider's result retention policy (Copernicus Data Space: **90 days after job completion** as of 2025-05-06; see their announcements).
@@ -93,7 +93,7 @@ So: you are always working from **real GRD granules in your chosen months**, not
 4. **No** per-orbit split: **all** acquisitions in each window feed one composite per band (contrast GEE).
 5. **No** Dynamic World urban mask.
 6. **No** focal-median step: circular **mean** kernels (discrete disks at ~50 / 100 / 150 m on a 10 m grid) on **`max_change`**.
-7. **`T_statistic` = (max_change + k50 + k100 + k150) / 4**; **`damage` = 1** where **`T_statistic` > threshold** (same surface as band 1 for thresholding).
+7. **`T_statistic` = (max_change + k50 + k100 + k150) / 4**; **`damage` = 1** where **`T_statistic` > cutoff** (same surface as band 1; cutoff = UI `damage_threshold`).
 8. Batch job → download GeoTIFF (**3 bands**: `T_statistic`, `damage`, `p_value`).
 
 ---
@@ -111,7 +111,7 @@ So: you are always working from **real GRD granules in your chosen months**, not
 3. **Welford** streaming mean / sample variance per pixel and band; **pooled *t*-style** comparison of pre vs post composites for **VV** and **VH**; **element-wise max** of the two polarisations → **`max_change`**.
 4. **Circular kernel means** at ~50 / 100 / 150 m on a ~10 m grid applied to **`max_change`** (no separate Gaussian blur; no focal median). **`T_statistic` = (max_change + k50 + k100 + k150) / 4**.
 5. **`p_value`:** conservative bound matching the openEO-style normal approximation (`openeo_style_p_value_bound` in `local_numpy_ops.py`).
-6. **`damage` = 1** where **`T_statistic` > threshold** (UI default 3.3) — **same surface as band 1**, like openEO.
+6. **`damage` = 1** where **`T_statistic` > cutoff** (UI default 3.3) — **same surface as band 1**, like openEO.
 7. Write **GeoTIFF** (**3 bands**; nodata **-9999** where applicable). Optional **footprints**: one or more `pwtt_*_footprints_*.gpkg` files with **`T_statistic`** per polygon.
 
 ---
@@ -131,7 +131,7 @@ So: you are always working from **real GRD granules in your chosen months**, not
    - **Hotelling** / **Mahalanobis**: orbit-wise z-normalization, pooled pre/post composites, joint VV+VH test; Mahalanobis uses an *n*-invariant effect size and a closed-form *p*-value. *(The QGIS download still exports only the three standard bands — see below.)*
 4. **Dynamic World** “built” mean > 0.1 in the pre window defines an **urban mask**. **Mask before focal median** (default) applies that mask before the focal step; if unchecked, masking happens after focal median.
 5. **Smoothing:** **default** = focal median (10 m, Gaussian) then circular convolutions at 50 / 100 / 150 m with equal weights on those four layers → exported **`T_statistic`**. **focal_only** skips the convolutions (100% weight on the focal-median layer).
-6. **`damage` = 1** where **`T_statistic` > damage_threshold** (UI default 3.3) — same logical rule as **openEO** and **Local** on the **exported** band 1.
+6. **`damage` = 1** where **`T_statistic` > damage_threshold** (UI cutoff, default 3.3) — same logical rule as **openEO** and **Local** on the **exported** band 1.
 7. **getDownloadURL** streams a GeoTIFF with **`bands`: `T_statistic`, `damage`, `p_value`** only. Extra EE image bands (e.g. Z-test diagnostics on Hotelling/Mahalanobis) are **not** included in the file the plugin writes.
 
 Very large AOIs may hit GEE download limits; export to Drive may be needed outside this plugin.
@@ -148,7 +148,7 @@ Using the **same rectangle and dates** in the UI does **not** guarantee matching
 | **Combining orbits / passes** | **Per relative orbit** tests, merged by **Stouffer** (default), **max**, **ztest**, **Hotelling**, or **Mahalanobis** (UI: Detection method) | **One** composite per window (all passes) | **Up to *N*** scenes per window (default 24, max 80), **max(VV,VH)** *t*-style stack |
 | **Urban mask** | **Dynamic World** “built” > 0.1 | **None** | **None** |
 | **Smoothing** | **Focal median** (10 m) then optional multi-scale **convolutions** (UI: default vs focal_only) | **No** focal median; discrete kernel disks on `max_change` | Same kernel idea as openEO on `max_change` (no focal median, no extra Gaussian) |
-| **Binary `damage`** | Threshold on exported **`T_statistic`** (band 1) | Threshold on **`T_statistic`** | Threshold on **`T_statistic`** |
+| **Binary `damage`** | Cutoff on exported **`T_statistic`** (band 1) | Cutoff on **`T_statistic`** | Cutoff on **`T_statistic`** |
 | **`p_value`** | Normal CDF + Bonferroni-style adjustments (depends on detection method) | Normal-style bound in graph | **`openeo_style_p_value_bound`** (matches openEO intent) |
 
 **Takeaway:** **openEO** and **Local** should be **closer** to each other than either is to **GEE**. **Qualitative** agreement in strong change areas is plausible across all three; **numerical identity** is not. Use **one** backend per analysis if you need a single consistent map.
@@ -159,12 +159,12 @@ Using the **same rectangle and dates** in the UI does **not** guarantee matching
 
 | File | Content |
 |------|--------|
-| `pwtt_*.tif` | Band 1: **`T_statistic`**. Band 2: **`damage`** (`T_statistic` > threshold). Band 3: **`p_value`**. Values differ by backend pipeline — see [table above](#gee-vs-openeo-vs-local-why-results-differ-for-the-same-aoi). |
+| `pwtt_*.tif` | Band 1: **`T_statistic`**. Band 2: **`damage`** (`T_statistic` > cutoff). Band 3: **`p_value`**. Values differ by backend pipeline — see [table above](#gee-vs-openeo-vs-local-why-results-differ-for-the-same-aoi). |
 | `job_info.json` | Beside the GeoTIFF after a successful run: parameters, `damage_threshold`, optional `processing_details`. |
 | `pwtt_job.json` | In the output folder: persisted job envelope (mirror of export format). |
 | `pwtt_*_footprints_*.gpkg` | Optional; building polygons with **`T_statistic`** column per polygon (one file per selected footprint source). |
 
-**Threshold:** Band 2 uses the **T-statistic threshold** in the plugin UI (default 3.3), applied to the exported **`T_statistic`** (band 1) for every backend. **GEE** still produces a different band 1 than **openEO** / **Local** because of the pipeline in the table above.
+**Cutoff:** Band 2 uses the **T-statistic cutoff** from the plugin UI (default 3.3, persisted as `damage_threshold`), applied to the exported **`T_statistic`** (band 1) for every backend. **GEE** still produces a different band 1 than **openEO** / **Local** because of the pipeline in the table above.
 
 ---
 

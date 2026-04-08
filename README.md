@@ -64,7 +64,7 @@ The plugin installs missing **pip** packages into **`PWTT/deps/`** under your [Q
 4. Set **War start date** and **Inference start date** (inference ≥ war start).
 5. Set **Pre-war interval** and **Post-war interval** (months).
 6. Optionally enable **Include building footprints** and choose one or more snapshot types: current OSM, historical at war start, and/or historical at inference start ([Overpass API](https://overpass-api.de/)). Each selection becomes a separate GeoPackage layer.
-7. Set **Damage mask (T-statistic threshold)** if you want something other than the default **3.3**. Binary **damage** (band 2) is **`T_statistic` > threshold** on the exported raster for every backend; **GEE** still builds **`T_statistic`** differently from openEO/Local — see [HOW_IT_WORKS.md](HOW_IT_WORKS.md#gee-vs-openeo-vs-local-why-results-differ-for-the-same-aoi).
+7. Set **Damage mask (T-statistic cutoff)** if you want something other than the default **3.3**. Higher values flag **fewer** pixels (stricter); this is a **test-statistic** cutoff, not a probability. Binary **damage** (band 2) is **`T_statistic` > cutoff** on the exported raster for every backend; **GEE** still builds **`T_statistic`** differently from openEO/Local — see [HOW_IT_WORKS.md](HOW_IT_WORKS.md#gee-vs-openeo-vs-local-why-results-differ-for-the-same-aoi).
 8. For **Google Earth Engine** only: choose **Detection method (GEE only)** (default **Stouffer**); expand **Advanced options** for **T-test type**, **Smoothing**, **Mask urban pixels before focal median**, and **Lee filter mode**.
 9. For **Google Earth Engine** only, you can check **Open interactive map in browser** (needs **geemap** in the QGIS Python environment) for a quick HTML preview before the GeoTIFF downloads.
 10. Choose an **output directory**.
@@ -74,7 +74,7 @@ The plugin installs missing **pip** packages into **`PWTT/deps/`** under your [Q
 
 - **pwtt_*.tif** — GeoTIFF (typically **three** bands):
   - Band 1: `T_statistic` — continuous score (higher = stronger change signal).
-  - Band 2: `damage` — binary mask where **`T_statistic` > threshold** (default 3.3). **GEE**, **openEO**, and **Local** each compute **`T_statistic`** differently — see [HOW_IT_WORKS.md](HOW_IT_WORKS.md#gee-vs-openeo-vs-local-why-results-differ-for-the-same-aoi).
+  - Band 2: `damage` — binary mask where **`T_statistic` > cutoff** (default 3.3). **GEE**, **openEO**, and **Local** each compute **`T_statistic`** differently — see [HOW_IT_WORKS.md](HOW_IT_WORKS.md#gee-vs-openeo-vs-local-why-results-differ-for-the-same-aoi).
   - Band 3: `p_value` — approximate significance (formula differs by backend).  
   For the **Local** backend, nodata is set to -9999 where applicable.
 
@@ -92,7 +92,7 @@ QGIS often opens the GeoTIFF as **multiband color** (band 1 → red, band 2 → 
 
 For an intuitive reading of **band 1**, use **singleband pseudocolor**. The plugin’s default ramp matches the reference PWTT Earth Engine preview (**`core/viz_constants.py`**, **`core/qgis_output_style.py`**): **yellow** at the stretch **minimum**, **red** at the midpoint, **purple** at the **maximum** (default min **3.0** / max **5.0** on `T_statistic`). That is **not** a “blue = cold, yellow = hot” weather map: **higher** `T_statistic` in that window is drawn **more purple**; **lower** in the window is **more yellow**. **Min/max** (or percentile stretch) in symbology controls which numeric range maps to those hues; change the ramp there if you want a different metaphor.
 
-**After the layer is added:** Tweaking symbology changes **only the picture**, not the raster values. Narrowing **max** (e.g. 5 → 4) maps the same high values further toward the **red–purple** end of the ramp so strong change can **look** more vivid without editing the file. **Band 2** (`damage`) is fixed for that export at the **threshold used when the job ran**; for a different binary mask, **re-run** with another threshold or use **Raster Calculator** (or similar) on band 1.
+**After the layer is added:** Tweaking symbology changes **only the picture**, not the raster values. Narrowing **max** (e.g. 5 → 4) maps the same high values further toward the **red–purple** end of the ramp so strong change can **look** more vivid without editing the file. **Band 2** (`damage`) is fixed for that export at the **cutoff used when the job ran**; for a different binary mask, **re-run** with another cutoff or use **Raster Calculator** (or similar) on band 1.
 
 With the **default** yellow → red → purple ramp (still a **model of backscatter change**, not a survey of destroyed buildings — see the paper):
 
@@ -112,7 +112,7 @@ Pixels with `T_statistic` **well below** your symbology minimum may render as tr
 | Inference start date | 2024-07-01 | Start of the post-event window; must be ≥ war start. |
 | Pre-war interval | 12 months | Length of the pre-event reference period before war start. |
 | Post-war interval | 2 months | Length of the post-event assessment window after inference start. |
-| T-statistic threshold | 3.3 | Cutoff for binary **damage** (band 2): **`T_statistic` > threshold** on all backends. |
+| T-statistic cutoff | 3.3 | Binary **damage** (band 2) where **`T_statistic` > cutoff** on all backends. Higher → stricter (fewer pixels flagged); not a probability. |
 | GEE detection method | Stouffer | **GEE only.** Stouffer (default), Max, Z-test, Hotelling T², or Mahalanobis — how per-orbit tests are combined. |
 | GEE advanced options | (see UI) | **GEE only.** Welch vs pooled *t*-test; default vs focal-only smoothing; urban mask before/after focal median; Lee per-image vs composite. Stored on jobs and **Rerun**. |
 
@@ -122,7 +122,7 @@ Pixels with `T_statistic` **well below** your symbology minimum may render as tr
 
 Pre/post **months** define **date ranges**, not a dense “one image per day” series. Sentinel-1 **revisits** your AOI on a **repeat cycle**; only **actual GRD acquisitions** in those ranges are used. **openEO** builds temporal composites (mean / variance / count) for a pooled *t*-style statistic; **Local** uses up to **N** pre and **N** post scenes (default **N = 24**, max **80**, via `PWTT/local_max_scenes_per_period`); **GEE** uses all matching passes **per orbit**. See [HOW_IT_WORKS.md](HOW_IT_WORKS.md#sentinel-1-grd-what-data-you-actually-get).
 
-Conceptually, PWTT compares Sentinel-1 VV/VH **before** and **after** conflict using a **pooled *t*-test–style** signal plus **spatial smoothing**. **openEO** and **Local** (this plugin) share **σ⁰ linear** radiometry and similar composite/kernel logic; **GEE** uses **Lee + log** on `COPERNICUS/S1_GRD_FLOAT`, **per-orbit** tests merged by a selectable **method**, **Dynamic World** urban masking, and **focal median** (optional multi-scale follow-up). All backends export **`damage`** as **`T_statistic` > threshold**, but **GEE**’s **`T_statistic`** is built on that pipeline — so **GEE** can diverge more from **openEO/Local** than those two diverge from each other. See [HOW_IT_WORKS.md](HOW_IT_WORKS.md#gee-vs-openeo-vs-local-why-results-differ-for-the-same-aoi).
+Conceptually, PWTT compares Sentinel-1 VV/VH **before** and **after** conflict using a **pooled *t*-test–style** signal plus **spatial smoothing**. **openEO** and **Local** (this plugin) share **σ⁰ linear** radiometry and similar composite/kernel logic; **GEE** uses **Lee + log** on `COPERNICUS/S1_GRD_FLOAT`, **per-orbit** tests merged by a selectable **method**, **Dynamic World** urban masking, and **focal median** (optional multi-scale follow-up). All backends export **`damage`** as **`T_statistic` > cutoff**, but **GEE**’s **`T_statistic`** is built on that pipeline — so **GEE** can diverge more from **openEO/Local** than those two diverge from each other. See [HOW_IT_WORKS.md](HOW_IT_WORKS.md#gee-vs-openeo-vs-local-why-results-differ-for-the-same-aoi).
 
 Paper and method background: [PWTT paper (arXiv:2405.06323)](https://arxiv.org/pdf/2405.06323).
 
