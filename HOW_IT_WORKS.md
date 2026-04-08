@@ -14,7 +14,7 @@ The plugin estimates **building-related damage** from **Sentinel-1 GRD** backsca
 
 Default **multiband RGB** (R=band 1, G=band 2, B=band 3) does **not** give a literal damage legend — it blends three different products. For change strength on **band 1**, use **singleband pseudocolor**: the plugin default is **yellow → red → purple** with min **3.0** / max **5.0** (`core/viz_constants.py`), i.e. **higher** `T_statistic` in that window is **more purple**, **lower** is **more yellow** — see [README.md — Reading colors on the map](README.md#reading-colors-on-the-map). Binary **damage** is band 2; use singleband/classified symbology there for a strict mask.
 
-**After the result is on the map:** Edits under **Layer Properties → Symbology** (min/max stretch, opacity, ramp) affect **display only** — `T_statistic` and `damage` pixel values in the GeoTIFF do not change. A tighter max on band 1 can make moderate scores look more “damaged” on screen without changing band 2. To change **which** pixels are 1 in the damage mask, **re-run** with a different threshold or derive a new mask from band 1 (e.g. Raster Calculator).
+**After the result is on the map:** Edits under **Layer Properties → Symbology** (min/max stretch, opacity, ramp) affect **display only** — `T_statistic` and `damage` pixel values in the GeoTIFF do not change. A **lower** max on band 1 (with the default yellow→red→purple ramp) maps the same values further toward the **red–purple** end, so change can look stronger on screen without changing band 2. To change **which** pixels are 1 in the damage mask, **re-run** with a different threshold or derive a new mask from band 1 (e.g. Raster Calculator).
 
 ---
 
@@ -42,7 +42,7 @@ Default **multiband RGB** (R=band 1, G=band 2, B=band 3) does **not** give a lit
 ## Plugin flow (orchestration)
 
 1. **Controls dock** — You set parameters and click **Run**. With **Google Earth Engine** selected, **Detection method** and collapsible **Advanced GEE options** appear; other backends ignore those fields.
-2. **Job record** — A job is created and appended to the persistent job list (`jobs.json` under the QGIS user profile, folder `PWTT`—**not** inside the `.qgz` project file).
+2. **Job record** — A job is created and appended to the persistent job list (`PWTT/jobs.json` under the active profile’s [QGIS settings directory](https://docs.qgis.org/latest/en/docs/user_manual/introduction/qgis_configuration.html#user-profiles) from `QgsApplication.qgisSettingsDirPath()`—**not** inside the `.qgz` project file).
 3. **`PWTTRunTask` (QgsTask)** — Runs in the background: creates the output directory if needed, calls `backend.authenticate()` then `backend.run(...)` with `output_path = <output_dir>/pwtt_<job_id>.tif` when a job id exists, otherwise `pwtt_result.tif`.
 4. **On success** — Job status is set to completed; `output_tif` is stored on the job; **`job_info.json`** is written beside the GeoTIFF (parameters, threshold, optional backend `processing_details`); the raster (and footprint layers if any) is **added to the current QGIS project**. **`pwtt_job.json`** is also written in the output folder when the job record is saved (same envelope as export/import).
 5. **Jobs dock** — Lists jobs, **Resume** / **Rerun** / **Delete**, export/import job JSON, zip single-job bundles, **View logs**, and progress. **Rerun** clones parameters (including **GEE** method and advanced options when present) into a **new** job id.
@@ -60,7 +60,7 @@ For all backends the intent is:
 - **Pre (baseline):** imagery from roughly **war start minus `pre_interval` months** through **war start**.
 - **Post:** imagery from **inference start** through roughly **inference start plus `post_interval` months**.
 
-**Implementation detail:** The **Local** backend computes the pre-window **start** as the **first day of the month** after subtracting months; **openEO** and **GEE** use calendar month arithmetic on the full anchor dates. Edge dates can therefore differ slightly for the same numbers.
+**Implementation detail:** **openEO** and **Local** in this plugin use the **same** calendar rule for window bounds: add or subtract months from war start / inference start, clamping the calendar day to **28** where needed (`_add_months` in `openeo_backend.py`, `_add_months_dt` in `local_backend.py`). **GEE** uses Earth Engine `Date.advance(..., "month")` on the full anchor dates. The backends can therefore disagree slightly on window edges for the same UI numbers (especially near month ends).
 
 ---
 
@@ -170,7 +170,7 @@ Using the **same rectangle and dates** in the UI does **not** guarantee matching
 
 ## Jobs and projects
 
-- Jobs are **global to the QGIS profile** (`jobs.json` under the profile’s **`PWTT`** folder), shared across all projects opened in that profile.
+- Jobs are **global to the QGIS profile** (`PWTT/jobs.json` next to `PWTT/deps/` under the profile’s QGIS settings directory), shared across all projects opened in that profile.
 - **Rerun** creates a **new** job with the same parameters (new id).
 - **Resume** continues the **same** job when status allows (e.g. stopped, failed, openEO batch in progress, or waiting for offline products on Local CDSE).
 - **Export / import** job lists as JSON; **Repair paths** if you moved output folders. Single-job **ZIP** bundles include `job.json` plus output rasters/footprints when files are present.
