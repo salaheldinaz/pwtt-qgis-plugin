@@ -63,6 +63,11 @@ def create_job(
     damage_threshold: float = 3.3,
     gee_viz: bool = False,
     data_source: str = "cdse",
+    gee_method: str = "stouffer",
+    gee_ttest_type: str = "welch",
+    gee_smoothing: str = "default",
+    gee_mask_before_smooth: bool = True,
+    gee_lee_mode: str = "per_image",
 ) -> dict:
     now = datetime.now().isoformat(timespec="seconds")
     if footprints_sources is None:
@@ -80,6 +85,11 @@ def create_job(
         "footprints_sources": list(footprints_sources),
         "damage_threshold": float(damage_threshold),
         "gee_viz": bool(gee_viz),
+        "gee_method": str(gee_method),
+        "gee_ttest_type": str(gee_ttest_type),
+        "gee_smoothing": str(gee_smoothing),
+        "gee_mask_before_smooth": bool(gee_mask_before_smooth),
+        "gee_lee_mode": str(gee_lee_mode),
         # Added in v0.1.44; older jobs.json entries lack this field.
         # Callers use .get("data_source") or "cdse" for backward compatibility.
         "data_source": (data_source or "cdse").strip().lower()
