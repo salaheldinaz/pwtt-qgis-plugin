@@ -460,6 +460,7 @@ class PWTTControlsDock(QDockWidget):
         self._gee_method_hint = self._hint("")
         gm_layout.addWidget(self._gee_method_hint)
         self.gee_method_combo.currentIndexChanged.connect(self._on_gee_method_changed)
+        self._on_gee_method_changed(0)  # populate hint for default selection
         params_layout.addRow(self.gee_method_group)
 
         # ── GEE: Advanced options (collapsed) ─────────────────────────────
