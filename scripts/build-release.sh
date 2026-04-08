@@ -48,7 +48,8 @@ fi
 rm -rf "${ROOT}/build"
 mkdir -p "$STAGING"
 
-rsync -a \
+# Portable tar copy (no rsync — minimal CI images e.g. nektos/act often lack rsync).
+tar -C "$ROOT" -cf - \
     --exclude='.git' \
     --exclude='.github' \
     --exclude='.cursor' \
@@ -61,7 +62,7 @@ rsync -a \
     --exclude='data' \
     --exclude='*.pyc' \
     --exclude='.DS_Store' \
-    "${ROOT}/" "$STAGING/"
+    . | tar -C "$STAGING" -xf -
 
 find "$STAGING" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 find "$STAGING" -name '*.pyc' -delete 2>/dev/null || true
