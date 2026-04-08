@@ -959,12 +959,21 @@ class PWTTControlsDock(QDockWidget):
         )
         self.gee_method_combo.setCurrentIndex(_method_idx)
         _ttest_val = job.get("gee_ttest_type", "welch")
-        self.gee_ttest_type_combo.setCurrentIndex(0 if _ttest_val == "welch" else 1)
+        self.gee_ttest_type_combo.setCurrentIndex(
+            next((i for i in range(self.gee_ttest_type_combo.count())
+                  if self.gee_ttest_type_combo.itemData(i) == _ttest_val), 0)
+        )
         _smoothing_val = job.get("gee_smoothing", "default")
-        self.gee_smoothing_combo.setCurrentIndex(0 if _smoothing_val == "default" else 1)
+        self.gee_smoothing_combo.setCurrentIndex(
+            next((i for i in range(self.gee_smoothing_combo.count())
+                  if self.gee_smoothing_combo.itemData(i) == _smoothing_val), 0)
+        )
         self.gee_mask_before_smooth_cb.setChecked(job.get("gee_mask_before_smooth", True))
         _lee_val = job.get("gee_lee_mode", "per_image")
-        self.gee_lee_mode_combo.setCurrentIndex(0 if _lee_val == "per_image" else 1)
+        self.gee_lee_mode_combo.setCurrentIndex(
+            next((i for i in range(self.gee_lee_mode_combo.count())
+                  if self.gee_lee_mode_combo.itemData(i) == _lee_val), 0)
+        )
 
         # AOI — parse WKT, set rubber band, zoom
         aoi_wkt = job.get("aoi_wkt")
@@ -1158,18 +1167,21 @@ class PWTTControlsDock(QDockWidget):
         self.gee_method_combo.setCurrentIndex(_method_idx)
         _ttest_val = s.value("gee_ttest_type", "welch")
         self.gee_ttest_type_combo.setCurrentIndex(
-            0 if _ttest_val == "welch" else 1
+            next((i for i in range(self.gee_ttest_type_combo.count())
+                  if self.gee_ttest_type_combo.itemData(i) == _ttest_val), 0)
         )
         _smoothing_val = s.value("gee_smoothing", "default")
         self.gee_smoothing_combo.setCurrentIndex(
-            0 if _smoothing_val == "default" else 1
+            next((i for i in range(self.gee_smoothing_combo.count())
+                  if self.gee_smoothing_combo.itemData(i) == _smoothing_val), 0)
         )
         self.gee_mask_before_smooth_cb.setChecked(
             s.value("gee_mask_before_smooth", True, type=bool)
         )
         _lee_val = s.value("gee_lee_mode", "per_image")
         self.gee_lee_mode_combo.setCurrentIndex(
-            0 if _lee_val == "per_image" else 1
+            next((i for i in range(self.gee_lee_mode_combo.count())
+                  if self.gee_lee_mode_combo.itemData(i) == _lee_val), 0)
         )
         s.endGroup()
         self._refresh_cred_storage_indicator()
