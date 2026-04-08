@@ -975,6 +975,19 @@ class PWTTJobsDock(QDockWidget):
             self._schedule_activity_log_persist(job_id)
             self._refresh_job_log_panel_if_selected(job_id)
             return False
+        if getattr(backend, "id", None) == "gee":
+            from ..core.gee_backend import gee_precheck_getdownload_url
+
+            ok, precheck_msg = gee_precheck_getdownload_url(job.get("aoi_wkt") or "")
+            if not ok:
+                QMessageBox.warning(self, "PWTT — GEE AOI too large", precheck_msg)
+                note = self._stamp_activity(
+                    "Not started: AOI exceeds GEE direct download size limit."
+                )
+                self._job_logs.setdefault(job_id, []).append(note)
+                self._schedule_activity_log_persist(job_id)
+                self._refresh_job_log_panel_if_selected(job_id)
+                return False
         from ..core.pwtt_task import PWTTRunTask
         from ..core import job_store
 

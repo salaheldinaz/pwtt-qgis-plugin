@@ -1,10 +1,60 @@
 # -*- coding: utf-8 -*-
 """Google Earth Engine backend: uses bundled gee_pwtt (detect_damage), downloads via getDownloadURL (streamed)."""
 
+from __future__ import annotations
+
+import math
 import requests
-from typing import Optional
+from typing import Optional, Tuple
 from .base_backend import PWTTBackend
 from .utils import wkt_to_bbox
+
+# Earth Engine getDownloadURL / thumbnail pipeline cap (bytes), per API error text.
+GEE_GETDOWNLOAD_MAX_BYTES = 50331648
+# Must match getDownloadURL params in run().
+_GEE_DOWNLOAD_SCALE_M = 10
+_GEE_DOWNLOAD_BANDS = 3
+_GEE_DOWNLOAD_BYTES_PER_BAND = 4  # Float32
+
+
+def estimate_gee_getdownload_request_bytes(
+    west: float,
+    south: float,
+    east: float,
+    north: float,
+    scale_m: float = _GEE_DOWNLOAD_SCALE_M,
+    num_bands: int = _GEE_DOWNLOAD_BANDS,
+    bytes_per_band: int = _GEE_DOWNLOAD_BYTES_PER_BAND,
+) -> int:
+    """Approximate uncompressed raster size for our GEE export (bbox rectangle, EPSG:4326 → m)."""
+    lat_mid = (south + north) / 2.0
+    m_per_deg_lon = 111_320.0 * math.cos(math.radians(lat_mid))
+    m_per_deg_lat = 111_320.0
+    width_m = max(0.0, (east - west)) * m_per_deg_lon
+    height_m = max(0.0, (north - south)) * m_per_deg_lat
+    cols = max(1, math.ceil(width_m / scale_m))
+    rows = max(1, math.ceil(height_m / scale_m))
+    return cols * rows * num_bands * bytes_per_band
+
+
+def gee_precheck_getdownload_url(aoi_wkt: str) -> Tuple[bool, str]:
+    """Return (True, "") if the AOI bbox is within EE direct-download limits, else (False, user message)."""
+    bbox = wkt_to_bbox((aoi_wkt or "").strip())
+    if not bbox:
+        return True, ""
+    west, south, east, north = bbox
+    est = estimate_gee_getdownload_request_bytes(west, south, east, north)
+    if est <= GEE_GETDOWNLOAD_MAX_BYTES:
+        return True, ""
+    lim_mb = GEE_GETDOWNLOAD_MAX_BYTES / (1024 * 1024)
+    est_mb = est / (1024 * 1024)
+    msg = (
+        f"The area of interest is too large for Google Earth Engine's direct GeoTIFF "
+        f"download (about {est_mb:.0f} MiB estimated vs {lim_mb:.0f} MiB max).\n\n"
+        f"GEE exports this result at {_GEE_DOWNLOAD_SCALE_M} m with {_GEE_DOWNLOAD_BANDS} float bands. "
+        f"Shrink the AOI or use another backend (e.g. Local or openEO)."
+    )
+    return False, msg
 
 
 class GEEBackend(PWTTBackend):
@@ -222,6 +272,14 @@ class GEEBackend(PWTTBackend):
         if not bbox:
             raise ValueError("Invalid AOI WKT")
         west, south, east, north = bbox
+        est_bytes = estimate_gee_getdownload_request_bytes(west, south, east, north)
+        if est_bytes > GEE_GETDOWNLOAD_MAX_BYTES:
+            lim_mb = GEE_GETDOWNLOAD_MAX_BYTES / (1024 * 1024)
+            est_mb = est_bytes / (1024 * 1024)
+            raise RuntimeError(
+                f"AOI too large for GEE direct download (~{est_mb:.0f} MiB estimated, "
+                f"limit ~{lim_mb:.0f} MiB). Shrink the AOI or use Local/openEO."
+            )
         aoi_geom = ee.Geometry.Rectangle([west, south, east, north])
         aoi = ee.FeatureCollection([ee.Feature(aoi_geom)])
 
