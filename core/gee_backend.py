@@ -210,6 +210,11 @@ class GEEBackend(PWTTBackend):
         remote_job_id: Optional[str] = None,
         damage_threshold: float = 3.3,
         gee_viz: bool = False,
+        method: str = 'stouffer',
+        ttest_type: str = 'welch',
+        smoothing: str = 'default',
+        mask_before_smooth: bool = True,
+        lee_mode: str = 'per_image',
     ) -> str:
         import ee
 
@@ -233,6 +238,11 @@ class GEEBackend(PWTTBackend):
             viz=False,
             export=False,
             damage_threshold=damage_threshold,
+            method=method,
+            ttest_type=ttest_type,
+            smoothing=smoothing,
+            mask_before_smooth=mask_before_smooth,
+            lee_mode=lee_mode,
         )
 
         # gee_viz is handled by PWTTRunTask.finished() on the main thread
