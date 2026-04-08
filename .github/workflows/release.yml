@@ -1,0 +1,145 @@
+# Bump plugin version (metadata.txt), build QGIS ZIP, commit, tag, publish release.
+# Works on GitHub Actions and Gitea Actions (API-compatible enough for checkout + release).
+#
+# Run: Actions → Release → Run workflow → choose bump (auto|patch|minor|major).
+#
+# Optional secret RELEASE_TOKEN: PAT with repo scope if the default GITHUB_TOKEN
+# cannot push to a protected default branch or create releases on your forge.
+#
+# Optional secret MATTERMOST_WEBHOOK_URL: incoming webhook URL — posts success/failure
+# (skipped if unset).
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump — auto uses latest commit subject (feat→minor, BREAKING→major, else patch)"
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+
+      - name: Install PyQt resource compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pyqt5-dev-tools
+
+      - name: Bump version
+        run: bash scripts/bump-version.sh "${{ inputs.bump }}"
+
+      - name: Resolve new version
+        id: ver
+        run: |
+          v="$(sed -n 's/^version=\(.*\)/\1/p' metadata.txt | tr -d '[:space:]')"
+          echo "version=${v}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${v}" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse if tag exists
+        run: |
+          if git rev-parse "${{ steps.ver.outputs.tag }}" >/dev/null 2>&1; then
+            echo "Tag ${{ steps.ver.outputs.tag }} already exists."
+            exit 1
+          fi
+
+      - name: Build plugin ZIP
+        run: bash scripts/build-release.sh
+
+      - name: Commit version + compiled resources (if any)
+        run: |
+          git config user.name "forge-release-bot"
+          git config user.email "forge-release-bot@users.noreply.local"
+          git add metadata.txt resources_rc.py
+          git commit -m "chore(release): ${{ steps.ver.outputs.tag }}"
+
+      - name: Tag and push
+        run: |
+          git tag "${{ steps.ver.outputs.tag }}"
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          git push origin "HEAD:${BRANCH}"
+          git push origin "${{ steps.ver.outputs.tag }}"
+
+      - name: Create GitHub/Gitea release with ZIP
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
+          files: build/pwtt_qgis-${{ steps.ver.outputs.version }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+
+  notify-mattermost:
+    needs: release
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post to Mattermost
+        env:
+          WEBHOOK_URL: ${{ secrets.MATTERMOST_WEBHOOK_URL }}
+          RESULT: ${{ needs.release.result }}
+          VERSION: ${{ needs.release.outputs.version }}
+          TAG: ${{ needs.release.outputs.tag }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          if [ -z "${WEBHOOK_URL:-}" ]; then
+            echo "MATTERMOST_WEBHOOK_URL not set; skipping notification."
+            exit 0
+          fi
+
+          short_sha="${SHA:0:7}"
+          case "$RESULT" in
+            success)
+              emoji=":white_check_mark:"
+              title="PWTT QGIS release **succeeded**"
+              details="$(printf '%s\n' "- Tag: \`${TAG:-unknown}\`" "- Version: \`${VERSION:-unknown}\`" "- Commit: \`${short_sha}\`")"
+              ;;
+            cancelled)
+              emoji=":double_vertical_bar:"
+              title="PWTT QGIS release **cancelled**"
+              details="$(printf '%s\n' "- Ref: \`${REF}\`" "- Commit: \`${short_sha}\`")"
+              ;;
+            *)
+              emoji=":x:"
+              title="PWTT QGIS release **failed**"
+              details="$(printf '%s\n' "- Ref: \`${REF}\`" "- Commit: \`${short_sha}\`" "(if failed after bump, see run logs for version)")"
+              ;;
+          esac
+
+          text="$(printf '%s\n\n%s\n\n[%s](%s) · `%s`' \
+            "${emoji} ${title}" \
+            "$details" \
+            "Workflow run" \
+            "${RUN_URL}" \
+            "${REPO}")"
+
+          payload="$(jq -n --arg t "$text" '{text: $t}')"
+          curl -sS -f -X POST -H 'Content-Type: application/json' -d "$payload" "$WEBHOOK_URL"

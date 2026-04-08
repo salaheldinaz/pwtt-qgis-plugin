@@ -2,7 +2,7 @@ data/
 code/*.ipynb
 website
 .DS_Store
-releases/
+build/
 __pycache__/
 *.pyc
 .venv/
