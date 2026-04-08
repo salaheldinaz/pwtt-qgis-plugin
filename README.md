@@ -1,6 +1,6 @@
 # PWTT QGIS Plugin — Battle Damage Detection
 
-QGIS plugin implementing the **Pixel-Wise T-Test (PWTT)** algorithm for building damage detection from Sentinel-1 SAR imagery. Choose among three processing backends: [openEO](https://openeo.org/) , [Google Earth Engine](https://earthengine.google.com/), or full-local processing.
+QGIS plugin implementing the **Pixel-Wise T-Test (PWTT)** algorithm for building damage detection from Sentinel-1 SAR imagery. Choose among three processing backends: [openEO](https://openeo.org/), [Google Earth Engine](https://earthengine.google.com/), or full-local processing.
 
 ## Links
 
@@ -63,7 +63,7 @@ The plugin installs missing **pip** packages into **`PWTT/deps/`** under your [Q
 3. Define the **AOI**: **Draw rectangle on map**, or enter bounds and **Set AOI from coordinates**. **Hide on map** / **Show on map** only toggles the orange overlay; the stored rectangle is unchanged.
 4. Set **War start date** and **Inference start date** (inference ≥ war start).
 5. Set **Pre-war interval** and **Post-war interval** (months).
-6. Optionally enable **Include building footprints (OSM)** and choose one or more snapshot types: current OSM, historical at war start, and/or historical at inference start ([Overpass API](https://overpass-api.de/)). Each selection becomes a separate GeoPackage layer.
+6. Optionally enable **Include building footprints** and choose one or more snapshot types: current OSM, historical at war start, and/or historical at inference start ([Overpass API](https://overpass-api.de/)). Each selection becomes a separate GeoPackage layer.
 7. Set **Damage mask (T-statistic threshold)** if you want something other than the default **3.3**. Binary **damage** (band 2) is **`T_statistic` > threshold** on the exported raster for every backend; **GEE** still builds **`T_statistic`** differently from openEO/Local — see [HOW_IT_WORKS.md](HOW_IT_WORKS.md#gee-vs-openeo-vs-local-why-results-differ-for-the-same-aoi).
 8. For **Google Earth Engine** only: choose **Detection method (GEE only)** (default **Stouffer**); expand **Advanced options** for **T-test type**, **Smoothing**, **Mask urban pixels before focal median**, and **Lee filter mode**.
 9. For **Google Earth Engine** only, you can check **Open interactive map in browser** (needs **geemap** in the QGIS Python environment) for a quick HTML preview before the GeoTIFF downloads.
@@ -108,7 +108,7 @@ Pixels with `T_statistic` **well below** your symbology minimum may render as tr
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| War start date | 2022-02-22 | Start of the conflict (baseline ends at this date). |
+| War start date | 2023-10-07 | Start of the conflict (pre-war window ends at this date). |
 | Inference start date | 2024-07-01 | Start of the post-event window; must be ≥ war start. |
 | Pre-war interval | 12 months | Length of the pre-event reference period before war start. |
 | Post-war interval | 2 months | Length of the post-event assessment window after inference start. |
