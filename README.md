@@ -90,20 +90,19 @@ The plugin installs missing **pip** packages into **`PWTT/deps/`** under your [Q
 
 QGIS often opens the GeoTIFF as **multiband color** (band 1 → red, band 2 → green, band 3 → blue). That **RGB blend is not** a single “damage heat map”: it mixes **T-statistic**, **binary damage (0/1)**, and **p-value**, so a given hue does **not** map one-to-one to “how damaged.”
 
-For an intuitive heat-map reading, style **band 1** (`T_statistic`) as **singleband pseudocolor** with a ramp from **cool** (blue / purple) to **hot** (yellow / green), similar to the figures in the [PWTT project README](https://github.com/oballinger/PWTT). **Min/max** (or percentile stretch) in symbology controls how strong a value must be before it looks “yellow”; adjust those if the map looks all one color.
+For an intuitive reading of **band 1**, use **singleband pseudocolor**. The plugin’s default ramp matches the reference PWTT Earth Engine preview (**`core/viz_constants.py`**, **`core/qgis_output_style.py`**): **yellow** at the stretch **minimum**, **red** at the midpoint, **purple** at the **maximum** (default min **3.0** / max **5.0** on `T_statistic`). That is **not** a “blue = cold, yellow = hot” weather map: **higher** `T_statistic` in that window is drawn **more purple**; **lower** in the window is **more yellow**. **Min/max** (or percentile stretch) in symbology controls which numeric range maps to those hues; change the ramp there if you want a different metaphor.
 
-**After the layer is added:** Tweaking symbology changes **only the picture**, not the raster values. The plugin’s default pseudocolor on band 1 uses min **3.0** / max **5.0** on `T_statistic` (see `core/viz_constants.py`, aligned with the reference PWTT Earth Engine preview). Narrowing **max** (e.g. 5 → 4) pushes more pixels toward the “hot” colors so change can **look** stronger without editing the file. **Band 2** (`damage`) is fixed for that export at the **threshold used when the job ran**; for a different binary mask, **re-run** with another threshold or use **Raster Calculator** (or similar) on band 1.
+**After the layer is added:** Tweaking symbology changes **only the picture**, not the raster values. Narrowing **max** (e.g. 5 → 4) maps the same high values further toward the **red–purple** end of the ramp so strong change can **look** more vivid without editing the file. **Band 2** (`damage`) is fixed for that export at the **threshold used when the job ran**; for a different binary mask, **re-run** with another threshold or use **Raster Calculator** (or similar) on band 1.
 
-Then you can read the map in simple terms (still a **model of backscatter change**, not a survey of destroyed buildings — see the paper):
+With the **default** yellow → red → purple ramp (still a **model of backscatter change**, not a survey of destroyed buildings — see the paper):
 
 | Color | What it means |
 |-------|----------------|
-| 🟡 **Yellow** | **High confidence of damage** — radar backscatter changed a lot. Strongest change signal; often interpreted as severe or certain structural change in PWTT validation settings. |
-| 🟢 **Green** | **Probable damage** — clear change in signal; likely affected. |
-| 🟤 **Dark red / maroon** | **Some change detected**, but weaker — uncertain or partial effect. |
-| 🔵 **Blue / purple** | **Little to no change** — backscatter stayed stable; likely **undamaged** in the sense of “no large pre/post shift.” |
+| 🟣 **Purple** | **`T_statistic` near the stretch max** (default 5.0) — strongest change signal **within the 3–5 display window**. |
+| 🔴 **Red** | **Mid stretch** (~4) — strong change between min and max. |
+| 🟡 **Yellow** | **Near the stretch min** (default 3.0) — elevated signal in the band, but the **lowest** end of this ramp (not the strongest hue). |
 
-Think of it as a **heat map of destruction (as inferred from SAR change)**: hotter (yellower) pixels mean the statistic is more extreme; cooler (bluer) pixels mean little change. Use **band 2** with **singleband** / two-class symbology if you only want the binary **above/below threshold** mask.
+Pixels with `T_statistic` **well below** your symbology minimum may render as transparent or a flat color depending on QGIS settings — that is **not** “purple means undamaged.” For a strict above/below mask, use **band 2** with **singleband** / two-class symbology. If you choose **another** ramp, read colors from that ramp’s legend, not this table.
 
 ## Parameters
 

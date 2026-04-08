@@ -12,7 +12,7 @@ The plugin estimates **building-related damage** from **Sentinel-1 GRD** backsca
 
 ### Map colors (QGIS)
 
-Default **multiband RGB** (R=band 1, G=band 2, B=band 3) does **not** give a literal “yellow = damaged” legend — it blends three different products. For an intuitive **heat map** of change strength, use **singleband pseudocolor on band 1** (`T_statistic`) with a cool-to-hot ramp; then colors align with the rough guide in [README.md — Reading colors on the map](README.md#reading-colors-on-the-map) (yellow ≈ strongest change signal, blue/purple ≈ little change). Binary **damage** is band 2; use singleband/classified symbology there for a strict mask.
+Default **multiband RGB** (R=band 1, G=band 2, B=band 3) does **not** give a literal damage legend — it blends three different products. For change strength on **band 1**, use **singleband pseudocolor**: the plugin default is **yellow → red → purple** with min **3.0** / max **5.0** (`core/viz_constants.py`), i.e. **higher** `T_statistic` in that window is **more purple**, **lower** is **more yellow** — see [README.md — Reading colors on the map](README.md#reading-colors-on-the-map). Binary **damage** is band 2; use singleband/classified symbology there for a strict mask.
 
 **After the result is on the map:** Edits under **Layer Properties → Symbology** (min/max stretch, opacity, ramp) affect **display only** — `T_statistic` and `damage` pixel values in the GeoTIFF do not change. A tighter max on band 1 can make moderate scores look more “damaged” on screen without changing band 2. To change **which** pixels are 1 in the damage mask, **re-run** with a different threshold or derive a new mask from band 1 (e.g. Raster Calculator).
 
