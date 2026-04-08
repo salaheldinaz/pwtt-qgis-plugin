@@ -1772,6 +1772,11 @@ class PWTTJobsDock(QDockWidget):
             damage_threshold=old.get("damage_threshold", 3.3),
             gee_viz=old.get("gee_viz", False),
             data_source=old.get("data_source", "cdse"),
+            gee_method=old.get("gee_method", "stouffer"),
+            gee_ttest_type=old.get("gee_ttest_type", "welch"),
+            gee_smoothing=old.get("gee_smoothing", "default"),
+            gee_mask_before_smooth=old.get("gee_mask_before_smooth", True),
+            gee_lee_mode=old.get("gee_lee_mode", "per_image"),
         )
         # Derive base dir from old output_dir (old is base/old_id/)
         base_dir = os.path.dirname(old["output_dir"].rstrip("/"))
