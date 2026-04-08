@@ -93,6 +93,35 @@ class GEEBackend(PWTTBackend):
             pass
         return ""
 
+    @staticmethod
+    def _gee_saved_oauth_matches_client(client_id: str) -> bool:
+        """True if ~/.config/earthengine/credentials has a refresh token for this client."""
+        import json
+        from pathlib import Path
+        from ee import oauth as _ee_oauth
+
+        path = Path(_ee_oauth.get_credentials_path())
+        if not path.is_file():
+            return False
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return False
+        if not (data.get("refresh_token") or "").strip():
+            return False
+        stored = (data.get("client_id") or "").strip()
+        return bool(stored) and stored == client_id.strip()
+
+    @staticmethod
+    def _gee_needs_interactive_authenticate(ee) -> bool:
+        """earthengine-api no longer exposes ee.data._credentials; use the public API."""
+        try:
+            ee.data.get_persistent_credentials()
+            return False
+        except Exception:
+            return True
+
     def authenticate(self, credentials: dict) -> bool:
         import builtins
         import socket as _socket
@@ -105,6 +134,12 @@ class GEEBackend(PWTTBackend):
         try:
             # ── Preferred: OAuth 2.0 with user's own GCP client credentials ──
             if client_id and client_secret:
+                if (
+                    self._gee_saved_oauth_matches_client(client_id)
+                    and not self._gee_needs_interactive_authenticate(ee)
+                ):
+                    self._ee_init(ee, project)
+                    return True
                 self._oauth_with_client_credentials(
                     project, client_id, client_secret
                 )
@@ -112,7 +147,7 @@ class GEEBackend(PWTTBackend):
                 return True
 
             # ── Fallback: EE default browser OAuth ──
-            if not getattr(ee.data, "_credentials", None):
+            if self._gee_needs_interactive_authenticate(ee):
                 _orig_input = builtins.input
                 # Some QGIS plugins call socket.setdefaulttimeout(), which
                 # causes the OAuth callback HTTP server to time out before the
