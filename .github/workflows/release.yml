@@ -8,6 +8,8 @@
 #
 # Optional secret MATTERMOST_WEBHOOK_URL: incoming webhook URL — posts success/failure
 # (skipped if unset).
+#
+# Gitea: do not set generate_release_notes — that calls GitHub-only API and fails (405).
 
 name: Release
 
@@ -84,12 +86,26 @@ jobs:
           git push origin "HEAD:${BRANCH}"
           git push origin "${{ steps.ver.outputs.tag }}"
 
+      - name: Release description from latest commit
+        id: relbody
+        run: |
+          {
+            echo 'body<<RELBODY_EOF'
+            echo "**${{ steps.ver.outputs.tag }}** — $(git log -1 --pretty=%s)"
+            echo ""
+            echo '```'
+            git log -1 --pretty=%B
+            echo '```'
+            echo 'RELBODY_EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub/Gitea release with ZIP
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: ${{ steps.ver.outputs.tag }}
-          generate_release_notes: true
+          body: ${{ steps.relbody.outputs.body }}
+          generate_release_notes: false
           files: build/pwtt_qgis-${{ steps.ver.outputs.version }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
