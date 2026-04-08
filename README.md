@@ -53,27 +53,28 @@ The plugin installs missing **pip** packages into **`PWTT/deps/`** under your [Q
 | **Local** | Your machine | Source-specific: CDSE creds, Earthdata creds (ASF), optional PC key | `numpy`, `rasterio`, `requests` (+ source-specific packages) |
 
 - **openEO:** No data download; result GeoTIFF is downloaded when the batch job finishes.
-- **GEE:** Uses bundled PWTT logic; download is streamed to disk. Very large AOIs may require GEE Export to Drive instead of getDownloadURL.
+- **GEE:** Uses bundled **`gee_pwtt`** (synced with upstream PWTT): configurable **detection method** (Stouffer default), Welch/pooled *t*, smoothing and Lee modes in **Advanced GEE options**. Download is streamed to disk (**3 bands** only). Very large AOIs may require GEE Export to Drive instead of getDownloadURL.
 - **Local:** Select source in UI: CDSE, ASF, or Microsoft Planetary Computer. Downloads [Sentinel-1 GRD](https://sentinels.copernicus.eu/web/sentinel/missions/sentinel-1) into **`<output_dir>/.pwtt_cache`**, then runs an **openEO-aligned** NumPy pipeline (σ⁰ linear, no Lee/log; pooled *t*-style statistic; same kernel idea as CDSE openEO — see [HOW_IT_WORKS.md](HOW_IT_WORKS.md)). By default uses up to **24** pre and **24** post scenes per job (cap **80**, setting `PWTT/local_max_scenes_per_period`). Disk and RAM depend on AOI size and that cap.
 
 ## Usage
 
 1. Open **PWTT — Damage Detection** from the **PWTT** toolbar or **Plugins → PWTT**. Other PWTT docks (toggle from the toolbar): **Jobs**, **Job log**, **openEO Jobs**, **GRD staging** (CDSE offline ordering).
 2. Select a **processing backend** and enter its credentials. If imports fail, use **Install Dependencies** in this panel.
-3. Click **Draw rectangle on map** and drag a rectangle for the AOI (non-zero area).
+3. Define the **AOI**: **Draw rectangle on map**, or enter bounds and **Set AOI from coordinates**. **Hide on map** / **Show on map** only toggles the orange overlay; the stored rectangle is unchanged.
 4. Set **War start date** and **Inference start date** (inference ≥ war start).
 5. Set **Pre-war interval** and **Post-war interval** (months).
 6. Optionally enable **Include building footprints (OSM)** and choose one or more snapshot types: current OSM, historical at war start, and/or historical at inference start ([Overpass API](https://overpass-api.de/)). Each selection becomes a separate GeoPackage layer.
-7. Set **Damage mask (T-statistic threshold)** if you want something other than the default **3.3** (GEE’s binary band follows a different surface than band 1 — see [HOW_IT_WORKS.md](HOW_IT_WORKS.md#gee-vs-openeo-vs-local-why-results-differ-for-the-same-aoi)).
-8. For **Google Earth Engine** only, you can check **Open interactive map in browser** (needs **geemap** in the QGIS Python environment) for a quick HTML preview before the GeoTIFF downloads.
-9. Choose an **output directory**.
-10. Confirm the summary dialog, then **Run**. Progress appears in the task bar and **PWTT — Job log** / Jobs dock. The raster (and footprint layers if any) are added to the project when finished.
+7. Set **Damage mask (T-statistic threshold)** if you want something other than the default **3.3**. Binary **damage** (band 2) is **`T_statistic` > threshold** on the exported raster for every backend; **GEE** still builds **`T_statistic`** differently from openEO/Local — see [HOW_IT_WORKS.md](HOW_IT_WORKS.md#gee-vs-openeo-vs-local-why-results-differ-for-the-same-aoi).
+8. For **Google Earth Engine** only: choose **Detection method (GEE only)** (default **Stouffer**); expand **Advanced options** for **T-test type**, **Smoothing**, **Mask urban pixels before focal median**, and **Lee filter mode**.
+9. For **Google Earth Engine** only, you can check **Open interactive map in browser** (needs **geemap** in the QGIS Python environment) for a quick HTML preview before the GeoTIFF downloads.
+10. Choose an **output directory**.
+11. Confirm the summary dialog, then **Run**. Progress appears in the task bar and **PWTT — Job log** / Jobs dock. The raster (and footprint layers if any) are added to the project when finished.
 
 ## Output files
 
 - **pwtt_*.tif** — GeoTIFF (typically **three** bands):
   - Band 1: `T_statistic` — continuous score (higher = stronger change signal).
-  - Band 2: `damage` — binary mask from your **T-statistic threshold** in the UI (default 3.3). **GEE thresholds a different surface than openEO / Local** — see [HOW_IT_WORKS.md](HOW_IT_WORKS.md#gee-vs-openeo-vs-local-why-results-differ-for-the-same-aoi).
+  - Band 2: `damage` — binary mask where **`T_statistic` > threshold** (default 3.3). **GEE**, **openEO**, and **Local** each compute **`T_statistic`** differently — see [HOW_IT_WORKS.md](HOW_IT_WORKS.md#gee-vs-openeo-vs-local-why-results-differ-for-the-same-aoi).
   - Band 3: `p_value` — approximate significance (formula differs by backend).  
   For the **Local** backend, nodata is set to -9999 where applicable.
 
@@ -112,7 +113,9 @@ Think of it as a **heat map of destruction (as inferred from SAR change)**: hott
 | Inference start date | 2024-07-01 | Start of the post-event window; must be ≥ war start. |
 | Pre-war interval | 12 months | Length of the pre-event reference period before war start. |
 | Post-war interval | 2 months | Length of the post-event assessment window after inference start. |
-| T-statistic threshold | 3.3 | Cutoff for binary **damage** (band 2). Rule matches **openEO** and **Local** on final `T_statistic`; **GEE** thresholds **`t_smooth`** instead — see HOW_IT_WORKS. |
+| T-statistic threshold | 3.3 | Cutoff for binary **damage** (band 2): **`T_statistic` > threshold** on all backends. |
+| GEE detection method | Stouffer | **GEE only.** Stouffer (default), Max, Z-test, Hotelling T², or Mahalanobis — how per-orbit tests are combined. |
+| GEE advanced options | (see UI) | **GEE only.** Welch vs pooled *t*-test; default vs focal-only smoothing; urban mask before/after focal median; Lee per-image vs composite. Stored on jobs and **Rerun**. |
 
 ## How it works
 
@@ -120,7 +123,7 @@ Think of it as a **heat map of destruction (as inferred from SAR change)**: hott
 
 Pre/post **months** define **date ranges**, not a dense “one image per day” series. Sentinel-1 **revisits** your AOI on a **repeat cycle**; only **actual GRD acquisitions** in those ranges are used. **openEO** builds temporal composites (mean / variance / count) for a pooled *t*-style statistic; **Local** uses up to **N** pre and **N** post scenes (default **N = 24**, max **80**, via `PWTT/local_max_scenes_per_period`); **GEE** uses all matching passes **per orbit**. See [HOW_IT_WORKS.md](HOW_IT_WORKS.md#sentinel-1-grd-what-data-you-actually-get).
 
-Conceptually, PWTT compares Sentinel-1 VV/VH **before** and **after** conflict using a **pooled *t*-test–style** signal plus **spatial smoothing**. **openEO** and **Local** (this plugin) share **σ⁰ linear** radiometry and similar composite/kernel logic; **GEE** uses **Lee + log** on `COPERNICUS/S1_GRD_FLOAT`, **per-orbit** aggregation, **Dynamic World** urban masking, **focal median**, and thresholds **`t_smooth`** for band 2 — so **GEE** can diverge more from **openEO/Local** than **openEO** and **Local** diverge from each other. See [HOW_IT_WORKS.md](HOW_IT_WORKS.md#gee-vs-openeo-vs-local-why-results-differ-for-the-same-aoi).
+Conceptually, PWTT compares Sentinel-1 VV/VH **before** and **after** conflict using a **pooled *t*-test–style** signal plus **spatial smoothing**. **openEO** and **Local** (this plugin) share **σ⁰ linear** radiometry and similar composite/kernel logic; **GEE** uses **Lee + log** on `COPERNICUS/S1_GRD_FLOAT`, **per-orbit** tests merged by a selectable **method**, **Dynamic World** urban masking, and **focal median** (optional multi-scale follow-up). All backends export **`damage`** as **`T_statistic` > threshold**, but **GEE**’s **`T_statistic`** is built on that pipeline — so **GEE** can diverge more from **openEO/Local** than those two diverge from each other. See [HOW_IT_WORKS.md](HOW_IT_WORKS.md#gee-vs-openeo-vs-local-why-results-differ-for-the-same-aoi).
 
 Paper and method background: [PWTT paper (arXiv:2405.06323)](https://arxiv.org/pdf/2405.06323).
 

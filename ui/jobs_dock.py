@@ -962,7 +962,10 @@ class PWTTJobsDock(QDockWidget):
     # ── Launch / lifecycle ────────────────────────────────────────────────────
 
     def launch_job(self, job, backend):
-        """Start a task for the given job. Called from controls dock or resume."""
+        """Start a task for the given job. Called from controls dock or resume.
+
+        Returns True if a new task was queued, False if the job was already running.
+        """
         job_id = job["id"]
         if job_id in self._active_tasks:
             note = self._stamp_activity(
@@ -971,7 +974,7 @@ class PWTTJobsDock(QDockWidget):
             self._job_logs.setdefault(job_id, []).append(note)
             self._schedule_activity_log_persist(job_id)
             self._refresh_job_log_panel_if_selected(job_id)
-            return
+            return False
         from ..core.pwtt_task import PWTTRunTask
         from ..core import job_store
 
@@ -997,6 +1000,11 @@ class PWTTJobsDock(QDockWidget):
             data_source=job.get("data_source")
             if job.get("backend_id") == "local"
             else None,
+            gee_method=job.get("gee_method", "stouffer"),
+            gee_ttest_type=job.get("gee_ttest_type", "welch"),
+            gee_smoothing=job.get("gee_smoothing", "default"),
+            gee_mask_before_smooth=job.get("gee_mask_before_smooth", True),
+            gee_lee_mode=job.get("gee_lee_mode", "per_image"),
         )
 
         self._ensure_job_log_loaded(job)
@@ -1033,6 +1041,7 @@ class PWTTJobsDock(QDockWidget):
         self._on_job_selected()
         self.show()
         self.raise_()
+        return True
 
     # ── Task callbacks (main thread) ──────────────────────────────────────────
 
@@ -1767,6 +1776,11 @@ class PWTTJobsDock(QDockWidget):
             damage_threshold=old.get("damage_threshold", 3.3),
             gee_viz=old.get("gee_viz", False),
             data_source=old.get("data_source", "cdse"),
+            gee_method=old.get("gee_method", "stouffer"),
+            gee_ttest_type=old.get("gee_ttest_type", "welch"),
+            gee_smoothing=old.get("gee_smoothing", "default"),
+            gee_mask_before_smooth=old.get("gee_mask_before_smooth", True),
+            gee_lee_mode=old.get("gee_lee_mode", "per_image"),
         )
         # Derive base dir from old output_dir (old is base/old_id/)
         base_dir = os.path.dirname(old["output_dir"].rstrip("/"))

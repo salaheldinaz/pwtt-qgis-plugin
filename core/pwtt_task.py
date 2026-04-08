@@ -29,6 +29,11 @@ class PWTTRunTask(QgsTask):
         damage_threshold=3.3,
         gee_viz=False,
         data_source=None,
+        gee_method='stouffer',
+        gee_ttest_type='welch',
+        gee_smoothing='default',
+        gee_mask_before_smooth=True,
+        gee_lee_mode='per_image',
     ):
         super().__init__("PWTT processing", QgsTask.CanCancel)
         self.backend = backend
@@ -50,6 +55,11 @@ class PWTTRunTask(QgsTask):
         self.remote_job_id = remote_job_id  # openEO job id for resume
         self.damage_threshold = float(damage_threshold)
         self.gee_viz = bool(gee_viz)
+        self.gee_method = str(gee_method)
+        self.gee_ttest_type = str(gee_ttest_type)
+        self.gee_smoothing = str(gee_smoothing)
+        self.gee_mask_before_smooth = bool(gee_mask_before_smooth)
+        self.gee_lee_mode = str(gee_lee_mode)
         # Local GRD catalog (cdse/asf/pc); used in layer tree names.
         self.data_source = (
             (data_source or "").strip().lower() if data_source else None
@@ -110,6 +120,14 @@ class PWTTRunTask(QgsTask):
                 damage_threshold=self.damage_threshold,
                 gee_viz=self.gee_viz,
             )
+            if getattr(self.backend, 'id', None) == 'gee':
+                run_kwargs.update(
+                    method=self.gee_method,
+                    ttest_type=self.gee_ttest_type,
+                    smoothing=self.gee_smoothing,
+                    mask_before_smooth=self.gee_mask_before_smooth,
+                    lee_mode=self.gee_lee_mode,
+                )
             # Pass remote_job_id for backends that support resuming (openEO)
             if self.remote_job_id:
                 run_kwargs["remote_job_id"] = self.remote_job_id
@@ -150,6 +168,11 @@ class PWTTRunTask(QgsTask):
                 "include_footprints": self.include_footprints,
                 "damage_threshold": self.damage_threshold,
                 "gee_viz": self.gee_viz,
+                "gee_method": self.gee_method,
+                "gee_ttest_type": self.gee_ttest_type,
+                "gee_smoothing": self.gee_smoothing,
+                "gee_mask_before_smooth": self.gee_mask_before_smooth,
+                "gee_lee_mode": self.gee_lee_mode,
                 "output_tif": self.output_tif,
                 "completed_at": datetime.now().isoformat(timespec="seconds"),
             }
