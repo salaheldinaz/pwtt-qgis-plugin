@@ -47,6 +47,7 @@ from .backend_auth import (
     ensure_footprint_dependencies,
     is_message_box_yes,
     save_openeo_credentials_to_settings,
+    test_remote_backend_credentials,
 )
 from .dock_common import BACKENDS, dock_title, job_footprints_sources
 
@@ -174,6 +175,12 @@ class PWTTControlsDock(QDockWidget):
         )
         self.openeo_verify_ssl.stateChanged.connect(self._persist_openeo_verify_ssl)
         oe_layout.addRow(self.openeo_verify_ssl)
+        self.openeo_test_creds_btn = QPushButton("Test openEO credentials")
+        self.openeo_test_creds_btn.setToolTip(
+            "Connect to Copernicus openEO and verify Client ID / Client Secret (client-credentials flow)."
+        )
+        self.openeo_test_creds_btn.clicked.connect(self._test_openeo_credentials)
+        oe_layout.addRow(self.openeo_test_creds_btn)
         self.openeo_clear_creds_btn = QPushButton("Clear saved openEO credentials")
         self.openeo_clear_creds_btn.setToolTip(
             "Remove Client ID and Client Secret from QGIS settings and reset the openEO connection."
@@ -217,6 +224,13 @@ class PWTTControlsDock(QDockWidget):
         self.gee_api_key.setEchoMode(QLineEdit.Password)
         self.gee_api_key.setPlaceholderText("AIzaSy… (optional, no browser needed)")
         gee_layout.addRow("API key:", self.gee_api_key)
+        self.gee_test_creds_btn = QPushButton("Test GEE credentials")
+        self.gee_test_creds_btn.setToolTip(
+            "Initialize Earth Engine with the project and OAuth client or API key above "
+            "(OAuth may open a browser once to complete sign-in)."
+        )
+        self.gee_test_creds_btn.clicked.connect(self._test_gee_credentials)
+        gee_layout.addRow(self.gee_test_creds_btn)
         self.gee_clear_creds_btn = QPushButton("Clear saved GEE credentials")
         self.gee_clear_creds_btn.setToolTip(
             "Remove project, OAuth client, and API key from QGIS settings; delete the Earth Engine "
@@ -889,6 +903,59 @@ class PWTTControlsDock(QDockWidget):
         od = getattr(self, "openeo_dock", None)
         if od is not None:
             od._conn = None
+
+    def _test_openeo_credentials(self):
+        try:
+            test_remote_backend_credentials(
+                "openeo",
+                self._get_credentials("openeo"),
+                parent=self,
+                controls_dock=self,
+            )
+        except RuntimeError as e:
+            QMessageBox.warning(self, "PWTT — openEO", str(e))
+            return
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "PWTT — openEO",
+                f"Unexpected error: {e}",
+            )
+            return
+        self._refresh_cred_storage_indicator()
+        od = getattr(self, "openeo_dock", None)
+        if od is not None:
+            od._conn = None
+        QMessageBox.information(
+            self,
+            "PWTT — openEO",
+            "Credentials are valid — authenticated to Copernicus openEO.",
+        )
+
+    def _test_gee_credentials(self):
+        try:
+            test_remote_backend_credentials(
+                "gee",
+                self._get_credentials("gee"),
+                parent=self,
+                controls_dock=self,
+            )
+        except RuntimeError as e:
+            QMessageBox.warning(self, "PWTT — Earth Engine", str(e))
+            return
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "PWTT — Earth Engine",
+                f"Unexpected error: {e}",
+            )
+            return
+        self._refresh_cred_storage_indicator()
+        QMessageBox.information(
+            self,
+            "PWTT — Earth Engine",
+            "Credentials are valid — Earth Engine initialized successfully.",
+        )
 
     def _clear_saved_openeo_credentials(self):
         reply = QMessageBox.question(

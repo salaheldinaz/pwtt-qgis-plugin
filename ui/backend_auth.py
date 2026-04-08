@@ -383,6 +383,80 @@ def auth_with_progress(backend, credentials, backend_id, parent=None):
         raise RuntimeError(worker.error_msg or "Authentication failed. Check your credentials.")
 
 
+def test_remote_backend_credentials(backend_id, creds, parent=None, controls_dock=None):
+    """Run authenticate() for openEO or GEE using *creds* (e.g. from the dock widgets).
+
+    On success, persists credentials to QgsSettings the same way as create_and_auth_backend.
+    Raises RuntimeError on failure or missing configuration.
+    """
+    if backend_id not in ("openeo", "gee"):
+        raise RuntimeError("Test credentials is only supported for openEO and GEE.")
+
+    creds = dict(creds or {})
+    BackendClass = get_backend_class(backend_id)
+    if not BackendClass:
+        raise RuntimeError(f"Backend '{backend_id}' is not available.")
+    backend = BackendClass()
+
+    if backend_id == "openeo":
+        creds = merge_openeo_creds_from_controls_dock(creds, controls_dock)
+        if not (creds.get("client_id") and creds.get("client_secret")):
+            raise RuntimeError(
+                "Client ID and Client Secret are required for openEO.\n"
+                "Create OAuth2 credentials at the Copernicus Data Space dashboard:\n"
+                "https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings"
+            )
+        if not creds.get("verify_ssl", True):
+            reply = QMessageBox.warning(
+                parent,
+                "PWTT — Security Warning",
+                "TLS certificate verification is DISABLED.\n\n"
+                "This makes your connection vulnerable to interception. "
+                "Only disable this if you understand the risk (e.g. a corporate proxy "
+                "with a custom CA certificate).\n\n"
+                "Proceed without TLS verification?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if not is_message_box_yes(reply):
+                raise RuntimeError("Authentication cancelled.")
+            creds["_ssl_bypass_confirmed"] = True
+    else:
+        gee_cid = (creds.get("client_id") or "").strip()
+        gee_sec = (creds.get("client_secret") or "").strip()
+        gee_key = (creds.get("api_key") or "").strip()
+        has_oauth = bool(gee_cid and gee_sec)
+        has_key = bool(gee_key)
+        if not (has_oauth or has_key):
+            raise RuntimeError(
+                "Enter OAuth Client ID and Client Secret, or an API key, then test again.\n"
+                "(Testing does not use the legacy browser-only Earth Engine sign-in.)"
+            )
+
+    ok, msg = backend.check_dependencies()
+    if not ok:
+        raise RuntimeError(msg)
+
+    auth_with_progress(backend, creds, backend_id, parent)
+
+    if backend_id == "gee":
+        save_gee_credentials_to_settings(
+            creds.get("project") or "",
+            creds.get("client_id") or "",
+            creds.get("client_secret") or "",
+            creds.get("api_key") or "",
+        )
+    else:
+        save_openeo_credentials_to_settings(
+            creds.get("client_id") or "",
+            creds.get("client_secret") or "",
+            creds.get("verify_ssl", True),
+        )
+        if controls_dock is not None and hasattr(
+            controls_dock, "_sync_openeo_widgets_from_settings"
+        ):
+            controls_dock._sync_openeo_widgets_from_settings()
+
+
 def merge_openeo_creds_from_controls_dock(creds, controls_dock):
     if controls_dock is None or not hasattr(controls_dock, "_get_credentials"):
         return creds

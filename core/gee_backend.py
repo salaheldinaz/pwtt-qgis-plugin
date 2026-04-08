@@ -24,11 +24,32 @@ class GEEBackend(PWTTBackend):
             return False, f"GEE backend requires: pip install {' '.join(pip)}"
         return True, ""
 
+    @staticmethod
+    def _resolve_project(project: str) -> str:
+        """Return an explicit project ID, falling back to the EE CLI default."""
+        if project:
+            return project
+        try:
+            import json
+            from pathlib import Path
+            props_path = Path.home() / ".config" / "earthengine" / "properties"
+            if props_path.is_file():
+                with open(props_path) as f:
+                    props = json.load(f)
+                saved = (props.get("project") or "").strip()
+                if saved:
+                    return saved
+        except Exception:
+            pass
+        return ""
+
     def authenticate(self, credentials: dict) -> bool:
         import builtins
         import socket as _socket
         import ee
-        project = (credentials.get("project") or "").strip()
+        project = self._resolve_project(
+            (credentials.get("project") or "").strip()
+        )
         client_id = (credentials.get("client_id") or "").strip()
         client_secret = (credentials.get("client_secret") or "").strip()
         api_key = (credentials.get("api_key") or "").strip()
@@ -38,18 +59,14 @@ class GEEBackend(PWTTBackend):
                 self._oauth_with_client_credentials(
                     project, client_id, client_secret
                 )
-                ee.Initialize(project=project if project else None)
+                self._ee_init(ee, project)
                 return True
 
             # ── Optional: Cloud API key (no browser required) ──
             if api_key:
                 # credentials=None skips the 'persistent' file load so the
                 # key alone authenticates requests.
-                ee.Initialize(
-                    credentials=None,
-                    project=project if project else None,
-                    cloud_api_key=api_key,
-                )
+                self._ee_init(ee, project, credentials=None, cloud_api_key=api_key)
                 return True
 
             # ── Fallback: EE default browser OAuth ──
@@ -72,12 +89,30 @@ class GEEBackend(PWTTBackend):
                 finally:
                     builtins.input = _orig_input
                     _socket.setdefaulttimeout(_saved_timeout)
-            ee.Initialize(project=project if project else None)
+            self._ee_init(ee, project)
             return True
         except RuntimeError:
             raise
         except Exception as e:
             raise RuntimeError(f"GEE authentication failed: {e}") from e
+
+    @staticmethod
+    def _ee_init(ee, project, **kwargs):
+        """Wrapper around ee.Initialize that gives a clear error when project is missing."""
+        try:
+            ee.Initialize(project=project if project else None, **kwargs)
+        except Exception as e:
+            if "no project found" in str(e).lower():
+                raise RuntimeError(
+                    "A Google Cloud project is required.\n\n"
+                    "Set the 'Project' field in the GEE credentials panel "
+                    "(e.g. 'my-gcp-project'), or run:\n"
+                    "  earthengine set_project YOUR_PROJECT\n\n"
+                    "Your project must have the Earth Engine API enabled:\n"
+                    "https://console.cloud.google.com/apis/library/"
+                    "earthengine.googleapis.com"
+                ) from e
+            raise
 
     def _oauth_with_client_credentials(
         self, project: str, client_id: str, client_secret: str
