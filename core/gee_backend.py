@@ -52,7 +52,6 @@ class GEEBackend(PWTTBackend):
         )
         client_id = (credentials.get("client_id") or "").strip()
         client_secret = (credentials.get("client_secret") or "").strip()
-        api_key = (credentials.get("api_key") or "").strip()
         try:
             # ── Preferred: OAuth 2.0 with user's own GCP client credentials ──
             if client_id and client_secret:
@@ -60,13 +59,6 @@ class GEEBackend(PWTTBackend):
                     project, client_id, client_secret
                 )
                 self._ee_init(ee, project)
-                return True
-
-            # ── Optional: Cloud API key (no browser required) ──
-            if api_key:
-                # credentials=None skips the 'persistent' file load so the
-                # key alone authenticates requests.
-                self._ee_init(ee, project, credentials=None, cloud_api_key=api_key)
                 return True
 
             # ── Fallback: EE default browser OAuth ──
@@ -86,6 +78,13 @@ class GEEBackend(PWTTBackend):
                 )
                 try:
                     ee.Authenticate(auth_mode="localhost")
+                except OSError as _oe:
+                    if _oe.errno == 48 or "address already in use" in str(_oe).lower():
+                        raise RuntimeError(
+                            "The local OAuth callback port is still in use from a "
+                            "previous attempt. Please wait a few seconds and try again."
+                        ) from _oe
+                    raise
                 finally:
                     builtins.input = _orig_input
                     _socket.setdefaulttimeout(_saved_timeout)
@@ -144,7 +143,20 @@ class GEEBackend(PWTTBackend):
         _saved_timeout = _socket.getdefaulttimeout()
         _socket.setdefaulttimeout(None)
         try:
-            server = _ee_oauth._start_server(_ee_oauth.DEFAULT_LOCAL_PORT)
+            # Try the default port first; if it's still in use from a previous
+            # attempt, find the next available port.
+            port = _ee_oauth.DEFAULT_LOCAL_PORT
+            for _attempt in range(10):
+                try:
+                    server = _ee_oauth._start_server(port)
+                    break
+                except OSError:
+                    port += 1
+            else:
+                raise RuntimeError(
+                    "Could not bind to a local port for OAuth callback. "
+                    "Please wait a moment and try again."
+                )
             auth_url = (
                 "https://accounts.google.com/o/oauth2/auth?"
                 + urllib.parse.urlencode({

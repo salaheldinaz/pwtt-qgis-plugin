@@ -12,14 +12,13 @@ import time
 AUTH_TIMEOUT_SEC = 300  # 5 min — GEE uses a browser OIDC flow; openEO uses client credentials
 
 
-def save_gee_credentials_to_settings(project, client_id, client_secret, api_key):
+def save_gee_credentials_to_settings(project, client_id, client_secret):
     """Persist GEE credentials to QgsSettings (PWTT group)."""
     s = QgsSettings()
     s.beginGroup("PWTT")
     s.setValue("gee_project", (project or "").strip())
     s.setValue("gee_client_id", (client_id or "").strip())
     s.setValue("gee_client_secret", (client_secret or "").strip())
-    s.setValue("gee_api_key", (api_key or "").strip())
     s.endGroup()
 
 
@@ -41,7 +40,7 @@ def clear_gee_credentials_from_storage():
     """Remove GEE fields from QgsSettings, EE persistent token file, and session state."""
     s = QgsSettings()
     s.beginGroup("PWTT")
-    for key in ("gee_project", "gee_client_id", "gee_client_secret", "gee_api_key"):
+    for key in ("gee_project", "gee_client_id", "gee_client_secret"):
         s.remove(key)
     s.endGroup()
     try:
@@ -423,12 +422,9 @@ def test_remote_backend_credentials(backend_id, creds, parent=None, controls_doc
     else:
         gee_cid = (creds.get("client_id") or "").strip()
         gee_sec = (creds.get("client_secret") or "").strip()
-        gee_key = (creds.get("api_key") or "").strip()
-        has_oauth = bool(gee_cid and gee_sec)
-        has_key = bool(gee_key)
-        if not (has_oauth or has_key):
+        if not (gee_cid and gee_sec):
             raise RuntimeError(
-                "Enter OAuth Client ID and Client Secret, or an API key, then test again.\n"
+                "Enter OAuth Client ID and Client Secret, then test again.\n"
                 "(Testing does not use the legacy browser-only Earth Engine sign-in.)"
             )
 
@@ -443,7 +439,6 @@ def test_remote_backend_credentials(backend_id, creds, parent=None, controls_doc
             creds.get("project") or "",
             creds.get("client_id") or "",
             creds.get("client_secret") or "",
-            creds.get("api_key") or "",
         )
     else:
         save_openeo_credentials_to_settings(
@@ -546,7 +541,6 @@ def create_and_auth_backend(
             "project": s.value("gee_project", ""),
             "client_id": s.value("gee_client_id", "") or None,
             "client_secret": s.value("gee_client_secret", "") or None,
-            "api_key": s.value("gee_api_key", "") or None,
         }
     elif backend_id == "local":
         creds = {
@@ -604,7 +598,6 @@ def create_and_auth_backend(
             creds.get("project") or "",
             creds.get("client_id") or "",
             creds.get("client_secret") or "",
-            creds.get("api_key") or "",
         )
     if backend_id == "openeo":
         save_openeo_credentials_to_settings(

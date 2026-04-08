@@ -219,21 +219,16 @@ class PWTTControlsDock(QDockWidget):
         self.gee_client_secret.setEchoMode(QLineEdit.Password)
         self.gee_client_secret.setPlaceholderText("Client secret")
         gee_layout.addRow("Client secret:", self.gee_client_secret)
-        # API key (optional, no browser required)
-        self.gee_api_key = QLineEdit()
-        self.gee_api_key.setEchoMode(QLineEdit.Password)
-        self.gee_api_key.setPlaceholderText("AIzaSy… (optional, no browser needed)")
-        gee_layout.addRow("API key:", self.gee_api_key)
         self.gee_test_creds_btn = QPushButton("Test GEE credentials")
         self.gee_test_creds_btn.setToolTip(
-            "Initialize Earth Engine with the project and OAuth client or API key above "
+            "Initialize Earth Engine with the project and OAuth client above "
             "(OAuth may open a browser once to complete sign-in)."
         )
         self.gee_test_creds_btn.clicked.connect(self._test_gee_credentials)
         gee_layout.addRow(self.gee_test_creds_btn)
         self.gee_clear_creds_btn = QPushButton("Clear saved GEE credentials")
         self.gee_clear_creds_btn.setToolTip(
-            "Remove project, OAuth client, and API key from QGIS settings; delete the Earth Engine "
+            "Remove project and OAuth client from QGIS settings; delete the Earth Engine "
             "token file (used by browser OAuth and installed-app OAuth); clear in-memory EE state."
         )
         self.gee_clear_creds_btn.clicked.connect(self._clear_saved_gee_credentials)
@@ -547,7 +542,6 @@ class PWTTControlsDock(QDockWidget):
         gee = (s.value("gee_project", "") or "").strip()
         gee_cid = (s.value("gee_client_id", "") or "").strip()
         gee_csec = (s.value("gee_client_secret", "") or "").strip()
-        gee_key = (s.value("gee_api_key", "") or "").strip()
         cu = (s.value("cdse_username", "") or "").strip()
         cp = (s.value("cdse_password", "") or "").strip()
         eu = (s.value("earthdata_username", "") or "").strip()
@@ -560,7 +554,7 @@ class PWTTControlsDock(QDockWidget):
             "gee_project": bool(gee),
             "gee_client_id": bool(gee_cid),
             "gee_client_secret": bool(gee_csec),
-            "gee_api_key": bool(gee_key),
+
             "cdse_user": bool(cu),
             "cdse_pass": bool(cp),
             "earthdata_user": bool(eu),
@@ -592,20 +586,14 @@ class PWTTControlsDock(QDockWidget):
                 self.cred_storage_label.setStyleSheet("color: gray; font-size: 0.9em;")
         elif bid == "gee":
             has_oauth = snap["gee_client_id"] and snap["gee_client_secret"]
-            has_key = snap["gee_api_key"]
             if has_oauth:
                 self.cred_storage_label.setText(
-                    "Stored: OAuth 2.0 client ID & secret in QGIS settings (preferred)."
-                )
-                self.cred_storage_label.setStyleSheet("color: #2e7d32; font-size: 0.9em;")
-            elif has_key:
-                self.cred_storage_label.setText(
-                    "Stored: API key in QGIS settings."
+                    "Stored: OAuth 2.0 client ID & secret in QGIS settings."
                 )
                 self.cred_storage_label.setStyleSheet("color: #2e7d32; font-size: 0.9em;")
             elif snap["gee_project"]:
                 self.cred_storage_label.setText(
-                    "Stored: project name only — add Client ID & Secret or API key."
+                    "Stored: project name only — add Client ID & Secret."
                 )
                 self.cred_storage_label.setStyleSheet("color: #e65100; font-size: 0.9em;")
             else:
@@ -701,7 +689,6 @@ class PWTTControlsDock(QDockWidget):
                 "project": self.gee_project.text().strip(),
                 "client_id": self.gee_client_id.text().strip() or None,
                 "client_secret": self.gee_client_secret.text().strip() or None,
-                "api_key": self.gee_api_key.text().strip() or None,
             }
         if backend_id == "local":
             return {
@@ -980,7 +967,7 @@ class PWTTControlsDock(QDockWidget):
             "PWTT",
             "Remove all GEE credentials from QGIS settings and delete the Earth Engine "
             "credentials file (OAuth refresh token) if it exists?\n\n"
-            "This covers API key, OAuth client, and default browser login flows.",
+            "This covers OAuth client and default browser login flows.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -990,7 +977,6 @@ class PWTTControlsDock(QDockWidget):
         self.gee_project.setText("")
         self.gee_client_id.setText("")
         self.gee_client_secret.setText("")
-        self.gee_api_key.setText("")
         self._refresh_cred_storage_indicator()
 
     def _persist_openeo_credentials(self):
@@ -1025,7 +1011,6 @@ class PWTTControlsDock(QDockWidget):
         self.gee_project.setText(s.value("gee_project", ""))
         self.gee_client_id.setText(s.value("gee_client_id", ""))
         self.gee_client_secret.setText(s.value("gee_client_secret", ""))
-        self.gee_api_key.setText(s.value("gee_api_key", ""))
         s.endGroup()
         self._sync_openeo_widgets_from_settings()
         s = QgsSettings()
@@ -1059,7 +1044,6 @@ class PWTTControlsDock(QDockWidget):
         s.setValue("gee_project", self.gee_project.text())
         s.setValue("gee_client_id", self.gee_client_id.text())
         s.setValue("gee_client_secret", self.gee_client_secret.text())
-        s.setValue("gee_api_key", self.gee_api_key.text())
         s.setValue("openeo_client_id", self.openeo_client_id.text())
         s.setValue("openeo_client_secret", self.openeo_client_secret.text())
         s.setValue("openeo_verify_ssl", self.openeo_verify_ssl.isChecked())
