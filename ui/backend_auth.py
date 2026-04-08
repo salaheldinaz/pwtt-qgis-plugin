@@ -469,6 +469,23 @@ def merge_openeo_creds_from_controls_dock(creds, controls_dock):
     return creds
 
 
+def merge_gee_creds_from_controls_dock(creds, controls_dock):
+    if controls_dock is None or not hasattr(controls_dock, "_get_credentials"):
+        return creds
+    try:
+        ui = controls_dock._get_credentials("gee")
+    except Exception:
+        return creds
+    out = dict(creds)
+    if ui.get("project") is not None:
+        out["project"] = ui["project"]
+    if ui.get("client_id"):
+        out["client_id"] = ui["client_id"]
+    if ui.get("client_secret"):
+        out["client_secret"] = ui["client_secret"]
+    return out
+
+
 def merge_local_creds_from_controls_dock(creds, controls_dock):
     if controls_dock is None or not hasattr(controls_dock, "_get_credentials"):
         return creds
@@ -542,6 +559,7 @@ def create_and_auth_backend(
             "client_id": s.value("gee_client_id", "") or None,
             "client_secret": s.value("gee_client_secret", "") or None,
         }
+        creds = merge_gee_creds_from_controls_dock(creds, controls_dock)
     elif backend_id == "local":
         creds = {
             "source": (s.value("local_data_source", "cdse") or "cdse"),
