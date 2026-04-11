@@ -1555,11 +1555,8 @@ class PWTTControlsDock(QDockWidget):
         if backend_id == "local":
             lines.append(f"GRD data source: {self.local_source_combo.currentText()}")
 
-        if self.aoi_rect is not None:
-            lines.append(
-                f"AOI (WGS84): {self.aoi_rect.xMinimum():.4f}, {self.aoi_rect.yMinimum():.4f} "
-                f"\u2014 {self.aoi_rect.xMaximum():.4f}, {self.aoi_rect.yMaximum():.4f}"
-            )
+        n_aois = sum(1 for a in self._queue if a.get("checked", True))
+        lines.append(f"AOIs selected: {n_aois}")
 
         lines.append(f"War start: {self.war_start.date().toString('yyyy-MM-dd')}")
         lines.append(f"Inference start: {self.inference_start.date().toString('yyyy-MM-dd')}")
@@ -1597,16 +1594,18 @@ class PWTTControlsDock(QDockWidget):
         return "\n".join(lines)
 
     def _run(self):
-        from ..core import deps
+        from ..core import deps, job_store
 
-        if not self.aoi_wkt:
+        checked_aois = [a for a in self._queue if a.get("checked", True)]
+        if not checked_aois:
             QMessageBox.warning(
                 self,
                 "PWTT",
-                "Please set an area of interest: draw on the map or enter WGS84 coordinates and "
-                "click \u201cSet AOI from coordinates\u201d.",
+                "Please add at least one area of interest to the queue: "
+                "draw on the map or load from the saved library.",
             )
             return
+
         war = self.war_start.date()
         inf = self.inference_start.date()
         if inf < war:
@@ -1622,16 +1621,17 @@ class PWTTControlsDock(QDockWidget):
         if backend_id == "local" and not confirm_local_processing_storage(self):
             return
 
-        confirm = QMessageBox.question(
+        # ── Batch confirmation dialog ────────────────────────────────────────
+        dlg = _BatchConfirmDialog(
             self,
-            "PWTT \u2014 Confirm run",
             self._run_confirmation_summary_text(),
-            QMessageBox.Yes | QMessageBox.No,
+            checked_aois,
         )
-        if not is_message_box_yes(confirm):
+        confirmed_aois = dlg.exec()
+        if not confirmed_aois:
             return
 
-        # ── Check backend dependencies (offer install if missing) ─────────
+        # ── Check backend dependencies ───────────────────────────────────────
         missing, pip_names = deps.backend_missing(backend_id, local_src)
         if missing:
             reply = QMessageBox.question(
@@ -1642,7 +1642,6 @@ class PWTTControlsDock(QDockWidget):
             if is_message_box_yes(reply):
                 if not deps.install_with_dialog(pip_names, parent=self):
                     return
-                # Re-check after install
                 missing, _ = deps.backend_missing(backend_id, local_src)
             if missing:
                 QMessageBox.warning(
@@ -1650,15 +1649,14 @@ class PWTTControlsDock(QDockWidget):
                     f"Cannot run: missing {', '.join(missing)}.",
                 )
                 return
-            # Refresh the deps label
             self._on_backend_changed(self.backend_combo.currentIndex())
 
-        # ── Check footprint dependencies if enabled ───────────────────────
+        # ── Check footprint dependencies ─────────────────────────────────────
         if self.include_footprints.isChecked():
             if not ensure_footprint_dependencies(self):
                 return
 
-        # ── Create backend and authenticate (single source of truth) ──────
+        # ── Authenticate backend ─────────────────────────────────────────────
         credentials = self._get_credentials(backend_id)
         try:
             backend = backend_auth_create_and_auth_backend(
@@ -1678,10 +1676,10 @@ class PWTTControlsDock(QDockWidget):
         except Exception as e:
             QMessageBox.warning(self, "PWTT", str(e))
             return
+
         self._save_settings()
         base_dir = self.output_dir.filePath()
         if not base_dir:
-            # Default to project folder or home
             proj_path = QgsProject.instance().absolutePath()
             base_dir = proj_path if proj_path else os.path.expanduser("~/PWTT")
             self.output_dir.setFilePath(base_dir)
@@ -1697,29 +1695,37 @@ class PWTTControlsDock(QDockWidget):
             if not fp_sources:
                 fp_sources = ["current_osm"]
 
-        from ..core import job_store
-        job = job_store.create_job(
-            backend_id=backend_id,
-            aoi_wkt=self.aoi_wkt,
-            war_start=self.war_start.date().toString("yyyy-MM-dd"),
-            inference_start=self.inference_start.date().toString("yyyy-MM-dd"),
-            pre_interval=self.pre_interval.value(),
-            post_interval=self.post_interval.value(),
-            output_dir="",  # will be set below
-            include_footprints=bool(fp_sources),
-            footprints_sources=fp_sources,
-            damage_threshold=self.damage_threshold_spin.value(),
-            gee_viz=self.gee_map_preview_cb.isChecked() if backend_id == "gee" else False,
-            data_source=self._local_data_source_id() if backend_id == "local" else "cdse",
-            gee_method=self.gee_method_combo.currentData() if backend_id == "gee" else "stouffer",
-            gee_ttest_type=self.gee_ttest_type_combo.currentData() if backend_id == "gee" else "welch",
-            gee_smoothing=self.gee_smoothing_combo.currentData() if backend_id == "gee" else "default",
-            gee_mask_before_smooth=self.gee_mask_before_smooth_cb.isChecked() if backend_id == "gee" else True,
-            gee_lee_mode=self.gee_lee_mode_combo.currentData() if backend_id == "gee" else "per_image",
-        )
-        # Output folder: base_dir / job_id
-        job["output_dir"] = os.path.join(base_dir, job["id"])
-        os.makedirs(job["output_dir"], exist_ok=True)
-        job_store.save_job(job)
-        if self.jobs_dock.launch_job(job, backend):
-            self._clear_aoi()
+        # ── Create and launch one job per confirmed AOI ──────────────────────
+        launched_ids = []
+        for aoi_entry in confirmed_aois:
+            job = job_store.create_job(
+                backend_id=backend_id,
+                aoi_wkt=aoi_entry["wkt"],
+                war_start=self.war_start.date().toString("yyyy-MM-dd"),
+                inference_start=self.inference_start.date().toString("yyyy-MM-dd"),
+                pre_interval=self.pre_interval.value(),
+                post_interval=self.post_interval.value(),
+                output_dir="",
+                include_footprints=bool(fp_sources),
+                footprints_sources=fp_sources,
+                damage_threshold=self.damage_threshold_spin.value(),
+                gee_viz=self.gee_map_preview_cb.isChecked() if backend_id == "gee" else False,
+                data_source=self._local_data_source_id() if backend_id == "local" else "cdse",
+                gee_method=self.gee_method_combo.currentData() if backend_id == "gee" else "stouffer",
+                gee_ttest_type=self.gee_ttest_type_combo.currentData() if backend_id == "gee" else "welch",
+                gee_smoothing=self.gee_smoothing_combo.currentData() if backend_id == "gee" else "default",
+                gee_mask_before_smooth=self.gee_mask_before_smooth_cb.isChecked() if backend_id == "gee" else True,
+                gee_lee_mode=self.gee_lee_mode_combo.currentData() if backend_id == "gee" else "per_image",
+            )
+            job["output_dir"] = os.path.join(base_dir, job["id"])
+            os.makedirs(job["output_dir"], exist_ok=True)
+            job_store.save_job(job)
+            if self.jobs_dock.launch_job(job, backend):
+                launched_ids.append(aoi_entry["id"])
+
+        # ── Post-run cleanup ─────────────────────────────────────────────────
+        for aoi_id in launched_ids:
+            self._queue = [a for a in self._queue if a["id"] != aoi_id]
+            self._remove_rubber_band(aoi_id)
+        self._rebuild_queue_list()
+        self._update_queue_buttons()
