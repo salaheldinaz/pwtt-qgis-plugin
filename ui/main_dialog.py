@@ -25,6 +25,7 @@ from qgis.PyQt.QtWidgets import (
     QScrollArea,
     QFrame,
     QListWidget,
+    QListWidgetItem,
     QInputDialog,
     QFileDialog,
 )
@@ -77,28 +78,19 @@ class PWTTControlsDock(QDockWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        self._sync_aoi_rubber_band()
-        # Re-probe imports (e.g. deps installed via MacOS/python while QGIS stayed open).
+        # Restore rubber bands after dock is re-shown
+        for aoi_entry in self._queue:
+            if aoi_entry["id"] not in self._rubber_bands:
+                self._draw_rubber_band_for(aoi_entry)
         self._on_backend_changed(self.backend_combo.currentIndex())
 
     def hideEvent(self, event):
         super().hideEvent(event)
-        if not self.aoi_wkt:
-            self._clear_rubber_band()
-
-    def _sync_aoi_rubber_band(self):
-        """Keep canvas overlay aligned with AOI state (handles hide/show without closeEvent)."""
-        self._sync_aoi_map_overlay()
-
-    def _sync_aoi_map_overlay(self):
-        if self.aoi_wkt and self.aoi_rect is not None and self._aoi_map_visible:
-            self._draw_rubber_band(self.aoi_rect)
-        else:
-            self._clear_rubber_band()
+        # Rubber bands remain visible when dock is hidden
 
     def cleanup_map_canvas(self):
-        """Remove AOI overlay and extent map tool; call before dock teardown / plugin unload."""
-        self._clear_rubber_band()
+        """Remove all AOI overlays and extent map tool; call before dock teardown."""
+        self._clear_all_rubber_bands()
         canvas = self.iface.mapCanvas()
         if self.map_tool and canvas.mapTool() == self.map_tool and self._previous_map_tool:
             try:
@@ -853,7 +845,6 @@ class PWTTControlsDock(QDockWidget):
     # ── AOI ───────────────────────────────────────────────────────────────────
 
     def _activate_aoi_tool(self):
-        self._clear_rubber_band()
         canvas = self.iface.mapCanvas()
         if self.map_tool is None:
             from .aoi_tool import PWTTMapToolExtent
@@ -861,38 +852,115 @@ class PWTTControlsDock(QDockWidget):
         self._previous_map_tool = canvas.mapTool()
         canvas.setMapTool(self.map_tool)
         self.iface.messageBar().pushMessage(
-            "PWTT", "Draw a rectangle on the map to set the area of interest.",
+            "PWTT", "Draw a rectangle on the map to add it to the AOI queue.",
             level=Qgis.Info, duration=5,
         )
 
-    def _sync_aoi_coord_spinboxes(self, rect):
-        """Keep manual bbox fields aligned with current AOI (EPSG:4326)."""
-        if rect is None or rect.isEmpty():
-            return
-        for sb, val in (
-            (self.aoi_west, rect.xMinimum()),
-            (self.aoi_south, rect.yMinimum()),
-            (self.aoi_east, rect.xMaximum()),
-            (self.aoi_north, rect.yMaximum()),
-        ):
-            sb.blockSignals(True)
-            sb.setValue(val)
-            sb.blockSignals(False)
+    def _queue_colour(self, index: int) -> tuple:
+        return self._AOI_COLOURS[index % len(self._AOI_COLOURS)]
 
-    def _apply_aoi(self, wkt, rect):
-        """Set AOI from WKT and rectangle in EPSG:4326 (axis-aligned bbox)."""
-        self.aoi_wkt = wkt
-        self.aoi_rect = rect
-        self._aoi_map_visible = True
-        self.aoi_label.setText(
-            f"AOI: {rect.xMinimum():.4f}, {rect.yMinimum():.4f} \u2014 "
-            f"{rect.xMaximum():.4f}, {rect.yMaximum():.4f} (WGS84)"
-        )
-        self.clear_aoi_btn.setEnabled(True)
-        self.toggle_aoi_map_btn.setEnabled(True)
-        self._update_toggle_aoi_map_button_label()
-        self._sync_aoi_coord_spinboxes(rect)
-        self._sync_aoi_map_overlay()
+    def _add_to_queue(self, aoi_entry: dict):
+        """Add an AOI dict to the queue (no-op if same id already present)."""
+        if any(a["id"] == aoi_entry["id"] for a in self._queue):
+            return
+        self._queue.append(aoi_entry)
+        self._rebuild_queue_list()
+        self._draw_rubber_band_for(aoi_entry)
+        self._update_queue_buttons()
+
+    def _rebuild_queue_list(self):
+        """Sync the QListWidget with self._queue."""
+        try:
+            self.queue_list.itemChanged.disconnect()
+        except Exception:
+            pass
+        self.queue_list.blockSignals(True)
+        self.queue_list.clear()
+        for aoi in self._queue:
+            tag = aoi.get("tag", "drawn")
+            label = f"{aoi['name']}  [{tag}]"
+            item = QListWidgetItem(label)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if aoi.get("checked", True) else Qt.Unchecked)
+            item.setData(Qt.UserRole, aoi["id"])
+            self.queue_list.addItem(item)
+
+            # Add Save / Remove buttons via a widget in the item
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 4, 0)
+            row_layout.addStretch()
+
+            if tag == "drawn":
+                save_btn = QPushButton("Save")
+                aoi_id = aoi["id"]
+                save_btn.clicked.connect(lambda _checked, aid=aoi_id: self._queue_save_aoi(aid))
+                row_layout.addWidget(save_btn)
+
+            remove_btn = QPushButton("Remove")
+            aoi_id = aoi["id"]
+            remove_btn.clicked.connect(lambda _checked, aid=aoi_id: self._queue_remove_aoi(aid))
+            row_layout.addWidget(remove_btn)
+
+            self.queue_list.setItemWidget(item, row_widget)
+
+        self.queue_list.blockSignals(False)
+        self.queue_list.itemChanged.connect(self._on_queue_item_changed)
+        self._update_queue_label()
+
+    def _on_queue_item_changed(self, item):
+        aoi_id = item.data(Qt.UserRole)
+        checked = item.checkState() == Qt.Checked
+        for aoi in self._queue:
+            if aoi["id"] == aoi_id:
+                aoi["checked"] = checked
+                break
+        self._update_queue_label()
+
+    def _update_queue_label(self):
+        total = len(self._queue)
+        selected = sum(1 for a in self._queue if a.get("checked", True))
+        self.queue_label.setText(f"Queue  ({selected} selected)")
+
+    def _update_queue_buttons(self):
+        has_items = bool(self._queue)
+        self.clear_queue_btn.setEnabled(has_items)
+        self.toggle_all_map_btn.setEnabled(has_items)
+
+    def _draw_rubber_band_for(self, aoi_entry: dict):
+        """Draw a rubber band for a single AOI entry."""
+        aoi_id = aoi_entry["id"]
+        self._remove_rubber_band(aoi_id)
+        bbox = aoi_entry.get("bbox")
+        if not bbox or len(bbox) < 4:
+            return
+        west, south, east, north = bbox
+        rect = QgsRectangle(west, south, east, north)
+        geom = QgsGeometry.fromRect(rect)
+        canvas = self.iface.mapCanvas()
+        canvas_crs = canvas.mapSettings().destinationCrs()
+        src_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+        if canvas_crs != src_crs:
+            transform = QgsCoordinateTransform(src_crs, canvas_crs, QgsProject.instance())
+            geom.transform(transform)
+        idx = len(self._rubber_bands)
+        r, g, b = self._queue_colour(idx)
+        rb = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
+        rb.setColor(QColor(r, g, b, 50))
+        rb.setStrokeColor(QColor(r, g, b, 220))
+        rb.setWidth(2)
+        rb.setToGeometry(geom, None)
+        self._rubber_bands[aoi_id] = rb
+
+    def _remove_rubber_band(self, aoi_id: str):
+        rb = self._rubber_bands.pop(aoi_id, None)
+        if rb is not None:
+            rb.reset(QgsWkbTypes.PolygonGeometry)
+
+    def _clear_all_rubber_bands(self):
+        for rb in self._rubber_bands.values():
+            rb.reset(QgsWkbTypes.PolygonGeometry)
+        self._rubber_bands.clear()
 
     def _on_aoi_drawn(self, wkt, rect):
         if wkt is None or rect is None:
@@ -905,83 +973,71 @@ class PWTTControlsDock(QDockWidget):
             except Exception:
                 pass
             return
-        self._apply_aoi(wkt, rect)
+        import uuid as _uuid
+        aoi_id = "tmp_" + _uuid.uuid4().hex[:8]
+        bbox = [rect.xMinimum(), rect.yMinimum(), rect.xMaximum(), rect.yMaximum()]
+        name = f"Drawn AOI {len(self._queue) + 1}"
+        aoi_entry = {
+            "id": aoi_id,
+            "name": name,
+            "wkt": wkt,
+            "bbox": bbox,
+            "tag": "drawn",
+            "checked": True,
+        }
+        self._add_to_queue(aoi_entry)
         try:
             self.iface.mapCanvas().setMapTool(self._previous_map_tool)
         except Exception:
             pass
 
-    def _apply_aoi_from_coordinates(self):
-        west = self.aoi_west.value()
-        south = self.aoi_south.value()
-        east = self.aoi_east.value()
-        north = self.aoi_north.value()
-        if west >= east or south >= north:
-            self.iface.messageBar().pushMessage(
-                "PWTT",
-                "Invalid bbox: need west < east and south < north (decimal degrees, WGS84).",
-                level=Qgis.Warning,
-                duration=6,
-            )
+    def _queue_save_aoi(self, aoi_id: str):
+        """Prompt for name, save to library, update queue row tag."""
+        from ..core import aoi_store
+        aoi_entry = next((a for a in self._queue if a["id"] == aoi_id), None)
+        if aoi_entry is None:
             return
-        rect = QgsRectangle(west, south, east, north)
-        if rect.isEmpty():
-            self.iface.messageBar().pushMessage(
-                "PWTT", "AOI rectangle is empty.", level=Qgis.Warning, duration=5,
-            )
+        name, ok = QInputDialog.getText(
+            self, "Save AOI", "AOI name:", text=aoi_entry["name"]
+        )
+        if not ok or not name.strip():
             return
-        geom = QgsGeometry.fromRect(rect)
-        wkt = geom.asWkt()
-        self._apply_aoi(wkt, rect)
+        new_aoi = aoi_store.make_aoi(name.strip(), aoi_entry["wkt"], aoi_entry["bbox"])
+        aoi_store.save_aoi(new_aoi)
+        # Move rubber band to new id before updating entry
+        rb = self._rubber_bands.pop(aoi_id, None)
+        if rb is not None:
+            self._rubber_bands[new_aoi["id"]] = rb
+        # Update queue entry in place
+        aoi_entry.update({"id": new_aoi["id"], "name": new_aoi["name"], "tag": "saved"})
+        self._rebuild_queue_list()
+        self._refresh_library_list()
         self.iface.messageBar().pushMessage(
-            "PWTT", "Area of interest set from coordinates.", level=Qgis.Success, duration=4,
+            "PWTT", f'AOI "{name.strip()}" saved to library.', level=Qgis.Success, duration=4,
         )
 
-    def _draw_rubber_band(self, rect_4326):
-        """Draw a persistent rectangle on the canvas for the current AOI (in EPSG:4326)."""
-        canvas = self.iface.mapCanvas()
-        self._clear_rubber_band()
-        geom = QgsGeometry.fromRect(rect_4326)
-        canvas_crs = canvas.mapSettings().destinationCrs()
-        src_crs = QgsCoordinateReferenceSystem("EPSG:4326")
-        if canvas_crs != src_crs:
-            transform = QgsCoordinateTransform(src_crs, canvas_crs, QgsProject.instance())
-            geom.transform(transform)
-        self._rubber_band = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
-        self._rubber_band.setColor(QColor(255, 100, 0, 50))
-        self._rubber_band.setStrokeColor(QColor(255, 100, 0, 220))
-        self._rubber_band.setWidth(2)
-        self._rubber_band.setToGeometry(geom, None)
+    def _queue_remove_aoi(self, aoi_id: str):
+        self._queue = [a for a in self._queue if a["id"] != aoi_id]
+        self._remove_rubber_band(aoi_id)
+        self._rebuild_queue_list()
+        self._update_queue_buttons()
 
-    def _clear_rubber_band(self):
-        if self._rubber_band is not None:
-            self._rubber_band.reset(QgsWkbTypes.PolygonGeometry)
-            self._rubber_band = None
+    def _clear_queue(self):
+        self._queue.clear()
+        self._clear_all_rubber_bands()
+        self._rebuild_queue_list()
+        self._update_queue_buttons()
 
-    def _update_toggle_aoi_map_button_label(self):
-        if self._aoi_map_visible:
-            self.toggle_aoi_map_btn.setText("Hide on map")
-        else:
-            self.toggle_aoi_map_btn.setText("Show on map")
-
-    def _toggle_aoi_map_visibility(self):
-        if not self.aoi_wkt or self.aoi_rect is None:
+    def _toggle_all_map_visibility(self):
+        if not self._rubber_bands:
             return
-        self._aoi_map_visible = not self._aoi_map_visible
-        self._update_toggle_aoi_map_button_label()
-        self._sync_aoi_map_overlay()
-
-    def _clear_aoi(self):
-        self._aoi_map_visible = True
-        self._update_toggle_aoi_map_button_label()
-        self._clear_rubber_band()
-        self.aoi_wkt = None
-        self.aoi_rect = None
-        self.aoi_label.setText(
-            "No area set. Draw on the map or enter coordinates and click \u201cSet AOI from coordinates\u201d."
+        first = next(iter(self._rubber_bands.values()))
+        visible = first.isVisible()
+        for rb in self._rubber_bands.values():
+            rb.setVisible(not visible)
+        self.toggle_all_map_btn.setText(
+            "Show all on map" if visible else "Hide all on map"
         )
-        self.clear_aoi_btn.setEnabled(False)
-        self.toggle_aoi_map_btn.setEnabled(False)
 
     # ── Load job parameters ──────────────────────────────────────────────────
 
