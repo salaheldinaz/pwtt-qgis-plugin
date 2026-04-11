@@ -1242,8 +1242,6 @@ class PWTTControlsDock(QDockWidget):
 
     def load_job_params(self, job):
         """Populate controls from a saved job and show its AOI on the map."""
-        from ..core.utils import wkt_to_bbox
-
         # Backend — for local jobs, apply saved GRD catalog (cdse/asf/pc) before switching
         # backend so credential stack, QgsSettings, and deps match the job.
         backend_ids = [b[0] for b in BACKENDS]
@@ -1299,16 +1297,26 @@ class PWTTControlsDock(QDockWidget):
                   if self.gee_lee_mode_combo.itemData(i) == _lee_val), 0)
         )
 
-        # AOI — parse WKT, set rubber band, zoom
+        # AOI — load into queue and zoom to it
         aoi_wkt = job.get("aoi_wkt")
         if aoi_wkt:
+            from ..core.utils import wkt_to_bbox
+            import uuid as _uuid
             bbox = wkt_to_bbox(aoi_wkt)
             if bbox:
                 west, south, east, north = bbox
-                rect = QgsRectangle(west, south, east, north)
-                self._apply_aoi(aoi_wkt, rect)
+                aoi_entry = {
+                    "id": "tmp_" + _uuid.uuid4().hex[:8],
+                    "name": f"Job {job.get('id', '?')} AOI",
+                    "wkt": aoi_wkt,
+                    "bbox": list(bbox),
+                    "tag": "drawn",
+                    "checked": True,
+                }
+                self._add_to_queue(aoi_entry)
 
                 # Zoom to AOI
+                rect = QgsRectangle(west, south, east, north)
                 canvas = self.iface.mapCanvas()
                 canvas_crs = canvas.mapSettings().destinationCrs()
                 src_crs = QgsCoordinateReferenceSystem("EPSG:4326")
