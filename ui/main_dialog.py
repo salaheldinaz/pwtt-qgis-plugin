@@ -116,8 +116,9 @@ class _BatchConfirmDialog:
 
     def exec(self) -> list:
         """Show dialog; return list of confirmed AOI dicts (empty if cancelled)."""
+        from qgis.PyQt.QtWidgets import QDialog
         result = self._dialog.exec_()
-        if result != self._dialog.Accepted:
+        if result != QDialog.Accepted:
             return []
         return [
             cb.property("aoi_data")
@@ -942,7 +943,7 @@ class PWTTControlsDock(QDockWidget):
     def _rebuild_queue_list(self):
         """Sync the QListWidget with self._queue."""
         try:
-            self.queue_list.itemChanged.disconnect()
+            self.queue_list.itemChanged.disconnect(self._on_queue_item_changed)
         except Exception:
             pass
         self.queue_list.blockSignals(True)
@@ -989,7 +990,6 @@ class PWTTControlsDock(QDockWidget):
         self._update_queue_label()
 
     def _update_queue_label(self):
-        total = len(self._queue)
         selected = sum(1 for a in self._queue if a.get("checked", True))
         self.queue_label.setText(f"Queue  ({selected} selected)")
 
@@ -1014,7 +1014,10 @@ class PWTTControlsDock(QDockWidget):
         if canvas_crs != src_crs:
             transform = QgsCoordinateTransform(src_crs, canvas_crs, QgsProject.instance())
             geom.transform(transform)
-        idx = len(self._rubber_bands)
+        try:
+            idx = next(i for i, a in enumerate(self._queue) if a["id"] == aoi_entry["id"])
+        except StopIteration:
+            idx = len(self._rubber_bands)
         r, g, b = self._queue_colour(idx)
         rb = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
         rb.setColor(QColor(r, g, b, 50))
