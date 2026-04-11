@@ -24,6 +24,9 @@ from qgis.PyQt.QtWidgets import (
     QMessageBox,
     QScrollArea,
     QFrame,
+    QListWidget,
+    QInputDialog,
+    QFileDialog,
 )
 from qgis.PyQt.QtCore import QDate, Qt
 from qgis.PyQt.QtGui import QColor, QIcon
@@ -110,6 +113,14 @@ class PWTTControlsDock(QDockWidget):
         lbl.setWordWrap(True)
         lbl.setStyleSheet("color: gray; font-style: italic; font-size: 0.85em;")
         return lbl
+
+    _AOI_COLOURS = [
+        (255, 100,   0),   # orange (first drawn AOI)
+        ( 30, 120, 255),   # blue
+        ( 50, 180,  50),   # green
+        (180,  50, 180),   # purple
+        (220, 180,   0),   # amber
+    ]
 
     def _build_ui(self):
         scroll = QScrollArea()
@@ -313,59 +324,83 @@ class PWTTControlsDock(QDockWidget):
         cred_layout.addWidget(self.cred_stacked)
         layout.addWidget(cred_group)
 
-        # AOI
+        # ── AOI ──────────────────────────────────────────────────────────────
         aoi_group = QGroupBox("Area of interest")
-        aoi_layout = QVBoxLayout(aoi_group)
-        aoi_layout.addWidget(self._hint(
-            "Draw a rectangle on the map, or enter a WGS84 bounding box below (west, south, east, north)."
-        ))
+        aoi_outer = QVBoxLayout(aoi_group)
+
+        # --- Run Queue sub-section ---
         self.draw_aoi_btn = QPushButton(QIcon(":/pwtt/icon_draw_aoi.svg"), "Draw rectangle on map")
         self.draw_aoi_btn.clicked.connect(self._activate_aoi_tool)
-        aoi_layout.addWidget(self.draw_aoi_btn)
-        coord_form = QFormLayout()
-        coord_form.setVerticalSpacing(2)
-        self.aoi_west = QDoubleSpinBox()
-        self.aoi_west.setRange(-180.0, 180.0)
-        self.aoi_west.setDecimals(6)
-        self.aoi_west.setValue(0.0)
-        coord_form.addRow("West (min lon):", self.aoi_west)
-        self.aoi_south = QDoubleSpinBox()
-        self.aoi_south.setRange(-90.0, 90.0)
-        self.aoi_south.setDecimals(6)
-        self.aoi_south.setValue(0.0)
-        coord_form.addRow("South (min lat):", self.aoi_south)
-        self.aoi_east = QDoubleSpinBox()
-        self.aoi_east.setRange(-180.0, 180.0)
-        self.aoi_east.setDecimals(6)
-        self.aoi_east.setValue(0.0)
-        coord_form.addRow("East (max lon):", self.aoi_east)
-        self.aoi_north = QDoubleSpinBox()
-        self.aoi_north.setRange(-90.0, 90.0)
-        self.aoi_north.setDecimals(6)
-        self.aoi_north.setValue(0.0)
-        coord_form.addRow("North (max lat):", self.aoi_north)
-        aoi_layout.addLayout(coord_form)
-        self.set_aoi_coords_btn = QPushButton("Set AOI from coordinates")
-        self.set_aoi_coords_btn.clicked.connect(self._apply_aoi_from_coordinates)
-        aoi_layout.addWidget(self.set_aoi_coords_btn)
-        aoi_btn_row = QHBoxLayout()
-        self.clear_aoi_btn = QPushButton("Clear AOI")
-        self.clear_aoi_btn.clicked.connect(self._clear_aoi)
-        self.clear_aoi_btn.setEnabled(False)
-        aoi_btn_row.addWidget(self.clear_aoi_btn)
-        self.toggle_aoi_map_btn = QPushButton("Hide on map")
-        self.toggle_aoi_map_btn.setToolTip(
-            "Hide or show the orange AOI rectangle on the map (coordinates are unchanged)."
-        )
-        self.toggle_aoi_map_btn.clicked.connect(self._toggle_aoi_map_visibility)
-        self.toggle_aoi_map_btn.setEnabled(False)
-        aoi_btn_row.addWidget(self.toggle_aoi_map_btn)
-        aoi_layout.addLayout(aoi_btn_row)
-        self.aoi_label = QLabel(
-            "No area set. Draw on the map or enter coordinates and click \u201cSet AOI from coordinates\u201d."
-        )
-        self.aoi_label.setWordWrap(True)
-        aoi_layout.addWidget(self.aoi_label)
+        aoi_outer.addWidget(self.draw_aoi_btn)
+
+        self.queue_label = QLabel("Queue  (0 selected)")
+        self.queue_label.setStyleSheet("font-weight: bold;")
+        aoi_outer.addWidget(self.queue_label)
+
+        self.queue_list = QListWidget()
+        self.queue_list.setMinimumHeight(80)
+        self.queue_list.setAlternatingRowColors(True)
+        aoi_outer.addWidget(self.queue_list)
+
+        queue_btn_row = QHBoxLayout()
+        self.clear_queue_btn = QPushButton("Clear queue")
+        self.clear_queue_btn.clicked.connect(self._clear_queue)
+        self.clear_queue_btn.setEnabled(False)
+        queue_btn_row.addWidget(self.clear_queue_btn)
+        self.toggle_all_map_btn = QPushButton("Hide all on map")
+        self.toggle_all_map_btn.clicked.connect(self._toggle_all_map_visibility)
+        self.toggle_all_map_btn.setEnabled(False)
+        queue_btn_row.addWidget(self.toggle_all_map_btn)
+        aoi_outer.addLayout(queue_btn_row)
+
+        # --- Saved AOI Library sub-section (collapsible) ---
+        self._library_toggle_btn = QPushButton("▶  Saved AOI Library  (0 saved)")
+        self._library_toggle_btn.setCheckable(True)
+        self._library_toggle_btn.setChecked(False)
+        self._library_toggle_btn.setFlat(True)
+        aoi_outer.addWidget(self._library_toggle_btn)
+
+        self._library_widget = QWidget()
+        lib_layout = QVBoxLayout(self._library_widget)
+        lib_layout.setContentsMargins(0, 0, 0, 0)
+        lib_layout.setSpacing(4)
+
+        self.library_list = QListWidget()
+        self.library_list.setMinimumHeight(80)
+        self.library_list.setAlternatingRowColors(True)
+        self.library_list.setSelectionMode(QListWidget.ExtendedSelection)
+        lib_layout.addWidget(self.library_list)
+
+        lib_btn_row1 = QHBoxLayout()
+        self.lib_load_btn = QPushButton("Load into queue")
+        self.lib_load_btn.clicked.connect(self._lib_load_selected)
+        self.lib_load_btn.setEnabled(False)
+        lib_btn_row1.addWidget(self.lib_load_btn)
+        self.lib_rename_btn = QPushButton("Rename")
+        self.lib_rename_btn.clicked.connect(self._lib_rename_selected)
+        self.lib_rename_btn.setEnabled(False)
+        lib_btn_row1.addWidget(self.lib_rename_btn)
+        self.lib_delete_btn = QPushButton("Delete")
+        self.lib_delete_btn.clicked.connect(self._lib_delete_selected)
+        self.lib_delete_btn.setEnabled(False)
+        lib_btn_row1.addWidget(self.lib_delete_btn)
+        lib_layout.addLayout(lib_btn_row1)
+
+        lib_btn_row2 = QHBoxLayout()
+        self.lib_export_btn = QPushButton("Export…")
+        self.lib_export_btn.clicked.connect(self._lib_export)
+        lib_btn_row2.addWidget(self.lib_export_btn)
+        self.lib_import_btn = QPushButton("Import…")
+        self.lib_import_btn.clicked.connect(self._lib_import)
+        lib_btn_row2.addWidget(self.lib_import_btn)
+        lib_layout.addLayout(lib_btn_row2)
+
+        self._library_widget.setVisible(False)
+        aoi_outer.addWidget(self._library_widget)
+
+        self._library_toggle_btn.toggled.connect(self._on_library_toggled)
+        self.library_list.itemSelectionChanged.connect(self._on_library_selection_changed)
+
         layout.addWidget(aoi_group)
 
         # Parameters
