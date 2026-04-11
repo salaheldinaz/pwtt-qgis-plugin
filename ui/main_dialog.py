@@ -28,6 +28,8 @@ from qgis.PyQt.QtWidgets import (
     QListWidgetItem,
     QInputDialog,
     QFileDialog,
+    QDialog,
+    QDialogButtonBox,
 )
 from qgis.PyQt.QtCore import QDate, Qt
 from qgis.PyQt.QtGui import QColor, QIcon
@@ -54,6 +56,75 @@ from .backend_auth import (
     test_remote_backend_credentials,
 )
 from .dock_common import BACKENDS, dock_title, job_footprints_sources
+
+
+class _BatchConfirmDialog:
+    """
+    Shows run summary + per-AOI checkboxes so user can deselect individual AOIs before confirming.
+    """
+
+    def __init__(self, parent, summary_text: str, aois: list):
+        self._dialog = QDialog(parent)
+        self._dialog.setWindowTitle("PWTT — Confirm run")
+        self._dialog.setMinimumWidth(480)
+
+        outer = QVBoxLayout(self._dialog)
+
+        summary_label = QLabel(summary_text)
+        summary_label.setWordWrap(True)
+        outer.addWidget(summary_label)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setFrameShadow(QFrame.Sunken)
+        outer.addWidget(sep)
+
+        outer.addWidget(QLabel(f"<b>AOIs to run ({len(aois)}):</b>"))
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setMaximumHeight(200)
+        inner = QWidget()
+        inner_layout = QVBoxLayout(inner)
+        inner_layout.setSpacing(2)
+        scroll.setWidget(inner)
+        outer.addWidget(scroll)
+
+        self._checkboxes = []
+        for aoi in aois:
+            cb = QCheckBox(aoi["name"])
+            cb.setChecked(True)
+            cb.setProperty("aoi_data", aoi)
+            cb.stateChanged.connect(self._update_button)
+            inner_layout.addWidget(cb)
+            self._checkboxes.append(cb)
+
+        self._buttons = QDialogButtonBox()
+        self._run_btn = self._buttons.addButton("Run 0 jobs", QDialogButtonBox.AcceptRole)
+        self._buttons.addButton(QDialogButtonBox.Cancel)
+        self._buttons.accepted.connect(self._dialog.accept)
+        self._buttons.rejected.connect(self._dialog.reject)
+        outer.addWidget(self._buttons)
+
+        self._update_button()
+
+    def _update_button(self, _state=None):
+        count = sum(1 for cb in self._checkboxes if cb.isChecked())
+        self._run_btn.setText(f"Run {count} job{'s' if count != 1 else ''}")
+        self._run_btn.setEnabled(count > 0)
+
+    def exec(self) -> list:
+        """Show dialog; return list of confirmed AOI dicts (empty if cancelled)."""
+        result = self._dialog.exec_()
+        if result != self._dialog.Accepted:
+            return []
+        return [
+            cb.property("aoi_data")
+            for cb in self._checkboxes
+            if cb.isChecked()
+        ]
+
 
 class PWTTControlsDock(QDockWidget):
     """Dockable controls panel: backend, credentials, AOI, parameters, output, run."""
