@@ -61,13 +61,12 @@ class PWTTControlsDock(QDockWidget):
         self.iface = iface
         self.plugin_dir = plugin_dir
         self.jobs_dock = jobs_dock
-        self.aoi_wkt = None
-        self.aoi_rect = None
-        self._aoi_map_visible = True
+        # AOI queue: list of dicts with keys id, name, wkt, bbox, tag ('drawn'|'saved'), checked (bool)
+        self._queue: list = []
+        # Rubber bands keyed by AOI id (including tmp_ ids)
+        self._rubber_bands: dict = {}
         self.map_tool = None
         self._previous_map_tool = None
-
-        self._rubber_band = None
 
         self._build_ui()
         self._load_settings()
