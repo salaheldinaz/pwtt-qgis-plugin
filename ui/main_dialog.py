@@ -1039,6 +1039,134 @@ class PWTTControlsDock(QDockWidget):
             "Show all on map" if visible else "Hide all on map"
         )
 
+    # ── Library ───────────────────────────────────────────────────────────────
+
+    def _refresh_library_list(self):
+        """Reload library list widget from aoi_store."""
+        from ..core import aoi_store
+        aois = aoi_store.load_aois()
+        self.library_list.clear()
+        for aoi in aois:
+            from datetime import datetime
+            try:
+                dt = datetime.fromisoformat(aoi.get("created_at", ""))
+                date_str = dt.strftime("%Y-%m-%d")
+            except (ValueError, TypeError):
+                date_str = ""
+            label = f"{aoi['name']}  {date_str}"
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, aoi["id"])
+            self.library_list.addItem(item)
+        count = len(aois)
+        checked = self._library_toggle_btn.isChecked()
+        self._library_toggle_btn.setText(
+            f"{'▼' if checked else '▶'}  Saved AOI Library  ({count} saved)"
+        )
+        self._on_library_selection_changed()
+
+    def _on_library_toggled(self, checked: bool):
+        self._library_widget.setVisible(checked)
+        if checked:
+            self._refresh_library_list()
+        count = self.library_list.count()
+        self._library_toggle_btn.setText(
+            f"{'▼' if checked else '▶'}  Saved AOI Library  ({count} saved)"
+        )
+
+    def _on_library_selection_changed(self):
+        has_sel = bool(self.library_list.selectedItems())
+        self.lib_load_btn.setEnabled(has_sel)
+        self.lib_rename_btn.setEnabled(has_sel)
+        self.lib_delete_btn.setEnabled(has_sel)
+
+    def _lib_load_selected(self):
+        from ..core import aoi_store
+        all_aois = {a["id"]: a for a in aoi_store.load_aois()}
+        for item in self.library_list.selectedItems():
+            aoi_id = item.data(Qt.UserRole)
+            aoi = all_aois.get(aoi_id)
+            if aoi is None:
+                continue
+            entry = {
+                "id": aoi["id"],
+                "name": aoi["name"],
+                "wkt": aoi["wkt"],
+                "bbox": aoi["bbox"],
+                "tag": "saved",
+                "checked": True,
+            }
+            self._add_to_queue(entry)
+
+    def _lib_rename_selected(self):
+        from ..core import aoi_store
+        items = self.library_list.selectedItems()
+        if not items:
+            return
+        item = items[0]
+        aoi_id = item.data(Qt.UserRole)
+        aoi = next((a for a in aoi_store.load_aois() if a["id"] == aoi_id), None)
+        if aoi is None:
+            return
+        name, ok = QInputDialog.getText(self, "Rename AOI", "New name:", text=aoi["name"])
+        if not ok or not name.strip():
+            return
+        aoi["name"] = name.strip()
+        aoi_store.save_aoi(aoi)
+        # Update queue label if this AOI is loaded in the queue
+        for q_aoi in self._queue:
+            if q_aoi["id"] == aoi_id:
+                q_aoi["name"] = name.strip()
+        self._rebuild_queue_list()
+        self._refresh_library_list()
+
+    def _lib_delete_selected(self):
+        from ..core import aoi_store
+        items = self.library_list.selectedItems()
+        if not items:
+            return
+        names = [it.text().split("  ")[0] for it in items]
+        confirm = QMessageBox.question(
+            self, "PWTT",
+            f"Delete {len(items)} saved AOI(s)?\n" + "\n".join(f"  \u2022 {n}" for n in names),
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        for item in items:
+            aoi_store.delete_aoi(item.data(Qt.UserRole))
+        self._refresh_library_list()
+
+    def _lib_export(self):
+        from ..core import aoi_store
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export saved AOIs", "", "JSON files (*.json)"
+        )
+        if not path:
+            return
+        count = aoi_store.export_aois_to_file(path)
+        self.iface.messageBar().pushMessage(
+            "PWTT", f"Exported {count} AOI(s) to {path}.", level=Qgis.Success, duration=5,
+        )
+
+    def _lib_import(self):
+        from ..core import aoi_store
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import AOIs", "", "JSON files (*.json)"
+        )
+        if not path:
+            return
+        try:
+            result = aoi_store.import_aois_from_file(path)
+        except Exception as e:
+            QMessageBox.warning(self, "PWTT", f"Import failed: {e}")
+            return
+        self._refresh_library_list()
+        self.iface.messageBar().pushMessage(
+            "PWTT",
+            f"Imported {result['added']} AOI(s). Skipped invalid: {result['skipped_invalid']}.",
+            level=Qgis.Success, duration=5,
+        )
+
     # ── Load job parameters ──────────────────────────────────────────────────
 
     def load_job_params(self, job):
