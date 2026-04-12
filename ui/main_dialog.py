@@ -168,7 +168,6 @@ class _AoiSplitDialog:
     CANCEL = "cancel"
 
     def __init__(self, parent, bbox: list, backend_id: str, canvas):
-        from ..core import aoi_splitter
         from .dock_common import BACKENDS
         self._bbox       = bbox
         self._backend_id = backend_id
