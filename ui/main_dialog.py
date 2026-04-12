@@ -402,6 +402,13 @@ class PWTTControlsDock(QDockWidget):
         self.queue_label.setStyleSheet("font-weight: bold;")
         aoi_outer.addWidget(self.queue_label)
 
+        self._queue_warning_label = QLabel(
+            "⚠ Large batch — check API quota before running."
+        )
+        self._queue_warning_label.setStyleSheet("color: #b85c00; font-size: 0.9em;")
+        self._queue_warning_label.setVisible(False)
+        aoi_outer.addWidget(self._queue_warning_label)
+
         self.queue_list = QListWidget()
         self.queue_list.setMinimumHeight(80)
         self.queue_list.setAlternatingRowColors(True)
@@ -993,6 +1000,7 @@ class PWTTControlsDock(QDockWidget):
     def _update_queue_label(self):
         selected = sum(1 for a in self._queue if a.get("checked", True))
         self.queue_label.setText(f"Queue  ({selected} selected)")
+        self._queue_warning_label.setVisible(selected >= 4)
 
     def _update_queue_buttons(self):
         has_items = bool(self._queue)
