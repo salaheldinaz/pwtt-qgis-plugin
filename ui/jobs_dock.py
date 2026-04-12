@@ -31,7 +31,7 @@ from qgis.PyQt.QtWidgets import (
     QInputDialog,
     QSizePolicy,
 )
-from qgis.PyQt.QtCore import Qt, QUrl, pyqtSignal, QTimer, QSize, QLocale, QDateTime
+from qgis.PyQt.QtCore import Qt, QUrl, pyqtSignal, QTimer, QSize
 from qgis.PyQt.QtGui import QColor, QDesktopServices, QIcon, QPalette
 from qgis.core import QgsApplication, QgsProject, QgsSettings
 
@@ -43,6 +43,7 @@ from .backend_auth import (
 from .dock_common import STATUS_COLORS, STATUS_LABELS, dock_title, job_footprints_sources
 
 from ..core.qgis_layer_tree import job_backend_log_label
+from ..core.utils import format_iso_date_display, format_iso_datetime_display
 
 # Leading "[YYYY-mm-dd HH:MM:SS] " on persisted activity lines (for color rules after strip).
 _PWTT_LOG_TS_PREFIX_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s*")
@@ -57,16 +58,6 @@ _JOBS_IO_FILES_HINT = (
 def pwtt_activity_ts_prefix() -> str:
     """Local-time bracket prefix for Jobs / activity log lines."""
     return datetime.now().strftime("[%Y-%m-%d %H:%M:%S] ")
-
-
-def _format_local_datetime(iso_str: str) -> str:
-    """Format an ISO datetime string using the device's locale (short format)."""
-    if not iso_str:
-        return ""
-    dt = QDateTime.fromString(iso_str, Qt.ISODate)
-    if not dt.isValid():
-        return iso_str[:16].replace("T", " ")
-    return QLocale.system().toString(dt, QLocale.ShortFormat)
 
 
 def _jobs_dock_btn_icon(*theme_paths: str, resource_fallback: str = None) -> QIcon:
@@ -660,11 +651,13 @@ class PWTTJobsDock(QDockWidget):
             self.job_table.setItem(row, 5, sz_item)
 
             # Dates
-            dates = f"{job['war_start'][:7]} \u2192 {job['inference_start'][:7]}"
+            ws = job.get("war_start") or ""
+            ins = job.get("inference_start") or ""
+            dates = f"{format_iso_date_display(ws)} \u2192 {format_iso_date_display(ins)}"
             self.job_table.setItem(row, 6, QTableWidgetItem(dates))
 
             # Created
-            created = _format_local_datetime(job.get("created_at", ""))
+            created = format_iso_datetime_display(job.get("created_at", ""))
             self.job_table.setItem(row, 7, QTableWidgetItem(created))
 
         # Restore selection
@@ -1027,7 +1020,11 @@ class PWTTJobsDock(QDockWidget):
         log_parts = [f"Task started — backend: {bname}"]
         if remote_id:
             log_parts.append(f"remote job: {remote_id}")
-        log_parts.append(f"dates: {job['war_start']} → {job['inference_start']}")
+        log_parts.append(
+            "dates: "
+            f"{format_iso_date_display(job.get('war_start') or '')} → "
+            f"{format_iso_date_display(job.get('inference_start') or '')}"
+        )
         log_parts.append(f"pre: {job['pre_interval']}mo, post: {job['post_interval']}mo")
         log_parts.append(f"output: {job['output_dir']}")
         self._job_logs.setdefault(job_id, []).append(

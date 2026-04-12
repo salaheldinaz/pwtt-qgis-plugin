@@ -23,6 +23,8 @@ from qgis.core import QgsProject
 
 from .backend_auth import create_and_auth_backend, ensure_footprint_dependencies
 
+from ..core.utils import format_iso_datetime_display
+
 class PWTTOpenEOJobsDock(QDockWidget):
     """List openEO batch jobs from the server and download/add results."""
 
@@ -204,11 +206,11 @@ class PWTTOpenEOJobsDock(QDockWidget):
             self.job_table.setItem(row, 2, QTableWidgetItem(prog_text))
 
             # Created
-            created = (j.get("created") or "")[:19].replace("T", " ")
+            created = format_iso_datetime_display(j.get("created") or "")
             self.job_table.setItem(row, 3, QTableWidgetItem(created))
 
             # Updated
-            updated = (j.get("updated") or "")[:19].replace("T", " ")
+            updated = format_iso_datetime_display(j.get("updated") or "")
             self.job_table.setItem(row, 4, QTableWidgetItem(updated))
 
         # Summary in status bar
