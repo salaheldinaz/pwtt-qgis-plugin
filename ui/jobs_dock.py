@@ -411,6 +411,7 @@ class PWTTJobsDock(QDockWidget):
         self.load_btn = QPushButton("Load parameters")
         self.open_output_btn = QPushButton("Open output folder")
         self.view_logs_btn = QPushButton("View logs…")
+        self.view_timeseries_btn = QPushButton("View time series…")
         self.load_local_btn = QPushButton("Load Local")
         self.apply_style_btn = QPushButton("Apply styling")
         self.apply_style_active_btn = QPushButton("Apply Styling (active layer)")
@@ -438,6 +439,13 @@ class PWTTJobsDock(QDockWidget):
                 "/mMessageLog.svg",
                 "/mIconConsole.svg",
                 "/mActionEditHelpContent.svg",
+            )
+        )
+        self.view_timeseries_btn.setIcon(
+            _jobs_dock_btn_icon(
+                "/mActionHistogram.svg",
+                "/mIconTimeseries.svg",
+                "/mActionShowAllLayers.svg",
             )
         )
         self.load_local_btn.setIcon(
@@ -493,6 +501,7 @@ class PWTTJobsDock(QDockWidget):
             self.load_btn,
             self.open_output_btn,
             self.view_logs_btn,
+            self.view_timeseries_btn,
             self.load_local_btn,
             self.apply_style_btn,
             self.footprints_btn,
@@ -513,6 +522,9 @@ class PWTTJobsDock(QDockWidget):
         self.open_output_btn.setToolTip("Open this job\u2019s output folder in the file manager (if it exists on disk)")
         self.view_logs_btn.setToolTip(
             "Open this job\u2019s activity log in a larger window (saved with the job for later)"
+        )
+        self.view_timeseries_btn.setToolTip(
+            "Open the per-image orbit-normalized z-score chart for this job"
         )
         self.load_local_btn.setToolTip(
             "If the result GeoTIFF (and footprints) exist on disk, add them to the map"
@@ -542,6 +554,7 @@ class PWTTJobsDock(QDockWidget):
         self.load_btn.clicked.connect(self._load_selected)
         self.open_output_btn.clicked.connect(self._open_output_folder)
         self.view_logs_btn.clicked.connect(self._view_logs_selected)
+        self.view_timeseries_btn.clicked.connect(self._view_timeseries_selected)
         self.load_local_btn.clicked.connect(self._load_local_selected)
         self.apply_style_btn.clicked.connect(self._apply_styling_to_result_selected)
         self.apply_style_active_btn.clicked.connect(self._apply_styling_to_active_layer)
@@ -556,7 +569,7 @@ class PWTTJobsDock(QDockWidget):
         self.export_job_btn.clicked.connect(self._export_single_job)
 
         g_inspect, row_inspect = self._jobs_button_group("Inspect")
-        for btn in (self.load_btn, self.open_output_btn, self.view_logs_btn):
+        for btn in (self.load_btn, self.open_output_btn, self.view_logs_btn, self.view_timeseries_btn):
             row_inspect.addWidget(btn)
         row_inspect.addStretch(1)
         layout.addWidget(g_inspect)
@@ -908,7 +921,7 @@ class PWTTJobsDock(QDockWidget):
         from ..core import job_store
         job = self._get_selected_job()
         if not job:
-            for btn in (self.load_btn, self.open_output_btn, self.view_logs_btn, self.load_local_btn, self.apply_style_btn, self.footprints_btn, self.resume_btn, self.stop_btn,
+            for btn in (self.load_btn, self.open_output_btn, self.view_logs_btn, self.view_timeseries_btn, self.load_local_btn, self.apply_style_btn, self.footprints_btn, self.resume_btn, self.stop_btn,
                          self.cancel_btn, self.rerun_btn, self.delete_btn, self.export_job_btn):
                 btn.setEnabled(False)
             self.log_text.clear()
@@ -933,6 +946,7 @@ class PWTTJobsDock(QDockWidget):
         self.rerun_btn.setEnabled(True)
         self.delete_btn.setEnabled(st != job_store.STATUS_RUNNING)
         self.view_logs_btn.setEnabled(bool(self._job_logs.get(job["id"])))
+        self.view_timeseries_btn.setEnabled(self._has_timeseries_sidecar(job))
 
         self.resume_btn.setText(
             "Check && Resume" if st == job_store.STATUS_WAITING_ORDERS else "Resume"
@@ -1287,6 +1301,31 @@ class PWTTJobsDock(QDockWidget):
         bb.rejected.connect(dlg.reject)
         v.addWidget(bb)
         dlg.resize(780, 520)
+        dlg.exec_()
+
+    def _has_timeseries_sidecar(self, job) -> bool:
+        if not job:
+            return False
+        from ..core.timeseries_sidecar import sidecar_json_path
+        out_dir = (job.get("output_dir") or "").strip()
+        jid = job.get("id") or ""
+        candidates = []
+        tif = (job.get("output_tif") or "").strip()
+        if tif:
+            candidates.append(tif)
+        if out_dir and jid:
+            candidates.append(os.path.join(out_dir, f"pwtt_{jid}.tif"))
+        for tif_path in candidates:
+            if tif_path and os.path.isfile(sidecar_json_path(tif_path)):
+                return True
+        return False
+
+    def _view_timeseries_selected(self):
+        job = self._get_selected_job()
+        if not job:
+            return
+        from .timeseries_dialog import PWTTTimeSeriesDialog
+        dlg = PWTTTimeSeriesDialog(job, parent=self)
         dlg.exec_()
 
     def _load_local_selected(self):

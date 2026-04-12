@@ -41,6 +41,30 @@ def _max_scenes_per_period() -> int:
         n = _DEFAULT_MAX_SCENES_PER_PERIOD
     return max(1, min(n, 80))
 
+
+def _parse_relative_orbit_from_name(name: str) -> Optional[int]:
+    """Derive Sentinel-1 relative orbit from a SAFE product name.
+
+    SAFE filename form: S1A_IW_GRDH_1SDV_20220301T041201_..._045512_057123_....
+    Field 7 (0-indexed 6) is the absolute orbit. S1A: rel = ((abs-73)%175)+1;
+    S1B: rel = ((abs-27)%175)+1.
+    """
+    if not name:
+        return None
+    parts = name.split("_")
+    if len(parts) < 7:
+        return None
+    mission = parts[0]
+    try:
+        abs_orbit = int(parts[6])
+    except (TypeError, ValueError):
+        return None
+    if mission == "S1A":
+        return ((abs_orbit - 73) % 175) + 1
+    if mission == "S1B":
+        return ((abs_orbit - 27) % 175) + 1
+    return None
+
 # Default ground-range pixel spacing for AOI warp (~Sentinel-1 GRD IW).
 _AOI_RESOLUTION_M = 10.0
 # Expand AOI in projected metres so edge pixels are not clipped by reprojection.
@@ -405,6 +429,8 @@ class LocalBackend(PWTTBackend):
         remote_job_id: Optional[str] = None,
         damage_threshold: float = 3.3,
         gee_viz: bool = False,
+        save_timeseries: bool = True,
+        job_id: Optional[str] = None,
     ) -> str:
         source = getattr(self, "_data_source", LOCAL_SOURCE_CDSE)
         if source == LOCAL_SOURCE_CDSE and not getattr(self, "_token", None):
@@ -559,11 +585,13 @@ class LocalBackend(PWTTBackend):
 
         def _scene_summary(prod):
             cd = prod.get("ContentDate") or {}
+            name = prod.get("Name", "")
             return {
                 "id": prod.get("Id", ""),
-                "name": prod.get("Name", ""),
+                "name": name,
                 "date": (cd.get("Start") or "")[:19],
                 "online": prod.get("Online", True),
+                "orbit": _parse_relative_orbit_from_name(name),
             }
 
         self.run_metadata["pre_scenes_found"] = [_scene_summary(p) for p in pre_products]
@@ -674,8 +702,24 @@ class LocalBackend(PWTTBackend):
 
                     remove_zips_for_extracted_safe(safe_dir, log=job_log)
                 arrays_list.append(result)
+                vv_arr, vh_arr = result[0], result[1]
+                try:
+                    vv_mean = float(np.nanmean(vv_arr))
+                except Exception:
+                    vv_mean = float("nan")
+                try:
+                    vh_mean = float(np.nanmean(vh_arr))
+                except Exception:
+                    vh_mean = float("nan")
                 with _lock:
-                    self.run_metadata[used_key].append({"id": pid, "name": name, "date": scene_date})
+                    self.run_metadata[used_key].append({
+                        "id": pid,
+                        "name": name,
+                        "date": scene_date,
+                        "orbit": _parse_relative_orbit_from_name(name),
+                        "VV_mean": vv_mean,
+                        "VH_mean": vh_mean,
+                    })
                 loaded += 1
                 job_log(
                     f"{label}: accepted scene «{name}» ({scene_date}) "
@@ -727,8 +771,24 @@ class LocalBackend(PWTTBackend):
                     job_log(f"{label}: skip {name} (AOI warp failed)…")
                     continue
                 arrays_list.append(result)
+                vv_arr, vh_arr = result[0], result[1]
+                try:
+                    vv_mean = float(np.nanmean(vv_arr))
+                except Exception:
+                    vv_mean = float("nan")
+                try:
+                    vh_mean = float(np.nanmean(vh_arr))
+                except Exception:
+                    vh_mean = float("nan")
                 with _lock:
-                    self.run_metadata[used_key].append({"id": pid, "name": name, "date": scene_date})
+                    self.run_metadata[used_key].append({
+                        "id": pid,
+                        "name": name,
+                        "date": scene_date,
+                        "orbit": _parse_relative_orbit_from_name(name),
+                        "VV_mean": vv_mean,
+                        "VH_mean": vh_mean,
+                    })
                 loaded += 1
                 job_log(
                     f"{label}: accepted PC scene «{name}» ({scene_date}) "
@@ -883,5 +943,109 @@ class LocalBackend(PWTTBackend):
         self.run_metadata["pre_scenes_count"] = len(pre_arrays)
         self.run_metadata["post_scenes_count"] = len(post_arrays)
 
+        if save_timeseries:
+            try:
+                self._write_local_timeseries_sidecar(
+                    output_path=output_path,
+                    aoi_wkt=aoi_wkt,
+                    war_start=war_start,
+                    inference_start=inference_start,
+                    pre_interval=pre_interval,
+                    post_interval=post_interval,
+                    job_id=job_id or "",
+                )
+            except Exception as ts_err:
+                job_log(f"Local: time-series sidecar skipped — {ts_err}")
+
         emit(95, "Done.")
         return output_path
+
+    def _write_local_timeseries_sidecar(
+        self,
+        output_path: str,
+        aoi_wkt: str,
+        war_start: str,
+        inference_start: str,
+        pre_interval: int,
+        post_interval: int,
+        job_id: str,
+    ) -> None:
+        """Pool pre-war means, compute VV/VH z-scores per scene, write sidecars.
+
+        Local backend pools all orbits into one composite, so normalization here
+        is pooled (not per-orbit) — the JSON records this explicitly.
+        """
+        pre_used = list(self.run_metadata.get("pre_scenes_used") or [])
+        post_used = list(self.run_metadata.get("post_scenes_used") or [])
+        if not pre_used and not post_used:
+            return
+
+        def _finite(xs):
+            out = []
+            for x in xs:
+                try:
+                    if x is None:
+                        continue
+                    fx = float(x)
+                    if fx == fx and fx not in (float("inf"), float("-inf")):
+                        out.append(fx)
+                except Exception:
+                    continue
+            return out
+
+        pre_vv = _finite(s.get("VV_mean") for s in pre_used)
+        pre_vh = _finite(s.get("VH_mean") for s in pre_used)
+        if len(pre_vv) < 2 or len(pre_vh) < 2:
+            return
+
+        pre_vv_mean = float(np.mean(pre_vv))
+        pre_vh_mean = float(np.mean(pre_vh))
+        pre_vv_std = float(np.std(pre_vv, ddof=1))
+        pre_vh_std = float(np.std(pre_vh, ddof=1))
+
+        def _z(x, mu, sd):
+            if x is None or sd is None or sd == 0.0 or sd != sd:
+                return None
+            try:
+                fx = float(x)
+            except Exception:
+                return None
+            if fx != fx:
+                return None
+            return (fx - mu) / sd
+
+        def _entry(scene, period):
+            vv_z = _z(scene.get("VV_mean"), pre_vv_mean, pre_vv_std)
+            vh_z = _z(scene.get("VH_mean"), pre_vh_mean, pre_vh_std)
+            return {
+                "date": scene.get("date") or "",
+                "orbit": scene.get("orbit"),
+                "pass": None,
+                "VV_z": vv_z,
+                "VH_z": vh_z,
+                "period": period,
+            }
+
+        series = []
+        for s in pre_used:
+            series.append(_entry(s, "pre"))
+        for s in post_used:
+            series.append(_entry(s, "post"))
+        series.sort(key=lambda e: (e.get("date") or ""))
+
+        from . import timeseries_sidecar
+        payload = timeseries_sidecar.build_sidecar(
+            job_id=job_id,
+            backend=self.id,
+            aoi_wkt=aoi_wkt,
+            war_start=war_start,
+            inference_start=inference_start,
+            pre_interval_months=pre_interval,
+            post_interval_months=post_interval,
+            normalization=(
+                "pooled z-score vs pre-war baseline (Local backend pools orbits; "
+                "mean/std over σ⁰ AOI means)"
+            ),
+            series=series,
+        )
+        timeseries_sidecar.write_sidecars(output_path, payload)

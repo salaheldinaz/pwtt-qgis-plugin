@@ -300,6 +300,8 @@ class GEEBackend(PWTTBackend):
         smoothing: str = 'default',
         mask_before_smooth: bool = True,
         lee_mode: str = 'per_image',
+        save_timeseries: bool = True,
+        job_id: Optional[str] = None,
     ) -> str:
         import ee
 
@@ -367,6 +369,36 @@ class GEEBackend(PWTTBackend):
             for chunk in r.iter_content(chunk_size=65536):
                 if chunk:
                     f.write(chunk)
+        if save_timeseries:
+            if progress_callback:
+                progress_callback(92, "Computing per-image time series…")
+            try:
+                series = gee_pwtt.compute_orbit_normalized_timeseries(
+                    aoi,
+                    war_start=war_start,
+                    inference_start=inference_start,
+                    pre_interval=pre_interval,
+                    post_interval=post_interval,
+                    lee_mode=lee_mode,
+                )
+                if series:
+                    from . import timeseries_sidecar
+                    payload = timeseries_sidecar.build_sidecar(
+                        job_id=job_id or "",
+                        backend=self.id,
+                        aoi_wkt=aoi_wkt,
+                        war_start=war_start,
+                        inference_start=inference_start,
+                        pre_interval_months=pre_interval,
+                        post_interval_months=post_interval,
+                        normalization="per-orbit z-score vs pre-war baseline (mean/std, log-backscatter)",
+                        series=series,
+                    )
+                    timeseries_sidecar.write_sidecars(output_path, payload)
+            except Exception as ts_err:
+                if progress_callback:
+                    progress_callback(93, f"Time series skipped: {ts_err}")
+
         if progress_callback:
             progress_callback(95, "Done.")
         return output_path
