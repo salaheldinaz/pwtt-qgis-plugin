@@ -127,7 +127,10 @@ class PWTTRunTask(QgsTask):
                     smoothing=self.gee_smoothing,
                     mask_before_smooth=self.gee_mask_before_smooth,
                     lee_mode=self.gee_lee_mode,
+                    job_id=self.job_id,
                 )
+            if getattr(self.backend, 'id', None) == 'local':
+                run_kwargs["job_id"] = self.job_id
             # Pass remote_job_id for backends that support resuming (openEO)
             if self.remote_job_id:
                 run_kwargs["remote_job_id"] = self.remote_job_id

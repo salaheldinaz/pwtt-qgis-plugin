@@ -373,6 +373,119 @@ def hotelling_t2(s1, inference_start, war_start, pre_interval, post_interval, tt
         .addBands(df_vv).addBands(df_vh)
 
 
+def compute_orbit_normalized_timeseries(
+    aoi,
+    war_start,
+    inference_start,
+    pre_interval,
+    post_interval,
+    lee_mode='per_image',
+    scale=30,
+):
+    """Per-acquisition orbit-normalized z-score time series over the AOI.
+
+    For each Sentinel-1 image in [war_start - pre_interval, inference_start + post_interval]
+    covering the AOI, z-normalize against its own orbit's pre-war baseline (mean/std in
+    log-backscatter space) and reduce to the AOI mean. Produces the same series as the
+    Earth Engine Code Editor 'orbit-normalized z-scores' chart.
+
+    Returns a list of dicts sorted by date:
+        {"date": "YYYY-MM-DDTHH:MM:SS", "orbit": int, "pass": "ASCENDING" | "DESCENDING",
+         "VV_z": float or None, "VH_z": float or None, "period": "pre" | "post"}
+    """
+    war = ee.Date(war_start)
+    inf = ee.Date(inference_start)
+    pre_start_date = war.advance(ee.Number(pre_interval).multiply(-1), 'month')
+    post_end_date = inf.advance(post_interval, 'month')
+
+    aoi_geom = aoi.geometry() if hasattr(aoi, 'geometry') else aoi
+
+    s1_all = (
+        ee.ImageCollection("COPERNICUS/S1_GRD_FLOAT")
+        .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH"))
+        .filter(ee.Filter.eq("instrumentMode", "IW"))
+        .filterBounds(aoi_geom)
+        .filterDate(pre_start_date, post_end_date)
+    )
+
+    try:
+        orbits = s1_all.aggregate_array('relativeOrbitNumber_start').distinct().getInfo() or []
+    except Exception:
+        return []
+    war_millis = int(war.millis().getInfo())
+
+    results = []
+    for orbit in orbits:
+        s1 = s1_all.filter(ee.Filter.eq('relativeOrbitNumber_start', orbit))
+        if lee_mode == 'per_image':
+            s1 = s1.map(lee_filter)
+        s1 = s1.select(['VV', 'VH']).map(
+            lambda img: img.log().copyProperties(
+                img,
+                ['system:time_start', 'relativeOrbitNumber_start', 'orbitProperties_pass'],
+            )
+        )
+
+        pre = s1.filterDate(pre_start_date, war)
+        try:
+            pre_count = int(pre.size().getInfo() or 0)
+        except Exception:
+            pre_count = 0
+        if pre_count < 2:
+            continue
+
+        pre_mean = pre.mean()
+        pre_sd = pre.reduce(ee.Reducer.stdDev()).rename(['VV', 'VH'])
+        safe_sd = pre_sd.max(ee.Image.constant(1e-10))
+
+        def _to_feature(img, _pre_mean=pre_mean, _safe_sd=safe_sd):
+            img = ee.Image(img)
+            z = img.subtract(_pre_mean).divide(_safe_sd)
+            stats = z.reduceRegion(
+                reducer=ee.Reducer.mean(),
+                geometry=aoi_geom,
+                scale=scale,
+                maxPixels=int(1e13),
+                bestEffort=True,
+            )
+            return ee.Feature(None, {
+                'time_start': img.get('system:time_start'),
+                'orbit': img.get('relativeOrbitNumber_start'),
+                'pass_prop': img.get('orbitProperties_pass'),
+                'VV_z': stats.get('VV'),
+                'VH_z': stats.get('VH'),
+            })
+
+        try:
+            fc = ee.FeatureCollection(s1.map(_to_feature)).getInfo()
+        except Exception:
+            continue
+
+        for feat in (fc or {}).get('features', []) or []:
+            props = feat.get('properties', {}) or {}
+            t_ms = props.get('time_start')
+            if t_ms is None:
+                continue
+            try:
+                iso = datetime.datetime.utcfromtimestamp(float(t_ms) / 1000.0).isoformat(
+                    timespec='seconds'
+                )
+            except (TypeError, ValueError, OSError):
+                continue
+            period = 'pre' if float(t_ms) < war_millis else 'post'
+            results.append({
+                'date': iso,
+                'orbit': props.get('orbit'),
+                'pass': props.get('pass_prop'),
+                'VV_z': props.get('VV_z'),
+                'VH_z': props.get('VH_z'),
+                'period': period,
+            })
+
+    results.sort(key=lambda r: r.get('date') or '')
+    return results
+
+
 def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interval=2, footprints=None, viz=False, viz_return_map=False, export=False, export_dir='PWTT_Export', export_name=None, export_scale=10, grid_scale=500, export_grid=False, clip=True, method='stouffer', damage_threshold=DEFAULT_DAMAGE_THRESHOLD, ttest_type='welch', smoothing='default', mask_before_smooth=True, lee_mode='per_image'):
     import warnings
 
