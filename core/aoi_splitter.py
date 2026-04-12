@@ -11,7 +11,9 @@ _OPENEO_MAX_DEG: float = 0.5
 # Local: no hard limit; large sensible default
 _LOCAL_MAX_DEG: float = 1.0
 
-# GEE constants mirrored from gee_backend.py
+# These mirror _GEE_DOWNLOAD_SCALE_M/_GEE_DOWNLOAD_BANDS/_GEE_DOWNLOAD_BYTES_PER_BAND
+# in gee_backend.py. Not imported at module level to avoid requiring earthengine-api.
+# If gee_backend.py changes these values, update here to match.
 _GEE_SCALE_M: int = 10
 _GEE_BANDS: int = 3
 _GEE_BYTES_PER_BAND: int = 4  # float32
@@ -83,10 +85,10 @@ def split_bbox(
     for r in range(rows - 1, -1, -1):   # top-to-bottom (north first)
         for c in range(cols):            # left-to-right
             tiles.append([
-                west  + c * cell_w - overlap_deg,
-                south + r * cell_h - overlap_deg,
-                west  + (c + 1) * cell_w + overlap_deg,
-                south + (r + 1) * cell_h + overlap_deg,
+                max(-180.0, west  + c * cell_w - overlap_deg),
+                max( -90.0, south + r * cell_h - overlap_deg),
+                min( 180.0, west  + (c + 1) * cell_w + overlap_deg),
+                min(  90.0, south + (r + 1) * cell_h + overlap_deg),
             ])
     return tiles
 
