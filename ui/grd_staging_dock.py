@@ -23,6 +23,8 @@ from qgis.core import QgsSettings
 
 from .dock_common import dock_title, offline_grd_catalog_rows
 
+from ..core.utils import format_iso_datetime_display
+
 class PWTTGrdStagingDock(QDockWidget):
     """Panel: Local jobs with Sentinel-1 GRD products staging from CDSE cold storage."""
 
@@ -192,7 +194,9 @@ class PWTTGrdStagingDock(QDockWidget):
             pi.setToolTip(pid)
             pi.setData(Qt.UserRole, pid)
             self.products_table.setItem(i, 1, pi)
-            self.products_table.setItem(i, 2, QTableWidgetItem(r.get("date") or ""))
+            raw_date = r.get("date") or ""
+            disp_date = format_iso_datetime_display(raw_date) if raw_date else ""
+            self.products_table.setItem(i, 2, QTableWidgetItem(disp_date))
             st = QTableWidgetItem("\u2014")
             st.setForeground(gray)
             self.products_table.setItem(i, 3, st)

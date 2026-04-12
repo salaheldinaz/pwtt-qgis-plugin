@@ -3,7 +3,69 @@
 
 import os
 import re
+from datetime import datetime
 from typing import Optional, Tuple
+
+# English month abbreviations — fixed across devices (avoid locale-dependent strftime %b).
+_MONTH_ABBR = (
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+)
+
+
+def _parse_iso_datetime(iso_str: str) -> Optional[datetime]:
+    if not iso_str or not isinstance(iso_str, str):
+        return None
+    s = iso_str.strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def format_ymd_display(year: int, month: int, day: int) -> str:
+    """Calendar date as 'Mar 13, 2025' (English, locale-independent)."""
+    return f"{_MONTH_ABBR[month - 1]} {day}, {year}"
+
+
+def format_iso_date_display(iso_str: str) -> str:
+    """ISO date or datetime string → 'Mar 13, 2025'."""
+    dt = _parse_iso_datetime(iso_str)
+    if dt is None:
+        if not iso_str:
+            return ""
+        return iso_str[:10] if len(iso_str) >= 10 else iso_str
+    return f"{_MONTH_ABBR[dt.month - 1]} {dt.day}, {dt.year}"
+
+
+def format_iso_datetime_display(iso_str: str) -> str:
+    """ISO datetime → 'Mar 13, 2025, 14:30' (24h time); date-only input → date only."""
+    if not iso_str:
+        return ""
+    s = iso_str.strip()
+    dt = _parse_iso_datetime(s)
+    if dt is None:
+        return s[:16].replace("T", " ") if "T" in s else s[:19]
+    base = f"{_MONTH_ABBR[dt.month - 1]} {dt.day}, {dt.year}"
+    if len(s) <= 10:
+        return base
+    if "T" not in s.upper():
+        return base
+    return f"{base}, {dt.hour:02d}:{dt.minute:02d}"
 
 
 def wkt_to_bbox(wkt: str) -> Optional[Tuple[float, float, float, float]]:

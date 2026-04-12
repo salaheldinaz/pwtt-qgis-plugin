@@ -56,6 +56,7 @@ from .backend_auth import (
     test_remote_backend_credentials,
 )
 from .dock_common import BACKENDS, dock_title, job_footprints_sources
+from ..core.utils import format_iso_date_display, format_ymd_display
 
 
 class _BatchConfirmDialog:
@@ -1121,12 +1122,7 @@ class PWTTControlsDock(QDockWidget):
         aois = aoi_store.load_aois()
         self.library_list.clear()
         for aoi in aois:
-            from datetime import datetime
-            try:
-                dt = datetime.fromisoformat(aoi.get("created_at", ""))
-                date_str = dt.strftime("%Y-%m-%d")
-            except (ValueError, TypeError):
-                date_str = ""
+            date_str = format_iso_date_display(aoi.get("created_at", "") or "")
             label = f"{aoi['name']}  {date_str}"
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, aoi["id"])
@@ -1569,8 +1565,14 @@ class PWTTControlsDock(QDockWidget):
         n_aois = sum(1 for a in self._queue if a.get("checked", True))
         lines.append(f"AOIs selected: {n_aois}")
 
-        lines.append(f"War start: {self.war_start.date().toString('yyyy-MM-dd')}")
-        lines.append(f"Inference start: {self.inference_start.date().toString('yyyy-MM-dd')}")
+        wsd = self.war_start.date()
+        insd = self.inference_start.date()
+        lines.append(
+            f"War start: {format_ymd_display(wsd.year(), wsd.month(), wsd.day())}"
+        )
+        lines.append(
+            f"Inference start: {format_ymd_display(insd.year(), insd.month(), insd.day())}"
+        )
         lines.append(f"Pre-war interval: {self.pre_interval.value()} month(s)")
         lines.append(f"Post-war interval: {self.post_interval.value()} month(s)")
         lines.append(
