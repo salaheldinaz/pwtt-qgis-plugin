@@ -86,3 +86,61 @@ def test_tile_grid_dims_minimum_1():
     cols, rows = splitter.tile_grid_dims([0.0, 0.0, 0.01, 0.01], "openeo")
     assert cols >= 1
     assert rows >= 1
+
+
+# ── split_bbox ────────────────────────────────────────────────────────────────
+
+def test_split_bbox_count():
+    # 1° × 1° openEO → 2×2 = 4 tiles
+    tiles = splitter.split_bbox([0.0, 0.0, 1.0, 1.0], "openeo", overlap_deg=0.0)
+    assert len(tiles) == 4
+
+
+def test_split_bbox_no_overlap_union():
+    # With no overlap, tiles exactly tile the bbox (no gaps, no duplicates)
+    tiles = splitter.split_bbox([0.0, 0.0, 1.0, 1.0], "openeo", overlap_deg=0.0)
+    wests  = [t[0] for t in tiles]
+    easts  = [t[2] for t in tiles]
+    souths = [t[1] for t in tiles]
+    norths = [t[3] for t in tiles]
+    assert min(wests)  == pytest.approx(0.0)
+    assert max(easts)  == pytest.approx(1.0)
+    assert min(souths) == pytest.approx(0.0)
+    assert max(norths) == pytest.approx(1.0)
+
+
+def test_split_bbox_overlap_expands_tiles():
+    tiles    = splitter.split_bbox([0.0, 0.0, 1.0, 1.0], "openeo", overlap_deg=0.05)
+    no_ov    = splitter.split_bbox([0.0, 0.0, 1.0, 1.0], "openeo", overlap_deg=0.0)
+    for t, b in zip(tiles, no_ov):
+        assert (t[2] - t[0]) > (b[2] - b[0])
+
+
+def test_split_bbox_order_top_to_bottom_left_to_right():
+    # 2×2 grid: tiles[0]=top-left, tiles[1]=top-right, tiles[2]=bottom-left, tiles[3]=bottom-right
+    tiles = splitter.split_bbox([0.0, 0.0, 1.0, 1.0], "openeo", overlap_deg=0.0)
+    assert len(tiles) == 4
+    assert tiles[0][1] > tiles[2][1]   # top-left south > bottom-left south
+    assert tiles[0][0] < tiles[1][0]   # top-left west < top-right west
+
+
+def test_split_bbox_uniform_cells():
+    tiles   = splitter.split_bbox([0.0, 0.0, 1.5, 1.0], "openeo", overlap_deg=0.0)
+    widths  = [round(t[2] - t[0], 8) for t in tiles]
+    heights = [round(t[3] - t[1], 8) for t in tiles]
+    assert len(set(widths))  == 1
+    assert len(set(heights)) == 1
+
+
+def test_split_bbox_clamped_near_antimeridian():
+    # AOI near east edge — overlap must not push past 180
+    tiles = splitter.split_bbox([179.6, 0.0, 180.0, 0.5], "openeo", overlap_deg=0.05)
+    for t in tiles:
+        assert t[2] <= 180.0
+
+
+def test_split_bbox_clamped_near_pole():
+    # AOI near north pole — overlap must not push past 90
+    tiles = splitter.split_bbox([0.0, 89.6, 1.0, 90.0], "openeo", overlap_deg=0.05)
+    for t in tiles:
+        assert t[3] <= 90.0
