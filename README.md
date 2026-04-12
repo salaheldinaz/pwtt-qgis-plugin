@@ -2,13 +2,21 @@
 
 QGIS plugin implementing the **Pixel-Wise T-Test (PWTT)** algorithm for building damage detection from Sentinel-1 SAR imagery. Choose among three processing backends: [openEO](https://openeo.org/), [Google Earth Engine](https://earthengine.google.com/), or full-local processing.
 
-## Links
-
-- **This plugin (source, releases, issues):** [PWTT-QGIS-Plugin](https://github.com/Salaheldinaz/PWTT-QGIS-Plugin)
 - **PWTT method / reference implementation:** [oballinger/PWTT](https://github.com/oballinger/PWTT)
-- QGIS plugin docs: [QGIS Python Plugins](https://docs.qgis.org/latest/en/docs/pyqgis_developer_cookbook/plugins/)
-- QGIS plugin manager: [Manage and Install Plugins](https://docs.qgis.org/latest/en/docs/user_manual/plugins/plugins.html)
 
+## Intro
+
+**SAR (Sentinel‑1)** is radar from space: the satellite measures microwave **backscatter** from the ground. Built structures affect that signal. The plugin uses two polarisations, **VV** and **VH**, as complementary views of the same place. You do not get a tidy daily photo—only **individual overpasses** when Sentinel‑1 covers your area.
+
+**PWTT (Pixel‑Wise T‑Test)** asks: *did backscatter change a lot between a **baseline** period and a **later** period, in a way that fits damage mapping?* In short: (1) summarise SAR over months **before** your **war / event** date, (2) summarise SAR over months **after** your **inference start** date, (3) compare them per pixel and polarisation to get a **change score** (exported mainly as **`T_statistic`** on band 1), (4) mark **damage** where that score is **above** your cutoff (default **3.3**). It is era‑to‑era comparison, not “damage from a single scene.”
+
+**This QGIS plugin** is the front door: draw an **AOI**, set **dates** and **pre/post month spans**, pick a **backend** (openEO, Google Earth Engine, or local download + NumPy), run in the background, then get a **GeoTIFF** on disk and on the map—plus `job_info.json` and optional footprint layers. The plugin delivers **one raster product** (three bands: `T_statistic`, `damage`, `p_value`), not a per‑acquisition time‑series chart; listing SAR acquisition times is a separate catalog / EE step if you need it.
+
+**How the analysis works (same idea on every backend; recipes differ):** restrict Sentinel‑1 GRD to your AOI and pre/post windows → **aggregate** many acquisitions into summaries (means, variances, counts—or orbit‑wise steps on GEE) → run a **statistical comparison** (pooled *t*‑style on openEO/Local; GEE adds options like per‑orbit combination, Lee filter, log scale, urban mask, focal smoothing—see [HOW_IT_WORKS.md](HOW_IT_WORKS.md)) → **smooth** spatially to tame speckle → **damage** = **`T_statistic` > threshold** on the exported band 1.
+
+**Reading the map:** band 1 = strength of change; band 2 = binary above‑cutoff mask; band 3 = approximate *p*‑value (details vary by backend). For symbology and why GEE vs openEO vs Local differ, use [HOW_IT_WORKS.md](HOW_IT_WORKS.md).
+
+---
 ## Requirements
 
 - **[QGIS](https://qgis.org/)** 3.22 or later
@@ -22,6 +30,7 @@ QGIS plugin implementing the **Pixel-Wise T-Test (PWTT)** algorithm for building
 
 The plugin installs missing **pip** packages into **`PWTT/deps/`** under your [QGIS user profile](https://docs.qgis.org/latest/en/docs/user_manual/introduction/qgis_configuration.html#user-profiles) (prefers a bundled **uv** binary, then QGIS’s Python **pip**). In **PWTT — Damage Detection**, use **Install Dependencies** when the panel reports missing imports. Core raster stack (**numpy**, **rasterio**, **requests**) usually comes from QGIS itself.
 
+---
 ## Installation
 
 ### Option A: Install from ZIP (recommended)
@@ -44,6 +53,7 @@ The plugin installs missing **pip** packages into **`PWTT/deps/`** under your [Q
 2. Restart QGIS, then **Plugins → Manage and Install Plugins** → enable **PWTT - Battle Damage Detection**.
 3. Use **Install Dependencies** in the PWTT panel as needed.
 
+---
 ## Backends
 
 | Backend | Where it runs | Auth | Packages |
@@ -56,7 +66,21 @@ The plugin installs missing **pip** packages into **`PWTT/deps/`** under your [Q
 - **GEE:** Uses bundled **`gee_pwtt`** (synced with upstream PWTT): configurable **detection method** (Stouffer default), Welch/pooled *t*, smoothing and Lee modes in **Advanced GEE options**. Download is streamed to disk (**3 bands** only). Very large AOIs may require GEE Export to Drive instead of getDownloadURL.
 - **Local:** Select source in UI: CDSE, ASF, or Microsoft Planetary Computer. Downloads [Sentinel-1 GRD](https://sentinels.copernicus.eu/web/sentinel/missions/sentinel-1) into **`<output_dir>/.pwtt_cache`**, then runs an **openEO-aligned** NumPy pipeline (σ⁰ linear, no Lee/log; pooled *t*-style statistic; same kernel idea as CDSE openEO — see [HOW_IT_WORKS.md](HOW_IT_WORKS.md)). By default uses up to **24** pre and **24** post scenes per job (cap **80**, setting `PWTT/local_max_scenes_per_period`). Disk and RAM depend on AOI size and that cap.
 
+---
 ## Usage
+
+### Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| War start date | 2023-10-07 | Start of the conflict (pre-war window ends at this date). |
+| Inference start date | 2024-07-01 | Start of the post-event window; must be ≥ war start. |
+| Pre-war interval | 12 months | Length of the pre-event reference period before war start. |
+| Post-war interval | 2 months | Length of the post-event assessment window after inference start. |
+| T-statistic cutoff | 3.3 | Binary **damage** (band 2) where **`T_statistic` > cutoff** on all backends. Higher → stricter (fewer pixels flagged); not a probability. |
+| GEE detection method | Stouffer | **GEE only.** Stouffer (default), Max, Z-test, Hotelling T², or Mahalanobis — how per-orbit tests are combined. |
+| GEE advanced options | (see UI) | **GEE only.** Welch vs pooled *t*-test; default vs focal-only smoothing; urban mask before/after focal median; Lee per-image vs composite. Stored on jobs and **Rerun**. |
+
 
 1. Open **PWTT — Damage Detection** from the **PWTT** toolbar or **Plugins → PWTT**. Other PWTT docks (toggle from the toolbar): **Jobs**, **Job log**, **openEO Jobs**, **GRD staging** (CDSE offline ordering).
 2. Select a **processing backend** and enter its credentials. If imports fail, use **Install Dependencies** in this panel.
@@ -70,6 +94,7 @@ The plugin installs missing **pip** packages into **`PWTT/deps/`** under your [Q
 10. Choose an **output directory**.
 11. Confirm the summary dialog, then **Run**. Progress appears in the task bar and **PWTT — Job log** / Jobs dock. The raster (and footprint layers if any) are added to the project when finished.
 
+---
 ## Output files
 
 - **pwtt_*.tif** — GeoTIFF (typically **three** bands):
@@ -104,18 +129,6 @@ With the **default** yellow → red → purple ramp (still a **model of backscat
 
 Pixels with `T_statistic` **well below** your symbology minimum may render as transparent or a flat color depending on QGIS settings — that is **not** “purple means undamaged.” For a strict above/below mask, use **band 2** with **singleband** / two-class symbology. If you choose **another** ramp, read colors from that ramp’s legend, not this table.
 
-## Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| War start date | 2023-10-07 | Start of the conflict (pre-war window ends at this date). |
-| Inference start date | 2024-07-01 | Start of the post-event window; must be ≥ war start. |
-| Pre-war interval | 12 months | Length of the pre-event reference period before war start. |
-| Post-war interval | 2 months | Length of the post-event assessment window after inference start. |
-| T-statistic cutoff | 3.3 | Binary **damage** (band 2) where **`T_statistic` > cutoff** on all backends. Higher → stricter (fewer pixels flagged); not a probability. |
-| GEE detection method | Stouffer | **GEE only.** Stouffer (default), Max, Z-test, Hotelling T², or Mahalanobis — how per-orbit tests are combined. |
-| GEE advanced options | (see UI) | **GEE only.** Welch vs pooled *t*-test; default vs focal-only smoothing; urban mask before/after focal median; Lee per-image vs composite. Stored on jobs and **Rerun**. |
-
 ## How it works
 
 **Full pipeline (all backends, jobs, outputs):** [HOW_IT_WORKS.md](HOW_IT_WORKS.md).
@@ -126,6 +139,7 @@ Conceptually, PWTT compares Sentinel-1 VV/VH **before** and **after** conflict u
 
 Paper and method background: [PWTT paper (arXiv:2405.06323)](https://arxiv.org/pdf/2405.06323).
 
+---
 ## Building a release
 
 From the project root:
@@ -138,6 +152,7 @@ From the project root:
 
 Version is read from `metadata.txt` at the repo root (same file inside the `pwtt_qgis` folder in the ZIP). Output: **`build/pwtt_qgis-<version>.zip`**.
 
+---
 ## License
 
 There is no `LICENSE` in this repository. Use the [plugin repository](https://github.com/Salaheldinaz/PWTT-QGIS-Plugin) and [upstream PWTT](https://github.com/oballinger/PWTT) for license details.
