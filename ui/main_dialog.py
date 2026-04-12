@@ -1048,6 +1048,31 @@ class PWTTControlsDock(QDockWidget):
             except Exception:
                 pass
             return
+
+        try:
+            self.iface.mapCanvas().setMapTool(self._previous_map_tool)
+        except Exception:
+            pass
+
+        backend_id = self.backend_combo.currentData()
+        bbox = [rect.xMinimum(), rect.yMinimum(), rect.xMaximum(), rect.yMaximum()]
+
+        from ..core import aoi_splitter
+        if aoi_splitter.needs_split(bbox, backend_id):
+            dlg = _AoiSplitDialog(self, bbox, backend_id, self.iface.mapCanvas())
+            action = dlg.exec()
+            if action == "cancel":
+                return
+            elif action == "single":
+                self._add_drawn_aoi_to_queue(wkt, rect)
+            else:  # "tiles"
+                for i, tile_bbox in enumerate(dlg.confirmed_tiles(), start=1):
+                    self._add_tile_aoi_to_queue(tile_bbox, i)
+        else:
+            self._add_drawn_aoi_to_queue(wkt, rect)
+
+    def _add_drawn_aoi_to_queue(self, wkt: str, rect) -> None:
+        """Create a tmp_ AOI entry from a drawn rect and add it to the queue."""
         import uuid as _uuid
         aoi_id = "tmp_" + _uuid.uuid4().hex[:8]
         bbox = [rect.xMinimum(), rect.yMinimum(), rect.xMaximum(), rect.yMaximum()]
@@ -1061,10 +1086,24 @@ class PWTTControlsDock(QDockWidget):
             "checked": True,
         }
         self._add_to_queue(aoi_entry)
-        try:
-            self.iface.mapCanvas().setMapTool(self._previous_map_tool)
-        except Exception:
-            pass
+
+    def _add_tile_aoi_to_queue(self, tile_bbox: list, tile_index: int) -> None:
+        """Create a tmp_ AOI entry from a tile bbox and add it to the queue."""
+        import uuid as _uuid
+        west, south, east, north = tile_bbox
+        rect = QgsRectangle(west, south, east, north)
+        geom = QgsGeometry.fromRect(rect)
+        wkt = geom.asWkt()
+        aoi_id = "tmp_" + _uuid.uuid4().hex[:8]
+        aoi_entry = {
+            "id": aoi_id,
+            "name": f"Tile {tile_index}",
+            "wkt": wkt,
+            "bbox": list(tile_bbox),
+            "tag": "drawn",
+            "checked": True,
+        }
+        self._add_to_queue(aoi_entry)
 
     def _queue_save_aoi(self, aoi_id: str):
         """Prompt for name, save to library, update queue row tag."""
