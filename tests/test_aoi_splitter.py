@@ -126,21 +126,27 @@ def test_split_bbox_order_top_to_bottom_left_to_right():
 
 def test_split_bbox_uniform_cells():
     tiles   = splitter.split_bbox([0.0, 0.0, 1.5, 1.0], "openeo", overlap_deg=0.0)
-    widths  = [round(t[2] - t[0], 8) for t in tiles]
-    heights = [round(t[3] - t[1], 8) for t in tiles]
-    assert len(set(widths))  == 1
-    assert len(set(heights)) == 1
+    widths  = [t[2] - t[0] for t in tiles]
+    heights = [t[3] - t[1] for t in tiles]
+    for w in widths[1:]:
+        assert w == pytest.approx(widths[0])
+    for h in heights[1:]:
+        assert h == pytest.approx(heights[0])
 
 
 def test_split_bbox_clamped_near_antimeridian():
-    # AOI near east edge — overlap must not push past 180
+    # AOI at east edge — overlap would push east past 180; must be clamped to exactly 180
     tiles = splitter.split_bbox([179.6, 0.0, 180.0, 0.5], "openeo", overlap_deg=0.05)
-    for t in tiles:
-        assert t[2] <= 180.0
+    east_edges = [t[2] for t in tiles]
+    # The rightmost tiles must be clamped to exactly 180.0
+    assert max(east_edges) == pytest.approx(180.0)
+    # Without clamping it would be 180.05 — verify clamping reduced it
+    assert max(east_edges) < 180.05
 
 
 def test_split_bbox_clamped_near_pole():
-    # AOI near north pole — overlap must not push past 90
+    # AOI at north pole — overlap would push north past 90; must be clamped to exactly 90
     tiles = splitter.split_bbox([0.0, 89.6, 1.0, 90.0], "openeo", overlap_deg=0.05)
-    for t in tiles:
-        assert t[3] <= 90.0
+    north_edges = [t[3] for t in tiles]
+    assert max(north_edges) == pytest.approx(90.0)
+    assert max(north_edges) < 90.05
