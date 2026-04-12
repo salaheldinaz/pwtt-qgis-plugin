@@ -1515,7 +1515,7 @@ class PWTTJobsDock(QDockWidget):
             val, ok = QInputDialog.getDouble(
                 self,
                 "T-statistic cutoff",
-                "Enter T-statistic cutoff for band 2 (binary damage; not a probability):",
+                "Threshold for band 2 (T-statistic > value). Not a probability:",
                 3.3,
                 0.0,
                 20.0,
