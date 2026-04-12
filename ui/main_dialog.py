@@ -80,6 +80,32 @@ class _BatchConfirmDialog:
         sep.setFrameShadow(QFrame.Sunken)
         outer.addWidget(sep)
 
+        if len(aois) >= 4:
+            warn_frame = QFrame()
+            warn_frame.setStyleSheet(
+                "background-color: #fff3cd; border: 1px solid #ffc107; border-radius: 4px;"
+            )
+            warn_layout = QVBoxLayout(warn_frame)
+            warn_layout.setContentsMargins(8, 6, 8, 6)
+            warn_text = QLabel(
+                f"⚠  <b>{len(aois)} jobs queued</b> — this may take a long time and consume "
+                "a significant portion of your monthly API quota."
+            )
+            warn_text.setWordWrap(True)
+            warn_layout.addWidget(warn_text)
+            try:
+                backend_id = parent.backend_combo.currentData()
+            except AttributeError:
+                backend_id = None
+            if backend_id == "openeo":
+                link = QLabel(
+                    '<a href="https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings">'
+                    "Check CDSE balance ↗</a>"
+                )
+                link.setOpenExternalLinks(True)
+                warn_layout.addWidget(link)
+            outer.addWidget(warn_frame)
+
         outer.addWidget(QLabel(f"<b>AOIs to run ({len(aois)}):</b>"))
 
         scroll = QScrollArea()
