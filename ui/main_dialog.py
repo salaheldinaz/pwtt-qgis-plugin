@@ -785,18 +785,14 @@ class PWTTControlsDock(QDockWidget):
         self.damage_threshold_spin.setSingleStep(0.1)
         self.damage_threshold_spin.setValue(3.3)
         self.damage_threshold_spin.setToolTip(
-            "Cutoff on the smoothed T-statistic for binary damage (band 2). "
-            "Higher \u2192 fewer pixels flagged (stricter). Not a probability. "
-            "Same statistic family for openEO, GEE, and local backends."
+            "Band 2 is 1 where exported T-statistic exceeds this value. "
+            "Higher \u2192 stricter (fewer pixels). Not a probability; backends build T differently."
         )
         dm_form.addRow("T-statistic >", self.damage_threshold_spin)
         dm_form.addRow(self._hint(
-            "Higher \u2192 fewer pixels flagged (stricter mask). "
-            "This is a test-statistic cutoff, not a damage probability. "
-            "All backends set band 2 where T exceeds this value after smoothing. "
-            "Reference (UNOSAT building footprints): T>2 \u2248 max sensitivity; "
-            "T>3.3 balanced default; T>4 fewer false positives; T>5 only strongest change. "
-            "See github.com/oballinger/PWTT#recommended-thresholds"
+            "Test-statistic threshold, not a damage probability. "
+            "Rough guide: T>2 sensitive; 3.3 default; >4 fewer false positives; >5 strongest only. "
+            "(github.com/oballinger/PWTT#recommended-thresholds)."
         ))
         # ── GEE: Detection method ──────────────────────────────────────────
         self.gee_method_group = QGroupBox("Detection method (GEE only)")

@@ -140,4 +140,4 @@ Version is read from `metadata.txt` at the repo root (same file inside the `pwtt
 
 ## License
 
-This repository does not include a `LICENSE` file; check the [plugin homepage](https://github.com/Salaheldinaz/PWTT-QGIS-Plugin) and upstream [PWTT](https://github.com/oballinger/PWTT) for terms.
+There is no `LICENSE` in this repository. Use the [plugin repository](https://github.com/Salaheldinaz/PWTT-QGIS-Plugin) and [upstream PWTT](https://github.com/oballinger/PWTT) for license details.
