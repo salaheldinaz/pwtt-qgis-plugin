@@ -150,3 +150,37 @@ def test_split_bbox_clamped_near_pole():
     north_edges = [t[3] for t in tiles]
     assert max(north_edges) == pytest.approx(90.0)
     assert max(north_edges) < 90.05
+
+
+# ── estimate_gee_bytes ────────────────────────────────────────────────────────
+
+def test_estimate_gee_bytes_returns_int():
+    result = splitter.estimate_gee_bytes([0.0, 0.0, 0.2, 0.2])
+    assert isinstance(result, int)
+    assert result > 0
+
+
+def test_estimate_gee_bytes_delegates_to_backend():
+    # The stub returns a fixed value; verify delegation works
+    result = splitter.estimate_gee_bytes([0.0, 0.0, 0.2, 0.2])
+    assert result == 10_000_000  # stub value
+
+
+# ── estimate_openeo_pu ────────────────────────────────────────────────────────
+
+def test_estimate_openeo_pu_positive():
+    pu = splitter.estimate_openeo_pu([0.0, 0.0, 0.5, 0.5])
+    assert pu > 0.0
+
+
+def test_estimate_openeo_pu_larger_area_costs_more():
+    small = splitter.estimate_openeo_pu([0.0, 0.0, 0.1, 0.1])
+    large = splitter.estimate_openeo_pu([0.0, 0.0, 0.5, 0.5])
+    assert large > small
+
+
+def test_estimate_openeo_pu_half_deg_reasonable():
+    # 0.5° × 0.5° at equator ≈ 55 km × 55 km → ~5500×5500 px
+    # PU ≈ (5500*5500 / (512*512)) * 3 * 2 ≈ 692
+    pu = splitter.estimate_openeo_pu([0.0, 0.0, 0.5, 0.5])
+    assert 100 < pu < 5000  # sanity range
