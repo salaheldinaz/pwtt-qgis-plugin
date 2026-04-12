@@ -154,6 +154,214 @@ class _BatchConfirmDialog:
         ]
 
 
+class _AoiSplitDialog:
+    """
+    Shown when a drawn AOI exceeds the backend's per-job size limit.
+
+    Lets the user preview a tile grid on the map, adjust overlap, then confirm.
+    exec() returns "tiles", "single", or "cancel".
+    confirmed_tiles() returns list of [west, south, east, north] bboxes.
+    """
+
+    TILES  = "tiles"
+    SINGLE = "single"
+    CANCEL = "cancel"
+
+    def __init__(self, parent, bbox: list, backend_id: str, canvas):
+        from ..core import aoi_splitter
+        from .dock_common import BACKENDS
+        self._bbox       = bbox
+        self._backend_id = backend_id
+        self._canvas     = canvas
+        self._preview_bands: list = []
+        self._confirmed_tiles: list = []
+        self._action = self.CANCEL
+
+        backend_name = next((n for bid, n in BACKENDS if bid == backend_id), backend_id)
+
+        self._dialog = QDialog(parent)
+        self._dialog.setWindowTitle(f"PWTT \u2014 AOI too large for {backend_name}")
+        self._dialog.setMinimumWidth(520)
+        self._dialog.finished.connect(self._on_dialog_finished)
+
+        outer = QVBoxLayout(self._dialog)
+
+        # ── Info header ──────────────────────────────────────────────────────
+        self._info_label = QLabel()
+        self._info_label.setWordWrap(True)
+        self._info_label.setStyleSheet("color: #b85c00; font-weight: bold;")
+        outer.addWidget(self._info_label)
+
+        # ── Overlap control ───────────────────────────────────────────────────
+        overlap_row = QHBoxLayout()
+        overlap_row.addWidget(QLabel("Tile overlap:"))
+        self._overlap_spin = QDoubleSpinBox()
+        self._overlap_spin.setRange(0.0, 0.1)
+        self._overlap_spin.setSingleStep(0.001)
+        self._overlap_spin.setDecimals(3)
+        self._overlap_spin.setValue(0.01)
+        self._overlap_spin.setSuffix("\u00b0")
+        self._overlap_spin.valueChanged.connect(self._on_overlap_changed)
+        overlap_row.addWidget(self._overlap_spin)
+        overlap_row.addWidget(QLabel("  (extends each tile edge outward)"))
+        overlap_row.addStretch()
+        outer.addLayout(overlap_row)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setFrameShadow(QFrame.Sunken)
+        outer.addWidget(sep)
+
+        # ── Quota section ────────────────────────────────────────────────────
+        outer.addWidget(QLabel("<b>Quota / processing time</b>"))
+        self._quota_label = QLabel()
+        self._quota_label.setWordWrap(True)
+        outer.addWidget(self._quota_label)
+
+        if backend_id == "openeo":
+            link_label = QLabel(
+                "Free tier: 10,000 PU/month  "
+                '<a href="https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings">'
+                "Check balance \u2197</a>"
+            )
+            link_label.setOpenExternalLinks(True)
+            outer.addWidget(link_label)
+
+        warn_lbl = QLabel(
+            "Running multiple jobs will take significantly longer than a single job.\n"
+            "Large batches may exhaust your monthly API quota."
+        )
+        warn_lbl.setWordWrap(True)
+        warn_lbl.setStyleSheet("color: #666;")
+        outer.addWidget(warn_lbl)
+
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.HLine)
+        sep2.setFrameShadow(QFrame.Sunken)
+        outer.addWidget(sep2)
+
+        # ── Buttons ──────────────────────────────────────────────────────────
+        btn_row = QHBoxLayout()
+        self._add_tiles_btn = QPushButton()
+        self._add_tiles_btn.clicked.connect(self._on_add_tiles)
+        btn_row.addWidget(self._add_tiles_btn)
+        add_single_btn = QPushButton("Add as single AOI")
+        add_single_btn.clicked.connect(self._on_add_single)
+        btn_row.addWidget(add_single_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self._on_cancel)
+        btn_row.addWidget(cancel_btn)
+        outer.addLayout(btn_row)
+
+        self._refresh_labels()
+        self._draw_preview()
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _current_tiles(self) -> list:
+        from ..core import aoi_splitter
+        return aoi_splitter.split_bbox(
+            self._bbox, self._backend_id, self._overlap_spin.value()
+        )
+
+    def _refresh_labels(self):
+        from ..core import aoi_splitter
+        tiles      = self._current_tiles()
+        n          = len(tiles)
+        cols, rows = aoi_splitter.tile_grid_dims(self._bbox, self._backend_id)
+        west, south, east, north = self._bbox
+        width  = east - west
+        height = north - south
+
+        self._info_label.setText(
+            f"\u26a0  This area ({width:.2f}\u00b0 \u00d7 {height:.2f}\u00b0) exceeds the backend per-job limit.\n"
+            f"It has been split into a {cols} \u00d7 {rows} grid ({n} tiles)."
+        )
+        self._add_tiles_btn.setText(f"Add {n} tiles to queue")
+
+        if self._backend_id == "gee" and tiles:
+            per_mb  = aoi_splitter.estimate_gee_bytes(tiles[0]) / (1024 * 1024)
+            lim_mb  = aoi_splitter.GEE_GETDOWNLOAD_MAX_BYTES / (1024 * 1024)
+            self._quota_label.setText(
+                f"Estimated per tile: ~{per_mb:.0f} MiB  (GEE limit: {lim_mb:.0f} MiB)"
+            )
+        elif self._backend_id == "openeo" and tiles:
+            per_pu   = aoi_splitter.estimate_openeo_pu(tiles[0])
+            total_pu = per_pu * n
+            self._quota_label.setText(
+                f"Estimated per tile: ~{per_pu:.0f} PU  |  Total: ~{total_pu:.0f} PU"
+            )
+        else:
+            self._quota_label.setText("")
+
+    def _draw_preview(self):
+        self._clear_preview()
+        colours = [
+            (255, 100,   0),
+            ( 30, 120, 255),
+            ( 50, 180,  50),
+            (180,  50, 180),
+            (220, 180,   0),
+        ]
+        src_crs    = QgsCoordinateReferenceSystem("EPSG:4326")
+        canvas_crs = self._canvas.mapSettings().destinationCrs()
+        for i, tile_bbox in enumerate(self._current_tiles()):
+            west, south, east, north = tile_bbox
+            rect = QgsRectangle(west, south, east, north)
+            geom = QgsGeometry.fromRect(rect)
+            if canvas_crs != src_crs:
+                transform = QgsCoordinateTransform(src_crs, canvas_crs, QgsProject.instance())
+                geom.transform(transform)
+            r, g, b = colours[i % len(colours)]
+            rb = QgsRubberBand(self._canvas, QgsWkbTypes.PolygonGeometry)
+            rb.setColor(QColor(r, g, b, 30))
+            rb.setStrokeColor(QColor(r, g, b, 180))
+            rb.setWidth(2)
+            rb.setLineStyle(Qt.DashLine)
+            rb.setToGeometry(geom, None)
+            self._preview_bands.append(rb)
+
+    def _clear_preview(self):
+        for rb in self._preview_bands:
+            rb.reset(QgsWkbTypes.PolygonGeometry)
+        self._preview_bands.clear()
+
+    def _on_overlap_changed(self, _value):
+        self._refresh_labels()
+        self._draw_preview()
+
+    def _on_add_tiles(self):
+        self._confirmed_tiles = self._current_tiles()
+        self._action = self.TILES
+        self._clear_preview()
+        self._dialog.accept()
+
+    def _on_add_single(self):
+        self._action = self.SINGLE
+        self._clear_preview()
+        self._dialog.accept()
+
+    def _on_cancel(self):
+        self._action = self.CANCEL
+        self._clear_preview()
+        self._dialog.reject()
+
+    def _on_dialog_finished(self, _result):
+        # Safety net: clear preview if dialog closed via window X button
+        self._clear_preview()
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def exec(self) -> str:
+        """Show dialog. Returns "tiles", "single", or "cancel"."""
+        self._dialog.exec_()
+        return self._action
+
+    def confirmed_tiles(self) -> list:
+        """List of [west, south, east, north] bboxes confirmed by user."""
+        return self._confirmed_tiles
+
+
 class PWTTControlsDock(QDockWidget):
     """Dockable controls panel: backend, credentials, AOI, parameters, output, run."""
 
