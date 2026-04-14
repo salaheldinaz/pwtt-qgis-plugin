@@ -159,3 +159,55 @@ def test_orphan_repair(tmp_path):
     with open(p) as f:
         saved = json.load(f)
     assert saved["aois"][0]["project_id"] == "proj1"
+
+
+def test_save_and_load_project():
+    _fresh()
+    proj = aoi_store.make_project("Ukraine")
+    aoi_store.save_project(proj)
+    projects = aoi_store.load_projects()
+    assert len(projects) == 1
+    assert projects[0]["name"] == "Ukraine"
+    assert projects[0]["id"] == proj["id"]
+
+
+def test_save_project_updates_existing():
+    _fresh()
+    proj = aoi_store.make_project("Old Name")
+    aoi_store.save_project(proj)
+    proj["name"] = "New Name"
+    aoi_store.save_project(proj)
+    projects = aoi_store.load_projects()
+    assert len(projects) == 1
+    assert projects[0]["name"] == "New Name"
+
+
+def test_delete_project_cascade():
+    _fresh()
+    proj = aoi_store.make_project("ToDelete")
+    aoi_store.save_project(proj)
+    proj2 = aoi_store.make_project("Keep")
+    aoi_store.save_project(proj2)
+    aoi = aoi_store.make_aoi("An AOI", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
+                              [0, 0, 1, 1])
+    aoi["project_id"] = proj["id"]
+    aoi_store.save_aoi(aoi)
+    aoi_store.delete_project(proj["id"], cascade=True)
+    assert all(p["id"] != proj["id"] for p in aoi_store.load_projects())
+    assert all(a["id"] != aoi["id"] for a in aoi_store.load_aois())
+
+
+def test_delete_last_project_raises():
+    _fresh()
+    proj = aoi_store.make_project("Only")
+    aoi_store.save_project(proj)
+    with pytest.raises(ValueError, match="last remaining project"):
+        aoi_store.delete_project(proj["id"])
+
+
+def test_load_projects_sorted_by_name():
+    _fresh()
+    for name in ["Zebra", "Apple", "Mango"]:
+        aoi_store.save_project(aoi_store.make_project(name))
+    names = [p["name"] for p in aoi_store.load_projects()]
+    assert names == ["Apple", "Mango", "Zebra"]

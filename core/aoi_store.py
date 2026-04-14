@@ -82,20 +82,47 @@ def _write(projects, aois):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
-def make_aoi(name: str, wkt: str, bbox: List[float]) -> dict:
+def make_aoi(name: str, wkt: str, bbox: List[float], project_id: str = None) -> dict:
     """Return a new AOI record (not yet saved to disk)."""
-    return {
+    aoi = {
         "id": uuid.uuid4().hex[:8],
         "name": name,
         "wkt": wkt,
         "bbox": list(bbox),  # [west, south, east, north]
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
+    if project_id is not None:
+        aoi["project_id"] = project_id
+    return aoi
 
 
 def load_projects() -> List[dict]:
     projects, _ = _read_raw()
-    return projects
+    return sorted(projects, key=lambda p: p.get("name", ""))
+
+
+def save_project(project: dict):
+    """Insert or update project by id."""
+    projects, aois = _read_raw()
+    for i, p in enumerate(projects):
+        if p["id"] == project["id"]:
+            projects[i] = project
+            _write(projects, aois)
+            return
+    projects.append(project)
+    _write(projects, aois)
+
+
+def delete_project(project_id: str, cascade: bool = True):
+    """Delete project. Raises ValueError if it is the last project.
+    If cascade=True (default), also deletes all AOIs belonging to this project."""
+    projects, aois = _read_raw()
+    if len(projects) <= 1:
+        raise ValueError("Cannot delete the last remaining project.")
+    projects = [p for p in projects if p["id"] != project_id]
+    if cascade:
+        aois = [a for a in aois if a.get("project_id") != project_id]
+    _write(projects, aois)
 
 
 def load_aois() -> List[dict]:
