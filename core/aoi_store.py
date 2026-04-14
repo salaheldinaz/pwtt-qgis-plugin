@@ -125,26 +125,52 @@ def delete_project(project_id: str, cascade: bool = True):
     _write(projects, aois)
 
 
-def load_aois() -> List[dict]:
+def load_aois(project_id: str = None) -> List[dict]:
+    """Return AOIs. Pass project_id to filter to one project; None returns all."""
     _, aois = _read_raw()
+    if project_id is not None:
+        return [a for a in aois if a.get("project_id") == project_id]
     return aois
 
 
 def save_aoi(aoi: dict):
-    """Insert or update by id."""
-    aois = _read_raw()
+    """Insert or update AOI by id. Auto-creates a Default project if none exist."""
+    projects, aois = _read_raw()
+    # Ensure the AOI has a valid project
+    project_ids = {p["id"] for p in projects}
+    if not projects:
+        default = make_project("Default")
+        projects.append(default)
+        aoi["project_id"] = default["id"]
+    elif aoi.get("project_id") not in project_ids:
+        aoi["project_id"] = projects[0]["id"]
     for i, a in enumerate(aois):
         if a["id"] == aoi["id"]:
             aois[i] = aoi
-            _write(aois)
+            _write(projects, aois)
             return
     aois.insert(0, aoi)
-    _write(aois)
+    _write(projects, aois)
 
 
 def delete_aoi(aoi_id: str):
-    aois = [a for a in _read_raw() if a["id"] != aoi_id]
-    _write(aois)
+    projects, aois = _read_raw()
+    aois = [a for a in aois if a["id"] != aoi_id]
+    _write(projects, aois)
+
+
+def move_aoi(aoi_id: str, target_project_id: str):
+    """Reassign an AOI to a different project. Raises ValueError on bad ids."""
+    projects, aois = _read_raw()
+    project_ids = {p["id"] for p in projects}
+    if target_project_id not in project_ids:
+        raise ValueError(f"Project {target_project_id!r} not found.")
+    for aoi in aois:
+        if aoi["id"] == aoi_id:
+            aoi["project_id"] = target_project_id
+            _write(projects, aois)
+            return
+    raise ValueError(f"AOI {aoi_id!r} not found.")
 
 
 def export_aois_to_file(path: str) -> int:
