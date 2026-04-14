@@ -1550,6 +1550,7 @@ class PWTTControlsDock(QDockWidget):
                  for item in items if item.data(0, Qt.UserRole)}
         has_sel = bool(items)
         single_type = len(types) == 1
+        is_mixed = has_sel and not single_type
         self.lib_load_btn.setEnabled(has_sel)
         self.lib_rename_btn.setEnabled(has_sel and single_type and len(items) == 1)
         is_aoi = types == {"aoi"}
@@ -1557,6 +1558,7 @@ class PWTTControlsDock(QDockWidget):
         self.lib_delete_btn.setEnabled(
             (is_aoi and has_sel) or (is_project and len(items) == 1)
         )
+        self.lib_export_btn.setEnabled(not is_mixed)
 
     def _lib_load_selected(self):
         from ..core import aoi_store
@@ -1678,12 +1680,37 @@ class PWTTControlsDock(QDockWidget):
 
     def _lib_export(self):
         from ..core import aoi_store
+        import json as _json
+        items = self.library_tree.selectedItems()
+        types = {item.data(0, Qt.UserRole).get("type")
+                 for item in items if item.data(0, Qt.UserRole)}
+
+        if types == {"project"} and len(items) == 1:
+            self._lib_export_project(items[0].data(0, Qt.UserRole)["id"])
+            return
+
         path, _ = QFileDialog.getSaveFileName(
             self, "Export saved AOIs", "", "JSON files (*.json)"
         )
         if not path:
             return
-        count = aoi_store.export_aois_to_file(path)
+
+        if types == {"aoi"}:
+            selected_ids = {item.data(0, Qt.UserRole)["id"] for item in items}
+            aois = [a for a in aoi_store.load_aois() if a["id"] in selected_ids]
+            from datetime import datetime as _dt
+            payload = {
+                "format": aoi_store.AOI_EXPORT_FORMAT,
+                "version": aoi_store.AOI_EXPORT_VERSION,
+                "exported_at": _dt.now().isoformat(timespec="seconds"),
+                "aois": aois,
+            }
+            with open(path, "w", encoding="utf-8") as f:
+                _json.dump(payload, f, indent=2, ensure_ascii=False)
+            count = len(aois)
+        else:
+            count = aoi_store.export_aois_to_file(path)
+
         self.iface.messageBar().pushMessage(
             "PWTT", f"Exported {count} AOI(s) to {path}.", level=Qgis.Success, duration=5,
         )
