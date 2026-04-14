@@ -17,6 +17,7 @@ sys.modules["qgis.core"] = qgis_core
 gee_backend_mod = types.ModuleType("core.gee_backend")
 GEE_MAX = 50_331_648  # 48 MiB
 gee_backend_mod.GEE_GETDOWNLOAD_MAX_BYTES = GEE_MAX
+gee_backend_mod.GEE_GETDOWNLOAD_EFFECTIVE_MAX_BYTES = int(GEE_MAX / 1.15)
 gee_backend_mod.estimate_gee_getdownload_request_bytes = (
     lambda w, s, e, n: 10_000_000  # ~10 MiB stub
 )

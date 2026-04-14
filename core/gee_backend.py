@@ -11,6 +11,12 @@ from .utils import wkt_to_bbox
 
 # Earth Engine getDownloadURL / thumbnail pipeline cap (bytes), per API error text.
 GEE_GETDOWNLOAD_MAX_BYTES = 50331648
+# EE's "Total request size" is often ~10–15% above a naive WGS84 bbox × scale pixel
+# count (projection, alignment). All client-side fit checks use this effective budget.
+GEE_GETDOWNLOAD_SIZE_HEADROOM = 1.15
+GEE_GETDOWNLOAD_EFFECTIVE_MAX_BYTES = int(
+    GEE_GETDOWNLOAD_MAX_BYTES / GEE_GETDOWNLOAD_SIZE_HEADROOM
+)
 # Must match getDownloadURL params in run().
 _GEE_DOWNLOAD_SCALE_M = 10
 _GEE_DOWNLOAD_BANDS = 3
@@ -44,7 +50,7 @@ def gee_precheck_getdownload_url(aoi_wkt: str) -> Tuple[bool, str]:
         return True, ""
     west, south, east, north = bbox
     est = estimate_gee_getdownload_request_bytes(west, south, east, north)
-    if est <= GEE_GETDOWNLOAD_MAX_BYTES:
+    if est <= GEE_GETDOWNLOAD_EFFECTIVE_MAX_BYTES:
         return True, ""
     lim_mb = GEE_GETDOWNLOAD_MAX_BYTES / (1024 * 1024)
     est_mb = est / (1024 * 1024)
@@ -310,7 +316,7 @@ class GEEBackend(PWTTBackend):
             raise ValueError("Invalid AOI WKT")
         west, south, east, north = bbox
         est_bytes = estimate_gee_getdownload_request_bytes(west, south, east, north)
-        if est_bytes > GEE_GETDOWNLOAD_MAX_BYTES:
+        if est_bytes > GEE_GETDOWNLOAD_EFFECTIVE_MAX_BYTES:
             lim_mb = GEE_GETDOWNLOAD_MAX_BYTES / (1024 * 1024)
             est_mb = est_bytes / (1024 * 1024)
             raise RuntimeError(
