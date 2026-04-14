@@ -1534,7 +1534,11 @@ class PWTTControlsDock(QDockWidget):
         single_type = len(types) == 1
         self.lib_load_btn.setEnabled(has_sel)
         self.lib_rename_btn.setEnabled(has_sel and single_type and len(items) == 1)
-        self.lib_delete_btn.setEnabled(has_sel and single_type)
+        is_aoi = types == {"aoi"}
+        is_project = types == {"project"}
+        self.lib_delete_btn.setEnabled(
+            (is_aoi and has_sel) or (is_project and len(items) == 1)
+        )
 
     def _lib_load_selected(self):
         from ..core import aoi_store
