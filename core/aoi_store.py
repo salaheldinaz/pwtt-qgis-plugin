@@ -19,20 +19,67 @@ def _aois_path() -> str:
     return os.path.join(d, "saved_aois.json")
 
 
-def _read_raw() -> List[dict]:
+def make_project(name: str) -> dict:
+    """Return a new project record (not yet saved to disk)."""
+    return {
+        "id": uuid.uuid4().hex[:8],
+        "name": name,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def _read_raw():
+    """Return (projects, aois). Handles v1 migration and orphan repair.
+    May write to disk on first call if migration or repair is needed."""
     p = _aois_path()
     if not os.path.isfile(p):
-        return []
+        return [], []
     try:
         with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except (json.JSONDecodeError, OSError):
-        return []
+        return [], []
+
+    # v1: bare list — migrate to v2
+    if isinstance(data, list):
+        aois = [x for x in data if isinstance(x, dict)]
+        if aois:
+            default = make_project("Default")
+            for aoi in aois:
+                aoi["project_id"] = default["id"]
+            projects = [default]
+        else:
+            projects = []
+        _write(projects, aois)
+        return projects, aois
+
+    # v2: versioned envelope
+    if isinstance(data, dict):
+        projects = [x for x in data.get("projects", []) if isinstance(x, dict)]
+        aois = [x for x in data.get("aois", []) if isinstance(x, dict)]
+        # Orphan repair
+        project_ids = {proj["id"] for proj in projects}
+        fallback = projects[0]["id"] if projects else None
+        repaired = False
+        for aoi in aois:
+            if aoi.get("project_id") not in project_ids and fallback:
+                aoi["project_id"] = fallback
+                repaired = True
+        if repaired:
+            _write(projects, aois)
+        return projects, aois
+
+    return [], []
 
 
-def _write(aois: List[dict]):
+def _write(projects, aois):
+    data = {
+        "version": 2,
+        "projects": projects,
+        "aois": aois,
+    }
     with open(_aois_path(), "w", encoding="utf-8") as f:
-        json.dump(aois, f, indent=2, ensure_ascii=False)
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
 
 def make_aoi(name: str, wkt: str, bbox: List[float]) -> dict:
@@ -46,8 +93,14 @@ def make_aoi(name: str, wkt: str, bbox: List[float]) -> dict:
     }
 
 
+def load_projects() -> List[dict]:
+    projects, _ = _read_raw()
+    return projects
+
+
 def load_aois() -> List[dict]:
-    return _read_raw()
+    _, aois = _read_raw()
+    return aois
 
 
 def save_aoi(aoi: dict):
