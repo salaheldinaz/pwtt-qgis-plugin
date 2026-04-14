@@ -104,3 +104,57 @@ def test_make_aoi_has_required_fields():
         assert field in aoi
     assert aoi["id"]
     assert len(aoi["id"]) == 8
+
+
+def test_migration_v1_to_v2(tmp_path):
+    """A bare JSON array (v1) is migrated to v2 on first read."""
+    import importlib, json
+    # Write a v1 file directly
+    p = os.path.join(_tmpdir, "PWTT", "saved_aois.json")
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    v1_aois = [
+        {"id": "aa000001", "name": "Old AOI", "wkt": "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
+         "bbox": [0, 0, 1, 1], "created_at": "2024-01-01T00:00:00"},
+    ]
+    with open(p, "w") as f:
+        json.dump(v1_aois, f)
+
+    importlib.reload(aoi_store)
+    projects = aoi_store.load_projects()
+    aois = aoi_store.load_aois()
+
+    assert len(projects) == 1
+    assert projects[0]["name"] == "Default"
+    assert len(aois) == 1
+    assert aois[0]["project_id"] == projects[0]["id"]
+    # File should now be in v2 format
+    with open(p) as f:
+        data = json.load(f)
+    assert data.get("version") == 2
+    assert "projects" in data
+    assert "aois" in data
+
+
+def test_orphan_repair(tmp_path):
+    """AOIs with unknown project_id are reassigned to first project on load."""
+    import json
+    _fresh()
+    p = os.path.join(_tmpdir, "PWTT", "saved_aois.json")
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    data = {
+        "version": 2,
+        "projects": [{"id": "proj1", "name": "Proj1", "created_at": "2024-01-01T00:00:00"}],
+        "aois": [
+            {"id": "aoi1", "project_id": "NONEXISTENT", "name": "Orphan",
+             "wkt": "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))", "bbox": [0, 0, 1, 1],
+             "created_at": "2024-01-01T00:00:00"},
+        ],
+    }
+    with open(p, "w") as f:
+        json.dump(data, f)
+
+    aois = aoi_store.load_aois()
+    assert aois[0]["project_id"] == "proj1"
+    with open(p) as f:
+        saved = json.load(f)
+    assert saved["aois"][0]["project_id"] == "proj1"
