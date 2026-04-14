@@ -391,14 +391,23 @@ class _LibraryTree(QTreeWidget):
 
     def dragMoveEvent(self, event):
         target = self.itemAt(event.pos())
-        if target is not None:
-            data = target.data(0, Qt.UserRole)
-            if data and data.get("type") == "project":
-                event.accept()
-                return
-            if target.parent() is not None:
-                event.accept()
-                return
+        if target is None:
+            event.ignore()
+            return
+        dragged = self.currentItem()
+        if dragged is None or dragged.parent() is None:
+            event.ignore()
+            return
+        # Resolve target to its project root
+        target_proj = target if target.parent() is None else target.parent()
+        # Reject same-project drops (no visual feedback of a no-op)
+        if target_proj is dragged.parent():
+            event.ignore()
+            return
+        target_data = target_proj.data(0, Qt.UserRole)
+        if target_data and target_data.get("type") == "project":
+            event.accept()
+            return
         event.ignore()
 
     def dropEvent(self, event):
@@ -1476,6 +1485,8 @@ class PWTTControlsDock(QDockWidget):
             pid = aoi.get("project_id", "")
             if pid in aois_by_project:
                 aois_by_project[pid].append(aoi)
+            # else: orphan AOI — the store's _read_raw() repairs orphans on load,
+            # so this path is only reachable if the store is bypassed externally.
         total = 0
         for proj in projects:
             proj_aois = sorted(
