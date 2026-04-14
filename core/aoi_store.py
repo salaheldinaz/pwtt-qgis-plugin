@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any, Dict, List
 
 AOI_EXPORT_FORMAT = "pwtt_aois_export"
-AOI_EXPORT_VERSION = 1
+AOI_EXPORT_VERSION = 2
 
 
 def _aois_path() -> str:
@@ -176,12 +176,13 @@ def move_aoi(aoi_id: str, target_project_id: str):
 
 
 def export_aois_to_file(path: str) -> int:
-    """Write all saved AOIs to *path* as export JSON. Returns count."""
-    aois = _read_raw()
+    """Write all projects and AOIs to path as v2 export JSON. Returns AOI count."""
+    projects, aois = _read_raw()
     payload = {
         "format": AOI_EXPORT_FORMAT,
         "version": AOI_EXPORT_VERSION,
         "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "projects": projects,
         "aois": aois,
     }
     with open(path, "w", encoding="utf-8") as f:
@@ -189,34 +190,108 @@ def export_aois_to_file(path: str) -> int:
     return len(aois)
 
 
-def _aois_list_from_parsed_json(data: Any) -> List[dict]:
-    if isinstance(data, list):
-        return [x for x in data if isinstance(x, dict)]
-    if isinstance(data, dict):
-        if data.get("format") == AOI_EXPORT_FORMAT and isinstance(data.get("aois"), list):
-            return [x for x in data["aois"] if isinstance(x, dict)]
-        if isinstance(data.get("aois"), list):
-            return [x for x in data["aois"] if isinstance(x, dict)]
-    raise ValueError("Unrecognized AOI file (expected PWTT AOI export or a JSON array).")
+def export_project_to_file(project_id: str, path: str) -> int:
+    """Write a single project and its AOIs to path. Returns AOI count.
+    The export file has a 'project' key (singular) so import can detect it."""
+    projects, aois = _read_raw()
+    project = next((p for p in projects if p["id"] == project_id), None)
+    if project is None:
+        raise ValueError(f"Project {project_id!r} not found.")
+    project_aois = [a for a in aois if a.get("project_id") == project_id]
+    payload = {
+        "format": AOI_EXPORT_FORMAT,
+        "version": AOI_EXPORT_VERSION,
+        "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "project": project,
+        "aois": project_aois,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    return len(project_aois)
 
 
-def import_aois_from_file(path: str) -> Dict[str, int]:
-    """Merge AOIs from file; avoid id collisions. Returns {added, skipped_invalid, ids_rewritten}."""
+def import_aois_from_file(path: str, target_project_id: str = None) -> Dict[str, int]:
+    """Merge AOIs from file into the library. Handles v1 flat arrays, v2 full exports,
+    and single-project exports. target_project_id overrides project assignment."""
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
-    incoming = _aois_list_from_parsed_json(data)
 
-    existing = _read_raw()
-    used_ids = {a["id"] for a in existing if a.get("id")}
+    existing_projects, existing_aois = _read_raw()
+    used_ids = {a["id"] for a in existing_aois if a.get("id")}
+    used_project_ids = {p["id"] for p in existing_projects}
+
+    incoming_aois: List[dict] = []
+    incoming_project = None   # single-project export
+    incoming_projects: List[dict] = []  # multi-project export
+
+    if isinstance(data, list):
+        incoming_aois = [x for x in data if isinstance(x, dict)]
+    elif isinstance(data, dict):
+        if data.get("format") == AOI_EXPORT_FORMAT:
+            incoming_aois = [x for x in (data.get("aois") or []) if isinstance(x, dict)]
+            if "project" in data and isinstance(data["project"], dict):
+                incoming_project = data["project"]
+            elif "projects" in data and isinstance(data["projects"], list):
+                incoming_projects = [x for x in data["projects"] if isinstance(x, dict)]
+        else:
+            raise ValueError("Unrecognized AOI file (expected PWTT AOI export or a JSON array).")
+    else:
+        raise ValueError("Unrecognized AOI file format.")
+
     added = 0
     skipped_invalid = 0
     ids_rewritten = 0
 
-    for raw in incoming:
+    project_id_map: Dict[str, str] = {}
+    effective_project_id: str = ""
+
+    if target_project_id is not None:
+        effective_project_id = target_project_id
+
+    elif incoming_project is not None:
+        # Single-project export: recreate the project
+        proj = copy.deepcopy(incoming_project)
+        while proj.get("id") in used_project_ids:
+            proj["id"] = uuid.uuid4().hex[:8]
+        used_project_ids.add(proj["id"])
+        existing_projects.append(proj)
+        effective_project_id = proj["id"]
+
+    elif incoming_projects:
+        # Multi-project full export: map old ids to new ids
+        for proj_raw in incoming_projects:
+            proj = copy.deepcopy(proj_raw)
+            old_id = proj.get("id", "")
+            while proj.get("id") in used_project_ids:
+                proj["id"] = uuid.uuid4().hex[:8]
+            used_project_ids.add(proj["id"])
+            existing_projects.append(proj)
+            if old_id:
+                project_id_map[old_id] = proj["id"]
+
+    else:
+        # Old flat-array — create an auto-named project
+        auto_name = f"Imported {datetime.now().strftime('%Y-%m-%d')}"
+        auto_proj = make_project(auto_name)
+        while auto_proj["id"] in used_project_ids:
+            auto_proj["id"] = uuid.uuid4().hex[:8]
+        used_project_ids.add(auto_proj["id"])
+        existing_projects.append(auto_proj)
+        effective_project_id = auto_proj["id"]
+
+    for raw in incoming_aois:
         if not raw.get("wkt") or not raw.get("name"):
             skipped_invalid += 1
             continue
         aoi = copy.deepcopy(raw)
+        if effective_project_id:
+            aoi["project_id"] = effective_project_id
+        elif project_id_map:
+            old_pid = aoi.get("project_id", "")
+            aoi["project_id"] = project_id_map.get(
+                old_pid,
+                existing_projects[0]["id"] if existing_projects else "",
+            )
         oid = aoi.get("id")
         if not oid or not isinstance(oid, str):
             aoi["id"] = uuid.uuid4().hex[:8]
@@ -224,9 +299,9 @@ def import_aois_from_file(path: str) -> Dict[str, int]:
             aoi["id"] = uuid.uuid4().hex[:8]
             ids_rewritten += 1
         used_ids.add(aoi["id"])
-        existing.insert(0, aoi)
+        existing_aois.insert(0, aoi)
         added += 1
 
-    if added:
-        _write(existing)
+    if added or incoming_projects or incoming_project:
+        _write(existing_projects, existing_aois)
     return {"added": added, "skipped_invalid": skipped_invalid, "ids_rewritten": ids_rewritten}
