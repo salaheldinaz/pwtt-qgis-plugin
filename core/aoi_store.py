@@ -135,6 +135,7 @@ def load_aois(project_id: str = None) -> List[dict]:
 
 def save_aoi(aoi: dict):
     """Insert or update AOI by id. Auto-creates a Default project if none exist."""
+    aoi = dict(aoi)
     projects, aois = _read_raw()
     # Ensure the AOI has a valid project
     project_ids = {p["id"] for p in projects}
@@ -155,8 +156,9 @@ def save_aoi(aoi: dict):
 
 def delete_aoi(aoi_id: str):
     projects, aois = _read_raw()
-    aois = [a for a in aois if a["id"] != aoi_id]
-    _write(projects, aois)
+    filtered = [a for a in aois if a["id"] != aoi_id]
+    if len(filtered) != len(aois):
+        _write(projects, filtered)
 
 
 def move_aoi(aoi_id: str, target_project_id: str):
