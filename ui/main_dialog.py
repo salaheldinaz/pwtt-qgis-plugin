@@ -1425,7 +1425,7 @@ class PWTTControlsDock(QDockWidget):
         self._add_to_queue(aoi_entry)
 
     def _queue_save_aoi(self, aoi_id: str):
-        """Prompt for name, save to library, update queue row tag."""
+        """Prompt for name and project, save to library, update queue row tag."""
         from ..core import aoi_store
         aoi_entry = next((a for a in self._queue if a["id"] == aoi_id), None)
         if aoi_entry is None:
@@ -1435,7 +1435,25 @@ class PWTTControlsDock(QDockWidget):
         )
         if not ok or not name.strip():
             return
-        new_aoi = aoi_store.make_aoi(name.strip(), aoi_entry["wkt"], aoi_entry["bbox"])
+
+        # Project selection
+        projects = aoi_store.load_projects()
+        if not projects:
+            project_id = ""  # save_aoi will auto-create Default
+        elif len(projects) == 1:
+            project_id = projects[0]["id"]
+        else:
+            proj_names = [p["name"] for p in projects]
+            proj_name, ok2 = QInputDialog.getItem(
+                self, "Save AOI", "Save into project:", proj_names, 0, False
+            )
+            if not ok2:
+                return
+            project_id = next(p["id"] for p in projects if p["name"] == proj_name)
+
+        new_aoi = aoi_store.make_aoi(
+            name.strip(), aoi_entry["wkt"], aoi_entry["bbox"], project_id=project_id
+        )
         aoi_store.save_aoi(new_aoi)
         # Move rubber band to new id before updating entry
         rb = self._rubber_bands.pop(aoi_id, None)
@@ -1670,15 +1688,60 @@ class PWTTControlsDock(QDockWidget):
             "PWTT", f"Exported {count} AOI(s) to {path}.", level=Qgis.Success, duration=5,
         )
 
+    def _lib_export_project(self, project_id: str):
+        from ..core import aoi_store
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export project", "", "JSON files (*.json)"
+        )
+        if not path:
+            return
+        try:
+            count = aoi_store.export_project_to_file(project_id, path)
+        except ValueError as e:
+            QMessageBox.warning(self, "PWTT", str(e))
+            return
+        self.iface.messageBar().pushMessage(
+            "PWTT", f"Exported {count} AOI(s) to {path}.", level=Qgis.Success, duration=5,
+        )
+
     def _lib_import(self):
         from ..core import aoi_store
+        import json as _json
         path, _ = QFileDialog.getOpenFileName(
             self, "Import AOIs", "", "JSON files (*.json)"
         )
         if not path:
             return
+
+        # Peek at the file to see if it's a single-project export
+        target_project_id = None
         try:
-            result = aoi_store.import_aois_from_file(path)
+            with open(path, encoding="utf-8") as f:
+                peek = _json.load(f)
+        except Exception as e:
+            QMessageBox.warning(self, "PWTT", f"Could not read file: {e}")
+            return
+
+        if isinstance(peek, dict) and "project" in peek and isinstance(peek["project"], dict):
+            proj_name = peek["project"].get("name", "")
+            projects = aoi_store.load_projects()
+            choices = [f"Create new project '{proj_name}'"] + [p["name"] for p in projects]
+            choice, ok = QInputDialog.getItem(
+                self,
+                "Import AOIs",
+                f"The file contains project '{proj_name}'.\nImport into:",
+                choices,
+                0,
+                False,
+            )
+            if not ok:
+                return
+            if choice != choices[0]:
+                # User picked an existing project
+                target_project_id = next(p["id"] for p in projects if p["name"] == choice)
+
+        try:
+            result = aoi_store.import_aois_from_file(path, target_project_id=target_project_id)
         except Exception as e:
             QMessageBox.warning(self, "PWTT", f"Import failed: {e}")
             return
