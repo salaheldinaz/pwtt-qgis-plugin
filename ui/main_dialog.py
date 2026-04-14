@@ -1699,10 +1699,53 @@ class PWTTControlsDock(QDockWidget):
         self._refresh_library_tree()
 
     def _lib_move_aoi(self, aoi_id: str, target_project_id: str):
-        pass  # implemented in Task 7
+        from ..core import aoi_store
+        try:
+            aoi_store.move_aoi(aoi_id, target_project_id)
+        except ValueError as e:
+            self.iface.messageBar().pushMessage("PWTT", str(e), level=Qgis.Warning, duration=5)
+            return
+        self._refresh_library_tree()
 
     def _show_library_context_menu(self, pos):
-        pass  # implemented in Task 7
+        from ..core import aoi_store
+        item = self.library_tree.itemAt(pos)
+        if item is None:
+            return
+        data = item.data(0, Qt.UserRole)
+        if not data:
+            return
+        menu = QMenu(self)
+
+        if data["type"] == "aoi":
+            menu.addAction("Load into queue", self._lib_load_selected)
+            menu.addAction("Rename", self._lib_rename_selected)
+            move_menu = menu.addMenu("Move to project")
+            current_proj_data = item.parent().data(0, Qt.UserRole) if item.parent() else None
+            current_pid = current_proj_data.get("id") if current_proj_data else None
+            for proj in aoi_store.load_projects():
+                action = move_menu.addAction(proj["name"])
+                if proj["id"] == current_pid:
+                    action.setEnabled(False)
+                else:
+                    action.triggered.connect(
+                        lambda checked, aid=data["id"], pid=proj["id"]:
+                            self._lib_move_aoi(aid, pid)
+                    )
+            menu.addSeparator()
+            menu.addAction("Delete", self._lib_delete_selected)
+
+        elif data["type"] == "project":
+            menu.addAction("Rename", self._lib_rename_selected)
+            menu.addAction("New project…", self._lib_new_project)
+            menu.addSeparator()
+            menu.addAction("Delete project and AOIs", self._lib_delete_selected)
+            menu.addAction(
+                "Export project…",
+                lambda: self._lib_export_project(data["id"]),
+            )
+
+        menu.exec_(self.library_tree.viewport().mapToGlobal(pos))
 
     # ── Load job parameters ──────────────────────────────────────────────────
 
