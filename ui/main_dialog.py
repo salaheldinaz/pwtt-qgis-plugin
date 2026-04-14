@@ -1527,16 +1527,32 @@ class PWTTControlsDock(QDockWidget):
         )
 
     def _on_library_selection_changed(self):
-        has_sel = bool(self.library_tree.selectedItems())
+        items = self.library_tree.selectedItems()
+        types = {item.data(0, Qt.UserRole).get("type")
+                 for item in items if item.data(0, Qt.UserRole)}
+        has_sel = bool(items)
+        single_type = len(types) == 1
         self.lib_load_btn.setEnabled(has_sel)
-        self.lib_rename_btn.setEnabled(has_sel)
-        self.lib_delete_btn.setEnabled(has_sel)
+        self.lib_rename_btn.setEnabled(has_sel and single_type and len(items) == 1)
+        self.lib_delete_btn.setEnabled(has_sel and single_type)
 
     def _lib_load_selected(self):
         from ..core import aoi_store
         all_aois = {a["id"]: a for a in aoi_store.load_aois()}
+        aoi_ids_to_load: list = []
         for item in self.library_tree.selectedItems():
-            aoi_id = item.data(Qt.UserRole)
+            data = item.data(0, Qt.UserRole)
+            if not data:
+                continue
+            if data["type"] == "aoi":
+                aoi_ids_to_load.append(data["id"])
+            elif data["type"] == "project":
+                # Load all AOIs in this project
+                for i in range(item.childCount()):
+                    child_data = item.child(i).data(0, Qt.UserRole)
+                    if child_data and child_data["type"] == "aoi":
+                        aoi_ids_to_load.append(child_data["id"])
+        for aoi_id in aoi_ids_to_load:
             aoi = all_aois.get(aoi_id)
             if aoi is None:
                 continue
@@ -1556,20 +1572,34 @@ class PWTTControlsDock(QDockWidget):
         if not items:
             return
         item = items[0]
-        aoi_id = item.data(Qt.UserRole)
-        aoi = next((a for a in aoi_store.load_aois() if a["id"] == aoi_id), None)
-        if aoi is None:
+        data = item.data(0, Qt.UserRole)
+        if not data:
             return
-        name, ok = QInputDialog.getText(self, "Rename AOI", "New name:", text=aoi["name"])
-        if not ok or not name.strip():
-            return
-        aoi["name"] = name.strip()
-        aoi_store.save_aoi(aoi)
-        # Update queue label if this AOI is loaded in the queue
-        for q_aoi in self._queue:
-            if q_aoi["id"] == aoi_id:
-                q_aoi["name"] = name.strip()
-        self._rebuild_queue_list()
+
+        if data["type"] == "aoi":
+            aoi = next((a for a in aoi_store.load_aois() if a["id"] == data["id"]), None)
+            if aoi is None:
+                return
+            name, ok = QInputDialog.getText(self, "Rename AOI", "New name:", text=aoi["name"])
+            if not ok or not name.strip():
+                return
+            aoi["name"] = name.strip()
+            aoi_store.save_aoi(aoi)
+            for q_aoi in self._queue:
+                if q_aoi["id"] == data["id"]:
+                    q_aoi["name"] = name.strip()
+            self._rebuild_queue_list()
+
+        elif data["type"] == "project":
+            proj = next((p for p in aoi_store.load_projects() if p["id"] == data["id"]), None)
+            if proj is None:
+                return
+            name, ok = QInputDialog.getText(self, "Rename Project", "New name:", text=proj["name"])
+            if not ok or not name.strip():
+                return
+            proj["name"] = name.strip()
+            aoi_store.save_project(proj)
+
         self._refresh_library_tree()
 
     def _lib_delete_selected(self):
@@ -1577,16 +1607,51 @@ class PWTTControlsDock(QDockWidget):
         items = self.library_tree.selectedItems()
         if not items:
             return
-        names = [it.text().split("  ")[0] for it in items]
-        confirm = QMessageBox.question(
-            self, "PWTT",
-            f"Delete {len(items)} saved AOI(s)?\n" + "\n".join(f"  \u2022 {n}" for n in names),
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if confirm != QMessageBox.Yes:
+        types = {item.data(0, Qt.UserRole).get("type")
+                 for item in items if item.data(0, Qt.UserRole)}
+        if len(types) != 1:
             return
-        for item in items:
-            aoi_store.delete_aoi(item.data(Qt.UserRole))
+
+        if "aoi" in types:
+            names = []
+            for item in items:
+                d = item.data(0, Qt.UserRole)
+                if d and d["type"] == "aoi":
+                    names.append(item.text(0).split("  ")[0])
+            confirm = QMessageBox.question(
+                self, "PWTT",
+                f"Delete {len(items)} saved AOI(s)?\n" + "\n".join(f"  \u2022 {n}" for n in names),
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if confirm != QMessageBox.Yes:
+                return
+            for item in items:
+                d = item.data(0, Qt.UserRole)
+                if d and d["type"] == "aoi":
+                    aoi_store.delete_aoi(d["id"])
+
+        elif "project" in types:
+            if len(items) != 1:
+                return
+            item = items[0]
+            data = item.data(0, Qt.UserRole)
+            proj = next((p for p in aoi_store.load_projects() if p["id"] == data["id"]), None)
+            if proj is None:
+                return
+            aoi_count = item.childCount()
+            confirm = QMessageBox.question(
+                self, "PWTT",
+                f"Delete project '{proj['name']}' and its {aoi_count} AOI(s)?\nThis cannot be undone.",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if confirm != QMessageBox.Yes:
+                return
+            try:
+                aoi_store.delete_project(data["id"], cascade=True)
+            except ValueError as e:
+                QMessageBox.warning(self, "PWTT", str(e))
+                return
+
         self._refresh_library_tree()
 
     def _lib_export(self):
@@ -1621,7 +1686,13 @@ class PWTTControlsDock(QDockWidget):
         )
 
     def _lib_new_project(self):
-        pass  # implemented in Task 6
+        from ..core import aoi_store
+        name, ok = QInputDialog.getText(self, "New Project", "Project name:")
+        if not ok or not name.strip():
+            return
+        proj = aoi_store.make_project(name.strip())
+        aoi_store.save_project(proj)
+        self._refresh_library_tree()
 
     def _lib_move_aoi(self, aoi_id: str, target_project_id: str):
         pass  # implemented in Task 7
