@@ -26,12 +26,15 @@ from qgis.PyQt.QtWidgets import (
     QFrame,
     QListWidget,
     QListWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QMenu,
     QInputDialog,
     QFileDialog,
     QDialog,
     QDialogButtonBox,
 )
-from qgis.PyQt.QtCore import QDate, Qt
+from qgis.PyQt.QtCore import QDate, Qt, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QIcon
 from qgis.core import (
     Qgis,
@@ -361,6 +364,73 @@ class _AoiSplitDialog:
         return self._confirmed_tiles
 
 
+class _LibraryTree(QTreeWidget):
+    """QTreeWidget with AOI-to-project drag-and-drop support.
+    Emits aoi_moved(aoi_id, target_project_id) when an AOI is dropped onto a project."""
+
+    aoi_moved = pyqtSignal(str, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QTreeWidget.DragDrop)
+        self.setDefaultDropAction(Qt.MoveAction)
+        self.setSelectionMode(QTreeWidget.ExtendedSelection)
+        self.setHeaderHidden(True)
+        self.setAlternatingRowColors(True)
+        self.setMinimumHeight(100)
+
+    def dragEnterEvent(self, event):
+        item = self.currentItem()
+        if item is not None and item.parent() is not None:
+            event.accept()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        target = self.itemAt(event.pos())
+        if target is not None:
+            data = target.data(0, Qt.UserRole)
+            if data and data.get("type") == "project":
+                event.accept()
+                return
+            if target.parent() is not None:
+                event.accept()
+                return
+        event.ignore()
+
+    def dropEvent(self, event):
+        target = self.itemAt(event.pos())
+        if target is None:
+            event.ignore()
+            return
+        # Resolve drop target to a project item
+        data = target.data(0, Qt.UserRole)
+        if data and data.get("type") == "aoi":
+            target = target.parent()
+            data = target.data(0, Qt.UserRole) if target else None
+        if not data or data.get("type") != "project":
+            event.ignore()
+            return
+        dragged = self.currentItem()
+        if dragged is None or dragged.parent() is None:
+            event.ignore()
+            return
+        dragged_data = dragged.data(0, Qt.UserRole)
+        if not dragged_data or dragged_data.get("type") != "aoi":
+            event.ignore()
+            return
+        # No-op if same project
+        current_proj_data = dragged.parent().data(0, Qt.UserRole)
+        if current_proj_data and current_proj_data.get("id") == data.get("id"):
+            event.ignore()
+            return
+        self.aoi_moved.emit(dragged_data["id"], data["id"])
+        event.accept()
+
+
 class PWTTControlsDock(QDockWidget):
     """Dockable controls panel: backend, credentials, AOI, parameters, output, run."""
 
@@ -670,13 +740,13 @@ class PWTTControlsDock(QDockWidget):
         lib_layout.setContentsMargins(0, 0, 0, 0)
         lib_layout.setSpacing(4)
 
-        self.library_list = QListWidget()
-        self.library_list.setMinimumHeight(80)
-        self.library_list.setAlternatingRowColors(True)
-        self.library_list.setSelectionMode(QListWidget.ExtendedSelection)
-        lib_layout.addWidget(self.library_list)
+        self.library_tree = _LibraryTree()
+        lib_layout.addWidget(self.library_tree)
 
         lib_btn_row1 = QHBoxLayout()
+        self.lib_new_project_btn = QPushButton("New project…")
+        self.lib_new_project_btn.clicked.connect(self._lib_new_project)
+        lib_btn_row1.addWidget(self.lib_new_project_btn)
         self.lib_load_btn = QPushButton("Load into queue")
         self.lib_load_btn.clicked.connect(self._lib_load_selected)
         self.lib_load_btn.setEnabled(False)
@@ -704,7 +774,10 @@ class PWTTControlsDock(QDockWidget):
         aoi_outer.addWidget(self._library_widget)
 
         self._library_toggle_btn.toggled.connect(self._on_library_toggled)
-        self.library_list.itemSelectionChanged.connect(self._on_library_selection_changed)
+        self.library_tree.itemSelectionChanged.connect(self._on_library_selection_changed)
+        self.library_tree.aoi_moved.connect(self._lib_move_aoi)
+        self.library_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.library_tree.customContextMenuRequested.connect(self._show_library_context_menu)
 
         layout.addWidget(aoi_group)
 
@@ -1362,7 +1435,7 @@ class PWTTControlsDock(QDockWidget):
         # Update queue entry in place
         aoi_entry.update({"id": new_aoi["id"], "name": new_aoi["name"], "tag": "saved"})
         self._rebuild_queue_list()
-        self._refresh_library_list()
+        self._refresh_library_tree()
         self.iface.messageBar().pushMessage(
             "PWTT", f'AOI "{name.strip()}" saved to library.', level=Qgis.Success, duration=4,
         )
@@ -1392,29 +1465,52 @@ class PWTTControlsDock(QDockWidget):
 
     # ── Library ───────────────────────────────────────────────────────────────
 
-    def _refresh_library_list(self):
-        """Reload library list widget from aoi_store."""
+    def _refresh_library_tree(self):
+        """Rebuild the library QTreeWidget from aoi_store."""
         from ..core import aoi_store
-        aois = aoi_store.load_aois()
-        self.library_list.clear()
-        for aoi in aois:
-            date_str = format_iso_date_display(aoi.get("created_at", "") or "")
-            label = f"{aoi['name']}  {date_str}"
-            item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, aoi["id"])
-            self.library_list.addItem(item)
-        count = len(aois)
+        self.library_tree.blockSignals(True)
+        self.library_tree.clear()
+        projects = aoi_store.load_projects()
+        aois_by_project: dict = {p["id"]: [] for p in projects}
+        for aoi in aoi_store.load_aois():
+            pid = aoi.get("project_id", "")
+            if pid in aois_by_project:
+                aois_by_project[pid].append(aoi)
+        total = 0
+        for proj in projects:
+            proj_aois = sorted(
+                aois_by_project[proj["id"]],
+                key=lambda a: a.get("created_at", ""),
+                reverse=True,
+            )
+            proj_item = QTreeWidgetItem(self.library_tree)
+            proj_item.setText(0, f"{proj['name']}  ({len(proj_aois)})")
+            font = proj_item.font(0)
+            font.setBold(True)
+            proj_item.setFont(0, font)
+            proj_item.setData(0, Qt.UserRole, {"type": "project", "id": proj["id"]})
+            proj_item.setExpanded(True)
+            for aoi in proj_aois:
+                date_str = format_iso_date_display(aoi.get("created_at", "") or "")
+                aoi_item = QTreeWidgetItem(proj_item)
+                aoi_item.setText(0, f"{aoi['name']}  {date_str}")
+                aoi_item.setData(0, Qt.UserRole, {"type": "aoi", "id": aoi["id"]})
+            total += len(proj_aois)
+        self.library_tree.blockSignals(False)
         checked = self._library_toggle_btn.isChecked()
         self._library_toggle_btn.setText(
-            f"{'▼' if checked else '▶'}  Saved AOI Library  ({count} saved)"
+            f"{'▼' if checked else '▶'}  Saved AOI Library  ({total} saved)"
         )
         self._on_library_selection_changed()
 
     def _on_library_toggled(self, checked: bool):
         self._library_widget.setVisible(checked)
         if checked:
-            self._refresh_library_list()
-        count = self.library_list.count()
+            self._refresh_library_tree()
+        count = sum(
+            self.library_tree.topLevelItem(i).childCount()
+            for i in range(self.library_tree.topLevelItemCount())
+        )
         self._library_toggle_btn.setText(
             f"{'▼' if checked else '▶'}  Saved AOI Library  ({count} saved)"
         )
@@ -1463,7 +1559,7 @@ class PWTTControlsDock(QDockWidget):
             if q_aoi["id"] == aoi_id:
                 q_aoi["name"] = name.strip()
         self._rebuild_queue_list()
-        self._refresh_library_list()
+        self._refresh_library_tree()
 
     def _lib_delete_selected(self):
         from ..core import aoi_store
@@ -1480,7 +1576,7 @@ class PWTTControlsDock(QDockWidget):
             return
         for item in items:
             aoi_store.delete_aoi(item.data(Qt.UserRole))
-        self._refresh_library_list()
+        self._refresh_library_tree()
 
     def _lib_export(self):
         from ..core import aoi_store
@@ -1506,12 +1602,21 @@ class PWTTControlsDock(QDockWidget):
         except Exception as e:
             QMessageBox.warning(self, "PWTT", f"Import failed: {e}")
             return
-        self._refresh_library_list()
+        self._refresh_library_tree()
         self.iface.messageBar().pushMessage(
             "PWTT",
             f"Imported {result['added']} AOI(s). Skipped invalid: {result['skipped_invalid']}.",
             level=Qgis.Success, duration=5,
         )
+
+    def _lib_new_project(self):
+        pass  # implemented in Task 6
+
+    def _lib_move_aoi(self, aoi_id: str, target_project_id: str):
+        pass  # implemented in Task 7
+
+    def _show_library_context_menu(self, pos):
+        pass  # implemented in Task 7
 
     # ── Load job parameters ──────────────────────────────────────────────────
 
