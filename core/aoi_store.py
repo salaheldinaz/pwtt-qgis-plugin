@@ -98,7 +98,7 @@ def make_aoi(name: str, wkt: str, bbox: List[float], project_id: str = None) -> 
 
 def load_projects() -> List[dict]:
     projects, _ = _read_raw()
-    return sorted(projects, key=lambda p: p.get("name", ""))
+    return sorted(projects, key=lambda p: p.get("name", "").lower())
 
 
 def save_project(project: dict):

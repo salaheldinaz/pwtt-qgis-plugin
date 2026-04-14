@@ -189,8 +189,7 @@ def test_delete_project_cascade():
     proj2 = aoi_store.make_project("Keep")
     aoi_store.save_project(proj2)
     aoi = aoi_store.make_aoi("An AOI", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
-                              [0, 0, 1, 1])
-    aoi["project_id"] = proj["id"]
+                              [0, 0, 1, 1], project_id=proj["id"])
     aoi_store.save_aoi(aoi)
     aoi_store.delete_project(proj["id"], cascade=True)
     assert all(p["id"] != proj["id"] for p in aoi_store.load_projects())
