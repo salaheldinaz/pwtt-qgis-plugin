@@ -283,9 +283,11 @@ class _AoiSplitDialog:
 
         if self._backend_id == "gee" and tiles:
             per_mb  = aoi_splitter.estimate_gee_bytes(tiles[0]) / (1024 * 1024)
-            lim_mb  = aoi_splitter.GEE_GETDOWNLOAD_MAX_BYTES / (1024 * 1024)
+            safe_mb = aoi_splitter.GEE_GETDOWNLOAD_EFFECTIVE_MAX_BYTES / (1024 * 1024)
+            cap_mb  = aoi_splitter.GEE_GETDOWNLOAD_MAX_BYTES / (1024 * 1024)
             self._quota_label.setText(
-                f"Estimated per tile: ~{per_mb:.0f} MiB  (GEE limit: {lim_mb:.0f} MiB)"
+                f"Estimated per tile: ~{per_mb:.0f} MiB  "
+                f"(budget ~{safe_mb:.0f} MiB; EE hard cap ~{cap_mb:.0f} MiB)"
             )
         elif self._backend_id == "openeo" and tiles:
             per_pu   = aoi_splitter.estimate_openeo_pu(tiles[0])

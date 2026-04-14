@@ -6,20 +6,22 @@ from __future__ import annotations
 import math
 from typing import List, Tuple
 
+from .gee_backend import (
+    GEE_GETDOWNLOAD_EFFECTIVE_MAX_BYTES,
+    GEE_GETDOWNLOAD_MAX_BYTES,
+    estimate_gee_getdownload_request_bytes,
+)
+
 # openEO/CDSE: tested to ~100×100 km; conservative for free-tier 10,000 PU/month
 _OPENEO_MAX_DEG: float = 0.5
 # Local: no hard limit; large sensible default
 _LOCAL_MAX_DEG: float = 1.0
 
 # These mirror _GEE_DOWNLOAD_SCALE_M/_GEE_DOWNLOAD_BANDS/_GEE_DOWNLOAD_BYTES_PER_BAND
-# in gee_backend.py. Not imported at module level to avoid requiring earthengine-api.
-# If gee_backend.py changes these values, update here to match.
+# in gee_backend.py. If gee_backend.py changes these values, update here to match.
 _GEE_SCALE_M: int = 10
 _GEE_BANDS: int = 3
 _GEE_BYTES_PER_BAND: int = 4  # float32
-
-# Re-export so callers can read it without importing gee_backend
-GEE_GETDOWNLOAD_MAX_BYTES: int = 50_331_648  # 48 MiB
 
 
 def _m_per_deg_lon(mid_lat: float) -> float:
@@ -32,10 +34,12 @@ def _m_per_deg_lat() -> float:
 
 def _max_tile_deg(backend_id: str, mid_lat: float) -> float:
     if backend_id == "gee":
-        # Back-calculate max square tile that fits under GEE_GETDOWNLOAD_MAX_BYTES
+        # Back-calculate max square tile under effective budget (headroom vs EE server).
         mpd_lon = _m_per_deg_lon(mid_lat)
         mpd_lat = _m_per_deg_lat()
-        max_pixels = GEE_GETDOWNLOAD_MAX_BYTES / (_GEE_BANDS * _GEE_BYTES_PER_BAND)
+        max_pixels = GEE_GETDOWNLOAD_EFFECTIVE_MAX_BYTES / (
+            _GEE_BANDS * _GEE_BYTES_PER_BAND
+        )
         side_m = math.sqrt(max_pixels) * _GEE_SCALE_M
         return min(side_m / mpd_lon, side_m / mpd_lat)
     if backend_id == "openeo":
@@ -49,9 +53,8 @@ def needs_split(bbox: List[float], backend_id: str) -> bool:
     mid_lat = (south + north) / 2.0
 
     if backend_id == "gee":
-        from .gee_backend import estimate_gee_getdownload_request_bytes
         est = estimate_gee_getdownload_request_bytes(west, south, east, north)
-        return est > GEE_GETDOWNLOAD_MAX_BYTES
+        return est > GEE_GETDOWNLOAD_EFFECTIVE_MAX_BYTES
 
     max_deg = _max_tile_deg(backend_id, mid_lat)
     return (east - west) > max_deg or (north - south) > max_deg
@@ -95,7 +98,6 @@ def split_bbox(
 
 def estimate_gee_bytes(bbox: List[float]) -> int:
     """Estimated uncompressed GEE download bytes for this bbox."""
-    from .gee_backend import estimate_gee_getdownload_request_bytes
     west, south, east, north = bbox
     return estimate_gee_getdownload_request_bytes(west, south, east, north)
 
