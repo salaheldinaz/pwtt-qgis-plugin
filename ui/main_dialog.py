@@ -1534,15 +1534,7 @@ class PWTTControlsDock(QDockWidget):
 
     def _on_library_toggled(self, checked: bool):
         self._library_widget.setVisible(checked)
-        if checked:
-            self._refresh_library_tree()
-        count = sum(
-            self.library_tree.topLevelItem(i).childCount()
-            for i in range(self.library_tree.topLevelItemCount())
-        )
-        self._library_toggle_btn.setText(
-            f"{'▼' if checked else '▶'}  Saved AOI Library  ({count} saved)"
-        )
+        self._refresh_library_tree()
 
     def _on_library_selection_changed(self):
         items = self.library_tree.selectedItems()
@@ -1622,7 +1614,11 @@ class PWTTControlsDock(QDockWidget):
             if not ok or not name.strip():
                 return
             proj["name"] = name.strip()
-            aoi_store.save_project(proj)
+            try:
+                aoi_store.save_project(proj)
+            except ValueError as e:
+                QMessageBox.warning(self, "PWTT", str(e))
+                return
 
         self._refresh_library_tree()
 
@@ -1700,10 +1696,13 @@ class PWTTControlsDock(QDockWidget):
             if types == {"aoi"}:
                 selected_ids = {item.data(0, Qt.UserRole)["id"] for item in items}
                 aois = [a for a in aoi_store.load_aois() if a["id"] in selected_ids]
+                proj_ids_needed = {a.get("project_id") for a in aois if a.get("project_id")}
+                projects = [p for p in aoi_store.load_projects() if p["id"] in proj_ids_needed]
                 payload = {
                     "format": aoi_store.AOI_EXPORT_FORMAT,
                     "version": aoi_store.AOI_EXPORT_VERSION,
                     "exported_at": _dt.now().isoformat(timespec="seconds"),
+                    "projects": projects,
                     "aois": aois,
                 }
                 with open(path, "w", encoding="utf-8") as f:
@@ -1789,7 +1788,11 @@ class PWTTControlsDock(QDockWidget):
         if not ok or not name.strip():
             return
         proj = aoi_store.make_project(name.strip())
-        aoi_store.save_project(proj)
+        try:
+            aoi_store.save_project(proj)
+        except ValueError as e:
+            QMessageBox.warning(self, "PWTT", str(e))
+            return
         self._refresh_library_tree()
 
     def _lib_move_aoi(self, aoi_id: str, target_project_id: str):

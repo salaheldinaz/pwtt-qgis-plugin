@@ -363,3 +363,46 @@ def test_import_full_export_multi_project(tmp_path):
     aoi_b = next(a for a in aois if a["name"] == "AOI-B")
     assert aoi_a["project_id"] == alpha_id
     assert aoi_b["project_id"] == beta_id
+
+
+def test_import_flat_array_all_invalid_is_noop(tmp_path):
+    """Flat-array import with all invalid AOIs must not create a project."""
+    _fresh()
+    proj = aoi_store.make_project("Existing")
+    aoi_store.save_project(proj)
+    path = str(tmp_path / "invalid.json")
+    with open(path, "w") as f:
+        json.dump([{"id": "bad1"}, {"id": "bad2", "name": "No WKT"}], f)
+    result = aoi_store.import_aois_from_file(path)
+    assert result["added"] == 0
+    assert result["skipped_invalid"] == 2
+    projects = aoi_store.load_projects()
+    assert len(projects) == 1  # no new project created
+
+
+def test_save_project_duplicate_name_raises():
+    _fresh()
+    proj1 = aoi_store.make_project("MyProject")
+    aoi_store.save_project(proj1)
+    proj2 = aoi_store.make_project("MyProject")
+    with pytest.raises(ValueError, match="already exists"):
+        aoi_store.save_project(proj2)
+
+
+def test_save_project_duplicate_name_case_insensitive_raises():
+    _fresh()
+    proj1 = aoi_store.make_project("myproject")
+    aoi_store.save_project(proj1)
+    proj2 = aoi_store.make_project("MYPROJECT")
+    with pytest.raises(ValueError, match="already exists"):
+        aoi_store.save_project(proj2)
+
+
+def test_save_project_rename_to_own_name_allowed():
+    """Updating a project's other fields (not renaming to conflict) must succeed."""
+    _fresh()
+    proj = aoi_store.make_project("Alpha")
+    aoi_store.save_project(proj)
+    proj["name"] = "Alpha"  # same name, same id — should not raise
+    aoi_store.save_project(proj)
+    assert aoi_store.load_projects()[0]["name"] == "Alpha"

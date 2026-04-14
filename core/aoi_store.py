@@ -102,10 +102,15 @@ def load_projects() -> List[dict]:
 
 
 def save_project(project: dict):
-    """Insert or update project by id."""
+    """Insert or update project by id. Raises ValueError if another project has the same name."""
     projects, aois = _read_raw()
+    pid = project.get("id")
+    pname = (project.get("name") or "").strip().lower()
+    for p in projects:
+        if p.get("id") != pid and (p.get("name") or "").lower() == pname:
+            raise ValueError(f"A project named {project.get('name')!r} already exists.")
     for i, p in enumerate(projects):
-        if p["id"] == project["id"]:
+        if p.get("id") == pid:
             projects[i] = project
             _write(projects, aois)
             return
@@ -272,14 +277,15 @@ def import_aois_from_file(path: str, target_project_id: str = None) -> Dict[str,
                 project_id_map[old_id] = proj["id"]
 
     else:
-        # Old flat-array — create an auto-named project
-        auto_name = f"Imported {datetime.now().strftime('%Y-%m-%d')}"
-        auto_proj = make_project(auto_name)
-        while auto_proj["id"] in used_project_ids:
-            auto_proj["id"] = uuid.uuid4().hex[:8]
-        used_project_ids.add(auto_proj["id"])
-        existing_projects.append(auto_proj)
-        effective_project_id = auto_proj["id"]
+        # Old flat-array — create an auto-named project only if there are valid AOIs
+        if any(a.get("wkt") and a.get("name") for a in incoming_aois):
+            auto_name = f"Imported {datetime.now().strftime('%Y-%m-%d')}"
+            auto_proj = make_project(auto_name)
+            while auto_proj["id"] in used_project_ids:
+                auto_proj["id"] = uuid.uuid4().hex[:8]
+            used_project_ids.add(auto_proj["id"])
+            existing_projects.append(auto_proj)
+            effective_project_id = auto_proj["id"]
 
     for raw in incoming_aois:
         if not raw.get("wkt") or not raw.get("name"):
