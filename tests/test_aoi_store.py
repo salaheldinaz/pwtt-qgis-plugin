@@ -108,6 +108,7 @@ def test_make_aoi_has_required_fields():
 
 def test_migration_v1_to_v2(tmp_path):
     """A bare JSON array (v1) is migrated to v2 on first read."""
+    _fresh()
     import importlib, json
     # Write a v1 file directly
     p = os.path.join(_tmpdir, "PWTT", "saved_aois.json")

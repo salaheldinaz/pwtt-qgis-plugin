@@ -58,7 +58,7 @@ def _read_raw():
         projects = [x for x in data.get("projects", []) if isinstance(x, dict)]
         aois = [x for x in data.get("aois", []) if isinstance(x, dict)]
         # Orphan repair
-        project_ids = {proj["id"] for proj in projects}
+        project_ids = {proj["id"] for proj in projects if "id" in proj}
         fallback = projects[0]["id"] if projects else None
         repaired = False
         for aoi in aois:
