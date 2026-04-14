@@ -1681,6 +1681,7 @@ class PWTTControlsDock(QDockWidget):
     def _lib_export(self):
         from ..core import aoi_store
         import json as _json
+        from datetime import datetime as _dt
         items = self.library_tree.selectedItems()
         types = {item.data(0, Qt.UserRole).get("type")
                  for item in items if item.data(0, Qt.UserRole)}
@@ -1695,21 +1696,24 @@ class PWTTControlsDock(QDockWidget):
         if not path:
             return
 
-        if types == {"aoi"}:
-            selected_ids = {item.data(0, Qt.UserRole)["id"] for item in items}
-            aois = [a for a in aoi_store.load_aois() if a["id"] in selected_ids]
-            from datetime import datetime as _dt
-            payload = {
-                "format": aoi_store.AOI_EXPORT_FORMAT,
-                "version": aoi_store.AOI_EXPORT_VERSION,
-                "exported_at": _dt.now().isoformat(timespec="seconds"),
-                "aois": aois,
-            }
-            with open(path, "w", encoding="utf-8") as f:
-                _json.dump(payload, f, indent=2, ensure_ascii=False)
-            count = len(aois)
-        else:
-            count = aoi_store.export_aois_to_file(path)
+        try:
+            if types == {"aoi"}:
+                selected_ids = {item.data(0, Qt.UserRole)["id"] for item in items}
+                aois = [a for a in aoi_store.load_aois() if a["id"] in selected_ids]
+                payload = {
+                    "format": aoi_store.AOI_EXPORT_FORMAT,
+                    "version": aoi_store.AOI_EXPORT_VERSION,
+                    "exported_at": _dt.now().isoformat(timespec="seconds"),
+                    "aois": aois,
+                }
+                with open(path, "w", encoding="utf-8") as f:
+                    _json.dump(payload, f, indent=2, ensure_ascii=False)
+                count = len(aois)
+            else:
+                count = aoi_store.export_aois_to_file(path)
+        except Exception as e:
+            QMessageBox.warning(self, "PWTT", f"Export failed: {e}")
+            return
 
         self.iface.messageBar().pushMessage(
             "PWTT", f"Exported {count} AOI(s) to {path}.", level=Qgis.Success, duration=5,
