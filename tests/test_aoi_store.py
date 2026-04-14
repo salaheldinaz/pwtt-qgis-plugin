@@ -99,8 +99,8 @@ def test_import_no_duplicates(tmp_path):
 
 
 def test_make_aoi_has_required_fields():
-    aoi = aoi_store.make_aoi("X", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))", [0, 0, 1, 1])
-    for field in ("id", "name", "wkt", "bbox", "created_at"):
+    aoi = aoi_store.make_aoi("X", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))", [0, 0, 1, 1], project_id="p1")
+    for field in ("id", "project_id", "name", "wkt", "bbox", "created_at"):
         assert field in aoi
     assert aoi["id"]
     assert len(aoi["id"]) == 8
@@ -246,6 +246,7 @@ def test_move_aoi():
     aoi_store.save_aoi(aoi)
     aoi_store.move_aoi(aoi["id"], p2["id"])
     loaded = aoi_store.load_aois()
+    assert len(loaded) == 1
     assert loaded[0]["project_id"] == p2["id"]
 
 
