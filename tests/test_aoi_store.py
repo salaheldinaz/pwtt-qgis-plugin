@@ -210,3 +210,59 @@ def test_load_projects_sorted_by_name():
         aoi_store.save_project(aoi_store.make_project(name))
     names = [p["name"] for p in aoi_store.load_projects()]
     assert names == ["Apple", "Mango", "Zebra"]
+
+
+def test_make_aoi_includes_project_id():
+    aoi = aoi_store.make_aoi("X", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
+                              [0, 0, 1, 1], project_id="proj1")
+    assert aoi["project_id"] == "proj1"
+
+
+def test_load_aois_filtered_by_project():
+    _fresh()
+    p1 = aoi_store.make_project("P1")
+    p2 = aoi_store.make_project("P2")
+    aoi_store.save_project(p1)
+    aoi_store.save_project(p2)
+    a1 = aoi_store.make_aoi("A1", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
+                             [0, 0, 1, 1], project_id=p1["id"])
+    a2 = aoi_store.make_aoi("A2", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
+                             [0, 0, 1, 1], project_id=p2["id"])
+    aoi_store.save_aoi(a1)
+    aoi_store.save_aoi(a2)
+    assert len(aoi_store.load_aois(project_id=p1["id"])) == 1
+    assert aoi_store.load_aois(project_id=p1["id"])[0]["name"] == "A1"
+    assert len(aoi_store.load_aois()) == 2
+
+
+def test_move_aoi():
+    _fresh()
+    p1 = aoi_store.make_project("Src")
+    p2 = aoi_store.make_project("Dst")
+    aoi_store.save_project(p1)
+    aoi_store.save_project(p2)
+    aoi = aoi_store.make_aoi("M", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
+                              [0, 0, 1, 1], project_id=p1["id"])
+    aoi_store.save_aoi(aoi)
+    aoi_store.move_aoi(aoi["id"], p2["id"])
+    loaded = aoi_store.load_aois()
+    assert loaded[0]["project_id"] == p2["id"]
+
+
+def test_move_aoi_invalid_aoi_raises():
+    _fresh()
+    proj = aoi_store.make_project("P")
+    aoi_store.save_project(proj)
+    with pytest.raises(ValueError, match="not found"):
+        aoi_store.move_aoi("nonexistent_id", proj["id"])
+
+
+def test_move_aoi_invalid_project_raises():
+    _fresh()
+    proj = aoi_store.make_project("P")
+    aoi_store.save_project(proj)
+    aoi = aoi_store.make_aoi("A", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
+                              [0, 0, 1, 1], project_id=proj["id"])
+    aoi_store.save_aoi(aoi)
+    with pytest.raises(ValueError, match="not found"):
+        aoi_store.move_aoi(aoi["id"], "bad_project_id")
