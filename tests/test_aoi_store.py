@@ -267,3 +267,60 @@ def test_move_aoi_invalid_project_raises():
     aoi_store.save_aoi(aoi)
     with pytest.raises(ValueError, match="not found"):
         aoi_store.move_aoi(aoi["id"], "bad_project_id")
+
+
+def test_export_project_round_trip(tmp_path):
+    _fresh()
+    proj = aoi_store.make_project("Kyiv")
+    aoi_store.save_project(proj)
+    aoi = aoi_store.make_aoi("City center", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
+                              [0, 0, 1, 1], project_id=proj["id"])
+    aoi_store.save_aoi(aoi)
+    path = str(tmp_path / "kyiv.json")
+    count = aoi_store.export_project_to_file(proj["id"], path)
+    assert count == 1
+
+    _fresh()
+    result = aoi_store.import_aois_from_file(path)
+    assert result["added"] == 1
+    aois = aoi_store.load_aois()
+    assert aois[0]["name"] == "City center"
+    projects = aoi_store.load_projects()
+    assert any(p["name"] == "Kyiv" for p in projects)
+
+
+def test_import_flat_array_creates_auto_project(tmp_path):
+    _fresh()
+    path = str(tmp_path / "old.json")
+    with open(path, "w") as f:
+        json.dump([
+            {"id": "xx000001", "name": "Flat AOI",
+             "wkt": "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))", "bbox": [0, 0, 1, 1],
+             "created_at": "2024-01-01T00:00:00"}
+        ], f)
+    result = aoi_store.import_aois_from_file(path)
+    assert result["added"] == 1
+    projects = aoi_store.load_projects()
+    assert any(p["name"].startswith("Imported") for p in projects)
+    aois = aoi_store.load_aois()
+    assert aois[0]["name"] == "Flat AOI"
+    pid = aois[0]["project_id"]
+    assert any(p["id"] == pid for p in projects)
+
+
+def test_import_into_target_project(tmp_path):
+    _fresh()
+    proj = aoi_store.make_project("Existing")
+    aoi_store.save_project(proj)
+    proj2 = aoi_store.make_project("FromFile")
+    aoi_store.save_project(proj2)
+    aoi = aoi_store.make_aoi("A", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
+                              [0, 0, 1, 1], project_id=proj2["id"])
+    aoi_store.save_aoi(aoi)
+    path = str(tmp_path / "proj2.json")
+    aoi_store.export_project_to_file(proj2["id"], path)
+
+    result = aoi_store.import_aois_from_file(path, target_project_id=proj["id"])
+    assert result["added"] == 1
+    loaded = aoi_store.load_aois(project_id=proj["id"])
+    assert any(a["name"] == "A" for a in loaded)
