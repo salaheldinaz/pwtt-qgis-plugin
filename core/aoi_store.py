@@ -246,6 +246,8 @@ def import_aois_from_file(path: str, target_project_id: str = None) -> Dict[str,
     effective_project_id: str = ""
 
     if target_project_id is not None:
+        if target_project_id not in used_project_ids:
+            raise ValueError(f"target_project_id {target_project_id!r} does not exist.")
         effective_project_id = target_project_id
 
     elif incoming_project is not None:
@@ -295,9 +297,10 @@ def import_aois_from_file(path: str, target_project_id: str = None) -> Dict[str,
         oid = aoi.get("id")
         if not oid or not isinstance(oid, str):
             aoi["id"] = uuid.uuid4().hex[:8]
-        while aoi["id"] in used_ids:
-            aoi["id"] = uuid.uuid4().hex[:8]
+        if aoi["id"] in used_ids:
             ids_rewritten += 1
+            while aoi["id"] in used_ids:
+                aoi["id"] = uuid.uuid4().hex[:8]
         used_ids.add(aoi["id"])
         existing_aois.insert(0, aoi)
         added += 1

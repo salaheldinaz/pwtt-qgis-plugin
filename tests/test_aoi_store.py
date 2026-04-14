@@ -324,3 +324,42 @@ def test_import_into_target_project(tmp_path):
     assert result["added"] == 1
     loaded = aoi_store.load_aois(project_id=proj["id"])
     assert any(a["name"] == "A" for a in loaded)
+
+
+def test_import_full_export_multi_project(tmp_path):
+    """Full export with multiple projects is imported with correct project mapping."""
+    _fresh()
+    # Create two projects with one AOI each
+    p1 = aoi_store.make_project("Alpha")
+    p2 = aoi_store.make_project("Beta")
+    aoi_store.save_project(p1)
+    aoi_store.save_project(p2)
+    a1 = aoi_store.make_aoi("AOI-A", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
+                             [0, 0, 1, 1], project_id=p1["id"])
+    a2 = aoi_store.make_aoi("AOI-B", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
+                             [0, 0, 1, 1], project_id=p2["id"])
+    aoi_store.save_aoi(a1)
+    aoi_store.save_aoi(a2)
+    path = str(tmp_path / "full.json")
+    count = aoi_store.export_aois_to_file(path)
+    assert count == 2
+
+    # Import into a fresh store
+    _fresh()
+    result = aoi_store.import_aois_from_file(path)
+    assert result["added"] == 2
+
+    projects = aoi_store.load_projects()
+    assert len(projects) == 2
+    project_names = {p["name"] for p in projects}
+    assert project_names == {"Alpha", "Beta"}
+
+    aois = aoi_store.load_aois()
+    assert len(aois) == 2
+    # Each AOI must be assigned to the project matching its original name
+    alpha_id = next(p["id"] for p in projects if p["name"] == "Alpha")
+    beta_id = next(p["id"] for p in projects if p["name"] == "Beta")
+    aoi_a = next(a for a in aois if a["name"] == "AOI-A")
+    aoi_b = next(a for a in aois if a["name"] == "AOI-B")
+    assert aoi_a["project_id"] == alpha_id
+    assert aoi_b["project_id"] == beta_id
