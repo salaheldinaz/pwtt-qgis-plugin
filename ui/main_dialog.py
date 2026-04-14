@@ -1516,7 +1516,7 @@ class PWTTControlsDock(QDockWidget):
         )
 
     def _on_library_selection_changed(self):
-        has_sel = bool(self.library_list.selectedItems())
+        has_sel = bool(self.library_tree.selectedItems())
         self.lib_load_btn.setEnabled(has_sel)
         self.lib_rename_btn.setEnabled(has_sel)
         self.lib_delete_btn.setEnabled(has_sel)
@@ -1524,7 +1524,7 @@ class PWTTControlsDock(QDockWidget):
     def _lib_load_selected(self):
         from ..core import aoi_store
         all_aois = {a["id"]: a for a in aoi_store.load_aois()}
-        for item in self.library_list.selectedItems():
+        for item in self.library_tree.selectedItems():
             aoi_id = item.data(Qt.UserRole)
             aoi = all_aois.get(aoi_id)
             if aoi is None:
@@ -1541,7 +1541,7 @@ class PWTTControlsDock(QDockWidget):
 
     def _lib_rename_selected(self):
         from ..core import aoi_store
-        items = self.library_list.selectedItems()
+        items = self.library_tree.selectedItems()
         if not items:
             return
         item = items[0]
@@ -1563,7 +1563,7 @@ class PWTTControlsDock(QDockWidget):
 
     def _lib_delete_selected(self):
         from ..core import aoi_store
-        items = self.library_list.selectedItems()
+        items = self.library_tree.selectedItems()
         if not items:
             return
         names = [it.text().split("  ")[0] for it in items]
