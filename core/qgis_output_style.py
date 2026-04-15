@@ -52,8 +52,9 @@ def pwtt_raster_abstract(damage_threshold: float) -> str:
         "Typical outputs have three bands (T_statistic, damage, p_value); some backends "
         "may export fewer — check band count in layer properties.\n\n"
         "Default styling: singleband pseudocolor on band 1 (T_statistic), yellow→red→purple, "
-        f"min {T_STATISTIC_VIZ_MIN:g} / max {T_STATISTIC_VIZ_MAX:g} / opacity "
-        f"{int(T_STATISTIC_VIZ_OPACITY * 100)}% — same stretch as code/pwtt.py Earth Engine viz. "
+        f"min {thr:g} (damage threshold) / max {T_STATISTIC_VIZ_MAX:g} / opacity "
+        f"{int(T_STATISTIC_VIZ_OPACITY * 100)}% — same hues as code/pwtt.py Earth Engine viz. "
+        f"Pixels with T_statistic below {thr:g} are transparent (no color). "
         "Higher T in that stretch is more purple, lower is more yellow. "
         "Change symbology in layer properties to view multiband RGB or other bands.\n\n"
         "Bands:\n"
@@ -86,17 +87,15 @@ def _pwtt_tstatistic_color_ramp():
     )
 
 
-def _pwtt_manual_color_ramp_shader():
+def _pwtt_manual_color_ramp_shader(viz_min: float = T_STATISTIC_VIZ_MIN):
     """Fallback when createShader is missing or fails (older QGIS)."""
     ramp_fn = QgsColorRampShader()
     ramp_fn.setColorRampType(QgsColorRampShader.Interpolated)
-    ramp_fn.setMinimumValue(T_STATISTIC_VIZ_MIN)
+    ramp_fn.setMinimumValue(viz_min)
     ramp_fn.setMaximumValue(T_STATISTIC_VIZ_MAX)
-    mid = (T_STATISTIC_VIZ_MIN + T_STATISTIC_VIZ_MAX) / 2.0
+    mid = (viz_min + T_STATISTIC_VIZ_MAX) / 2.0
     items = [
-        QgsColorRampShader.ColorRampItem(
-            T_STATISTIC_VIZ_MIN, QColor(T_STATISTIC_VIZ_HEX_LOW), ""
-        ),
+        QgsColorRampShader.ColorRampItem(viz_min, QColor(T_STATISTIC_VIZ_HEX_LOW), ""),
         QgsColorRampShader.ColorRampItem(mid, QColor(T_STATISTIC_VIZ_HEX_MID), ""),
         QgsColorRampShader.ColorRampItem(
             T_STATISTIC_VIZ_MAX, QColor(T_STATISTIC_VIZ_HEX_HIGH), ""
@@ -108,15 +107,16 @@ def _pwtt_manual_color_ramp_shader():
     return shader
 
 
-def _pwtt_pseudocolor_renderer(layer):
-    """Renderer the symbology panel understands; fixed 3–5 stretch (not NaN / stats)."""
+def _pwtt_pseudocolor_renderer(layer, viz_min: float = T_STATISTIC_VIZ_MIN):
+    """Renderer the symbology panel understands; viz_min sets lower clip (pixels below
+    are transparent), T_STATISTIC_VIZ_MAX as ceiling (not NaN / stats)."""
     provider = layer.dataProvider()
     renderer = QgsSingleBandPseudoColorRenderer(provider, 1, None)
 
     # MUST set before createShader(): QGIS builds QgsColorRampShader from
     # classificationMin/Max; if they are still the default NaN, ramp items and
     # labels stay NaN and nothing useful renders.
-    renderer.setClassificationMin(T_STATISTIC_VIZ_MIN)
+    renderer.setClassificationMin(viz_min)
     renderer.setClassificationMax(T_STATISTIC_VIZ_MAX)
 
     try:
@@ -137,12 +137,12 @@ def _pwtt_pseudocolor_renderer(layer):
                 False,
             )
         except (AttributeError, TypeError):
-            renderer.setShader(_pwtt_manual_color_ramp_shader())
+            renderer.setShader(_pwtt_manual_color_ramp_shader(viz_min))
     else:
-        renderer.setShader(_pwtt_manual_color_ramp_shader())
+        renderer.setShader(_pwtt_manual_color_ramp_shader(viz_min))
 
     # Sync shader after createShader (covers edge cases where ramp steps diverge).
-    renderer.setClassificationMin(T_STATISTIC_VIZ_MIN)
+    renderer.setClassificationMin(viz_min)
     renderer.setClassificationMax(T_STATISTIC_VIZ_MAX)
     renderer.setOpacity(1.0)
 
@@ -150,12 +150,17 @@ def _pwtt_pseudocolor_renderer(layer):
 
 
 def style_pwtt_raster_layer(layer, damage_threshold: float = 3.3) -> None:
-    """Band 1 pseudocolor matching code/pwtt.py GEE viz; abstract; opacity."""
+    """Band 1 pseudocolor matching code/pwtt.py GEE viz; abstract; opacity.
+
+    The color ramp minimum is set to damage_threshold so that only pixels flagged
+    as damaged (T_statistic ≥ damage_threshold) receive any color.  Pixels below
+    the threshold are transparent — eliminating the yellow sub-threshold noise.
+    """
     if not layer or not layer.isValid():
         return
     layer.setAbstract(pwtt_raster_abstract(damage_threshold))
     if layer.bandCount() >= 1:
-        renderer = _pwtt_pseudocolor_renderer(layer)
+        renderer = _pwtt_pseudocolor_renderer(layer, viz_min=float(damage_threshold))
         layer.setRenderer(renderer)
     # Apply after renderer so QGIS does not reset it; symbology uses full-strength
     # colors and this matches the global layer opacity control.
