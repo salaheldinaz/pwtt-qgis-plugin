@@ -69,6 +69,29 @@ def _is_gee_size_error(exc: Exception) -> bool:
     return "total request size" in str(exc).lower()
 
 
+def _gee_stream_to_file(url: str, dest_path: str, timeout: int = 300) -> None:
+    """Download a GEE pixel URL to *dest_path*, raising RuntimeError with GEE's
+    error message on any HTTP error status (instead of the opaque HTTPError)."""
+    r = requests.get(url, stream=True, timeout=timeout)
+    if not r.ok:
+        try:
+            body = r.json()
+            gee_msg = (
+                body.get("error", {}).get("message", "")
+                or body.get("message", "")
+            )
+        except Exception:
+            gee_msg = ""
+        detail = gee_msg or r.text[:500]
+        raise RuntimeError(
+            f"GEE download failed ({r.status_code}): {detail}"
+        )
+    with open(dest_path, "wb") as f:
+        for chunk in r.iter_content(chunk_size=65536):
+            if chunk:
+                f.write(chunk)
+
+
 def _gdal_merge_tiles(tile_paths: list, output_path: str) -> None:
     """Merge tile GeoTIFFs into *output_path* using a GDAL VRT → Translate pipeline."""
     import os
@@ -375,12 +398,7 @@ class GEEBackend(PWTTBackend):
 
                 fd, tmp_path = tempfile.mkstemp(suffix=".tif", prefix="pwtt_tile_")
                 os.close(fd)
-                r = requests.get(url, stream=True, timeout=300)
-                r.raise_for_status()
-                with open(tmp_path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=65536):
-                        if chunk:
-                            f.write(chunk)
+                _gee_stream_to_file(url, tmp_path)
                 tile_paths.append(tmp_path)
 
             if progress_callback:
@@ -503,12 +521,7 @@ class GEEBackend(PWTTBackend):
         if not _tiled:
             if progress_callback:
                 progress_callback(80, "Downloading…")
-            r = requests.get(url, stream=True, timeout=300)
-            r.raise_for_status()
-            with open(output_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=65536):
-                    if chunk:
-                        f.write(chunk)
+            _gee_stream_to_file(url, output_path)
         if save_timeseries:
             if progress_callback:
                 progress_callback(92, "Computing per-image time series…")
