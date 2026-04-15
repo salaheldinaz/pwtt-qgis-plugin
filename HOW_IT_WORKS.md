@@ -4,7 +4,7 @@ This document describes what the plugin does end-to-end: user inputs, job handli
 
 ## Overview
 
-The plugin compares **Sentinel-1 GRD** VV/VH backscatter in a **pre** window (ending at war start) and a **post** window (from inference start) over your **AOI**, and writes a GeoTIFF (`pwtt_result.tif` or `pwtt_<job_id>.tif`) with **`T_statistic`**, binary **`damage`**, and **`p_value`**. Band 2 is **`T_statistic` > cutoff** (UI default **3.3**, job field `damage_threshold`) on the exported band 1 for every backend.
+The plugin compares **Sentinel-1 GRD** VV/VH backscatter in a **pre** window (ending at war start) and a **post** window (from inference start) over your **AOI**, and writes a GeoTIFF (`pwtt_result.tif` or `pwtt_<job_id>.tif`) with three bands: **`T_statistic`** (band 1), binary **`damage`** (band 2), and **`p_value`** (band 3). **`damage`** is 1 where **`T_statistic` > cutoff** (UI default **3.3**, job field `damage_threshold`), applied to the exported band 1 on every backend.
 
 **openEO** and **Local** share σ⁰ linear radiometry and similar composites/kernels. **GEE** (`gee_pwtt`, upstream [PWTT](https://github.com/oballinger/PWTT)) uses **Lee + log**, **per-orbit** tests merged by the UI **detection method**, **Dynamic World** urban masking, and **focal median** + multi-scale smoothing — so **GEE** diverges more from **openEO/Local** than those two do from each other. See [GEE vs openEO vs Local](#gee-vs-openeo-vs-local-why-results-differ-for-the-same-aoi).
 
@@ -66,7 +66,7 @@ flowchart TD
 4. **On success** — Job status is set to completed; `output_tif` is stored on the job; **`job_info.json`** is written beside the GeoTIFF (parameters, `damage_threshold`, optional backend `processing_details`); the raster (and footprint layers if any) is **added to the current QGIS project**. **`pwtt_job.json`** is also written in the output folder when the job record is saved (same envelope as export/import).
 5. **Jobs dock** — Lists jobs, **Resume** / **Rerun** / **Delete**, export/import job JSON, zip single-job bundles, **View logs**, and progress. **Rerun** clones parameters (including **GEE** method and advanced options when present) into a **new** job id.
 
-**openEO batch jobs:** While running, the log shows a server **batch job id** (`j-…`). The plugin **persists** that id on the job record in `jobs.json` when the backend reports it (for **Resume**). To re-download results from the API you still need that id (or list jobs via the openEO client) within the provider's result retention policy (Copernicus Data Space: **90 days after job completion** as of 2025-05-06; see their announcements).
+**openEO batch jobs:** While running, the log shows a server **batch job id** (`j-…`). The plugin **persists** that id on the job record in `jobs.json` when the backend reports it (for **Resume**). To re-download results from the API you still need that id (or list jobs via the openEO client) within the provider's result retention policy (Copernicus Data Space retains completed job results for a limited period — check their current announcements for the exact window).
 
 **Local cache:** Downloads go to **`<output_dir>/.pwtt_cache`**, not a global folder. If the backend is not Local, that cache is unused.
 
@@ -188,11 +188,11 @@ Important behavior:
    - **Stouffer** (default): weighted Z combination by √df; Bonferroni ×2 for VV/VH.
    - **Max**: maximum *t* across orbits; Bonferroni uses orbit count (original PWTT-style behavior).
    - **Z-test**: latest post-war image vs pre baseline per orbit, then max across orbits.
-   - **Hotelling** / **Mahalanobis**: orbit-wise z-normalization, pooled pre/post composites, joint VV+VH test; Mahalanobis uses an *n*-invariant effect size and a closed-form *p*-value. *(The QGIS download still exports only the three standard bands — see below.)*
+   - **Hotelling** / **Mahalanobis**: orbit-wise z-normalization, pooled pre/post composites, joint VV+VH test; Mahalanobis uses an *n*-invariant effect size and a closed-form *p*-value. *(The QGIS download exports only the three standard bands — `T_statistic`, `damage`, `p_value` — regardless of method; extra EE diagnostic bands are not written to disk.)*
 4. **Dynamic World** “built” mean > 0.1 in the pre window defines an **urban mask**. **Mask before focal median** (default) applies that mask before the focal step; if unchecked, masking happens after focal median.
 5. **Smoothing:** **default** = focal median (10 m, Gaussian) then circular convolutions at 50 / 100 / 150 m with equal weights on those four layers → exported **`T_statistic`**. **focal_only** skips the convolutions (100% weight on the focal-median layer).
 6. **`damage` = 1** where **`T_statistic` > damage_threshold** (UI cutoff, default 3.3) — same logical rule as **openEO** and **Local** on the **exported** band 1.
-7. **getDownloadURL** streams a GeoTIFF with **`bands`: `T_statistic`, `damage`, `p_value`** only. Extra EE image bands (e.g. Z-test diagnostics on Hotelling/Mahalanobis) are **not** included in the file the plugin writes.
+7. **getDownloadURL** streams a GeoTIFF with **`bands`: `T_statistic`, `damage`, `p_value`** only. Extra EE image bands (e.g. intermediate Z-test or Hotelling/Mahalanobis diagnostics) are **not** included in the file the plugin writes.
 
 Very large AOIs may hit GEE download limits; export to Drive may be needed outside this plugin.
 
