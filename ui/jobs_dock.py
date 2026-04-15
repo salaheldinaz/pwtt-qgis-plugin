@@ -530,13 +530,16 @@ class PWTTJobsDock(QDockWidget):
             "If the result GeoTIFF (and footprints) exist on disk, add them to the map"
         )
         self.apply_style_btn.setToolTip(
-            "Re-apply PWTT band-1 pseudocolor (3\u20135) and layer opacity to this job\u2019s "
-            "result raster already in the project (matches layer name or GeoTIFF path)"
+            "Re-apply PWTT band-1 pseudocolor styling to this job\u2019s result raster already "
+            "in the project (matches layer name or GeoTIFF path).\n"
+            "Color ramp: yellow\u2192red\u2192purple from damage_threshold to 5; pixels below "
+            "damage_threshold are transparent. Reads threshold from job_info.json."
         )
         self.apply_style_active_btn.setToolTip(
             "Apply PWTT band-1 pseudocolor styling to the raster layer currently "
-            "selected in the QGIS Layers panel (reads T-statistic cutoff from "
-            "job_info.json damage_threshold if present, otherwise asks)"
+            "selected in the QGIS Layers panel.\n"
+            "Color ramp: yellow\u2192red\u2192purple from damage_threshold to 5; pixels below "
+            "damage_threshold are transparent. Reads threshold from job_info.json if present, otherwise asks."
         )
         self.footprints_btn.setToolTip(
             "Fetch OSM buildings and mean damage (T-stat) per polygon using the job\u2019s result GeoTIFF"
