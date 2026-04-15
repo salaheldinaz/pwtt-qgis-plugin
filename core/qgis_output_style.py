@@ -102,6 +102,7 @@ def _pwtt_manual_color_ramp_shader(viz_min: float = T_STATISTIC_VIZ_MIN):
         ),
     ]
     ramp_fn.setColorRampItemList(items)
+    ramp_fn.setClip(True)
     shader = QgsRasterShader()
     shader.setRasterShaderFunction(ramp_fn)
     return shader
@@ -134,7 +135,7 @@ def _pwtt_pseudocolor_renderer(layer, viz_min: float = T_STATISTIC_VIZ_MIN):
                 Qgis.ShaderInterpolationMethod.Linear,
                 Qgis.ShaderClassificationMethod.Continuous,
                 0,
-                False,
+                True,
             )
         except (AttributeError, TypeError):
             renderer.setShader(_pwtt_manual_color_ramp_shader(viz_min))
