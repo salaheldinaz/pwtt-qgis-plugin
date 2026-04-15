@@ -10,7 +10,7 @@ QGIS plugin implementing the **Pixel-Wise T-Test (PWTT)** algorithm for building
 
 **PWTT (Pixel‑Wise T‑Test)** asks: *did backscatter change a lot between a **baseline** period and a **later** period, in a way that fits damage mapping?* In short: (1) summarise SAR over months **before** your **war / event** date, (2) summarise SAR over months **after** your **inference start** date, (3) compare them per pixel and polarisation to get a **change score** (exported mainly as **`T_statistic`** on band 1), (4) mark **damage** where that score is **above** your cutoff (default **3.3**). It is era‑to‑era comparison, not “damage from a single scene.”
 
-**This QGIS plugin** is the front door: draw an **AOI**, set **dates** and **pre/post month spans**, pick a **backend** (openEO, Google Earth Engine, or local download + NumPy), run in the background, then get a **GeoTIFF** on disk and on the map—plus `job_info.json` and optional footprint layers. The plugin delivers **one raster product** (three bands: `T_statistic`, `damage`, `p_value`), not a per‑acquisition time‑series chart; listing SAR acquisition times is a separate catalog / EE step if you need it.
+**This QGIS plugin** is the front door: draw an **AOI**, set **dates** and **pre/post month spans**, pick a **backend** (openEO, Google Earth Engine, or local download + NumPy), run in the background, then get a **GeoTIFF** on disk and on the map—plus `job_info.json`, optional footprint layers, and (for GEE/Local) per-acquisition **TimeSeries sidecars**. The main raster product has three bands: `T_statistic`, `damage`, `p_value`; the TimeSeries chart in the Jobs dock shows per-acquisition, orbit-normalized z-scores when a sidecar was written.
 
 **How the analysis works (same idea on every backend; recipes differ):** restrict Sentinel‑1 GRD to your AOI and pre/post windows → **aggregate** many acquisitions into summaries (means, variances, counts—or orbit‑wise steps on GEE) → run a **statistical comparison** (pooled *t*‑style on openEO/Local; GEE adds options like per‑orbit combination, Lee filter, log scale, urban mask, focal smoothing—see [HOW_IT_WORKS.md](HOW_IT_WORKS.md)) → **smooth** spatially to tame speckle → **damage** = **`T_statistic` > threshold** on the exported band 1.
 
@@ -73,8 +73,8 @@ The plugin installs missing **pip** packages into **`PWTT/deps/`** under your [Q
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| War start date | 2023-10-07 | Start of the conflict (pre-war window ends at this date). |
-| Inference start date | 2024-07-01 | Start of the post-event window; must be ≥ war start. |
+| War start date | *(example: 2023-10-07)* | Start of the conflict or event; the pre-war window ends at this date. |
+| Inference start date | *(example: 2024-07-01)* | Start of the post-event assessment window; must be ≥ war start. |
 | Pre-war interval | 12 months | Length of the pre-event reference period before war start. |
 | Post-war interval | 2 months | Length of the post-event assessment window after inference start. |
 | T-statistic cutoff | 3.3 | Binary **damage** (band 2) where **`T_statistic` > cutoff** on all backends. Higher → stricter (fewer pixels flagged); not a probability. |
@@ -111,6 +111,11 @@ The plugin installs missing **pip** packages into **`PWTT/deps/`** under your [Q
   - With job id: `pwtt_<job_id>_footprints_current.gpkg`, `_war_start.gpkg`, `_infer_start.gpkg` (depending on which footprint sources you selected).
   - Without job id: `pwtt_footprints_current.gpkg`, etc.
 
+- **TimeSeries sidecars** (GEE and Local only, when available) — written beside the GeoTIFF after a successful run:
+  - `pwtt_<job_id>_timeseries.json` — per-acquisition, orbit-normalized z-scores for VV and VH; read by the **TimeSeries chart** dialog in the Jobs dock.
+  - `pwtt_<job_id>_timeseries.csv` — same data in CSV format (compatible with Earth Engine Code Editor export).
+  - If no sidecar exists (e.g. openEO jobs), the TimeSeries chart cannot be reconstructed from the GeoTIFF alone.
+
 ### Reading colors on the map
 
 QGIS often opens the GeoTIFF as **multiband color** (band 1 → red, band 2 → green, band 3 → blue). That **RGB blend is not** a single “damage heat map”: it mixes **T-statistic**, **binary damage (0/1)**, and **p-value**, so a given hue does **not** map one-to-one to “how damaged.”
@@ -131,11 +136,7 @@ Pixels with `T_statistic` **well below** your symbology minimum may render as tr
 
 ## How it works
 
-**Full pipeline (all backends, jobs, outputs):** [HOW_IT_WORKS.md](HOW_IT_WORKS.md).
-
-Pre/post **months** define **date ranges**, not a dense “one image per day” series. Sentinel-1 **revisits** your AOI on a **repeat cycle**; only **actual GRD acquisitions** in those ranges are used. **openEO** builds temporal composites (mean / variance / count) for a pooled *t*-style statistic; **Local** uses up to **N** pre and **N** post scenes (default **N = 24**, max **80**, via `PWTT/local_max_scenes_per_period`); **GEE** uses all matching passes **per orbit**. See [HOW_IT_WORKS.md](HOW_IT_WORKS.md#sentinel-1-grd-what-data-you-actually-get).
-
-Conceptually, PWTT compares Sentinel-1 VV/VH **before** and **after** conflict using a **pooled *t*-test–style** signal plus **spatial smoothing**. **openEO** and **Local** (this plugin) share **σ⁰ linear** radiometry and similar composite/kernel logic; **GEE** uses **Lee + log** on `COPERNICUS/S1_GRD_FLOAT`, **per-orbit** tests merged by a selectable **method**, **Dynamic World** urban masking, and **focal median** (optional multi-scale follow-up). All backends export **`damage`** as **`T_statistic` > cutoff**, but **GEE**’s **`T_statistic`** is built on that pipeline — so **GEE** can diverge more from **openEO/Local** than those two diverge from each other. See [HOW_IT_WORKS.md](HOW_IT_WORKS.md#gee-vs-openeo-vs-local-why-results-differ-for-the-same-aoi).
+Full pipeline details — backends, temporal windows, GEE vs openEO vs Local differences, output bands, jobs, code map: **[HOW_IT_WORKS.md](HOW_IT_WORKS.md)**.
 
 Paper and method background: [PWTT paper (arXiv:2405.06323)](https://arxiv.org/pdf/2405.06323).
 
