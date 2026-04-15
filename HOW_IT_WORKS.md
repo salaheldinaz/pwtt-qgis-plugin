@@ -41,6 +41,25 @@ Default **multiband RGB** (R=band 1, G=band 2, B=band 3) does **not** give a lit
 
 ## Plugin flow (orchestration)
 
+### Flow chart
+
+```mermaid
+flowchart TD
+    A[Controls dock<br/>set params + Run] --> B[Create job record<br/>PWTT/jobs.json]
+    B --> C[PWTTRunTask starts<br/>authenticate + backend.run]
+    C --> D{Backend path}
+    D --> E[openEO batch<br/>submit + monitor + download]
+    D --> F[Local processing<br/>download GRD + NumPy/rasterio]
+    D --> G[GEE processing<br/>gee_pwtt + getDownloadURL]
+    E --> H[Write outputs<br/>pwtt_*.tif + job_info.json + pwtt_job.json]
+    F --> H
+    G --> H
+    H --> I[Load layers in QGIS<br/>raster + optional footprints]
+    I --> J[Jobs dock actions<br/>resume/rerun/export/logs]
+```
+
+**How to read the chart:** left to right is lifecycle order. The split at **Backend path** means the same job envelope goes through one compute backend only (**openEO**, **Local**, or **GEE**) and then converges to the same output contract (`T_statistic`, `damage`, `p_value`) and the same Jobs dock controls.
+
 1. **Controls dock** — You set parameters and click **Run**. With **Google Earth Engine** selected, **Detection method** and collapsible **Advanced GEE options** appear; other backends ignore those fields.
 2. **Job record** — A job is created and appended to the persistent job list (`PWTT/jobs.json` under the active profile’s [QGIS settings directory](https://docs.qgis.org/latest/en/docs/user_manual/introduction/qgis_configuration.html#user-profiles) from `QgsApplication.qgisSettingsDirPath()`—**not** inside the `.qgz` project file).
 3. **`PWTTRunTask` (QgsTask)** — Runs in the background: creates the output directory if needed, calls `backend.authenticate()` then `backend.run(...)` with `output_path = <output_dir>/pwtt_<job_id>.tif` when a job id exists, otherwise `pwtt_result.tif`.
@@ -77,6 +96,47 @@ The plugin does **not** use “one SAR image per calendar day.” **Sentinel-1 G
 | **GEE** | Image collections include **all** GRD images in the filtered date range that match AOI and mode; processing is **per relative orbit**, then combined (see below). |
 
 So: you are always working from **real GRD granules in your chosen months**, not synthetic “all days before/after,” and **Local** deliberately **caps** how many granules enter the stack (tunable) to bound disk and runtime while tracking openEO more closely when *N* is large.
+
+---
+
+## TimeSeries chart (per-acquisition z-scores)
+
+The **TimeSeries chart** is a separate diagnostic view from the final raster. It plots **per-acquisition, orbit-normalized z-scores** for **VV** and **VH** through time, while the GeoTIFF bands are the aggregated detection output (`T_statistic`, `damage`, `p_value`).
+
+How it works in this plugin:
+
+1. After a successful **GEE** or **Local** run, the backend can write sidecars next to `pwtt_*.tif`:
+   - `pwtt_<job_id>_timeseries.json` (canonical record used by QGIS)
+   - `pwtt_<job_id>_timeseries.csv` (EE Code Editor-compatible export)
+2. The chart dialog reads the JSON sidecar and renders a scatter plot:
+   - **x-axis:** acquisition date
+   - **y-axis:** orbit-normalized z-score
+   - **series:** VV and VH
+   - **reference lines:** dashed **±2.576** (`z_lower_99`, `z_upper_99`, ~99% two-sided normal threshold)
+   - **marker:** optional vertical **war start** line
+3. Tooltips show date, orbit, pass direction, period (`pre`/`post`), and both z-scores.
+
+Important behavior:
+
+- If no sidecar exists, the chart cannot be reconstructed from `pwtt_*.tif` alone (the raster stores final aggregated bands, not per-acquisition points).
+- **openEO** jobs do not provide the same per-acquisition sidecar path in this plugin, so this chart is primarily available for **GEE/Local** outputs that wrote sidecars.
+
+---
+
+## Terms (VV, VH, and related SAR jargon)
+
+| Term | Meaning in this plugin |
+|------|------------------------|
+| **VV** | Co-polarized Sentinel-1 channel: transmit **V**ertical, receive **V**ertical. |
+| **VH** | Cross-polarized channel: transmit **V**ertical, receive **H**orizontal. |
+| **Backscatter (σ⁰ / sigma naught)** | Radar return intensity normalized for geometry; main signal used for change scoring. |
+| **Linear vs log radiometry** | openEO/Local paths here are described as linear σ⁰-style; GEE path applies Lee+`log()` in its pipeline. |
+| **Relative orbit** | Sentinel-1 track index used by GEE pipeline to compute per-orbit statistics before combining. |
+| **Pass direction** | Ascending (south→north) or descending (north→south) overpass orientation. |
+| **z-score** | Standardized deviation from baseline (0 means baseline-like; larger absolute value means stronger anomaly). |
+| **`T_statistic`** | Final per-pixel change score exported in GeoTIFF band 1 (not the same object as per-acquisition z-score points). |
+| **`damage`** | Binary mask in band 2 where `T_statistic > damage_threshold`. |
+| **`p_value`** | Confidence-style band in band 3; exact computation differs by backend pipeline. |
 
 ---
 

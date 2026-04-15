@@ -11,9 +11,10 @@ from .utils import wkt_to_bbox
 
 # Earth Engine getDownloadURL / thumbnail pipeline cap (bytes), per API error text.
 GEE_GETDOWNLOAD_MAX_BYTES = 50331648
-# EE's "Total request size" is often ~10–15% above a naive WGS84 bbox × scale pixel
-# count (projection, alignment). All client-side fit checks use this effective budget.
-GEE_GETDOWNLOAD_SIZE_HEADROOM = 1.15
+# EE's "Total request size" can be up to ~40% above a naive WGS84 bbox × scale pixel
+# count (projection snapping, tile alignment, GEE internal padding).
+# All client-side fit checks use this effective budget.
+GEE_GETDOWNLOAD_SIZE_HEADROOM = 1.5
 GEE_GETDOWNLOAD_EFFECTIVE_MAX_BYTES = int(
     GEE_GETDOWNLOAD_MAX_BYTES / GEE_GETDOWNLOAD_SIZE_HEADROOM
 )
@@ -61,6 +62,38 @@ def gee_precheck_getdownload_url(aoi_wkt: str) -> Tuple[bool, str]:
         f"Shrink the AOI or use another backend (e.g. Local or openEO)."
     )
     return False, msg
+
+
+def _is_gee_size_error(exc: Exception) -> bool:
+    """Return True when *exc* is a GEE 'request too large' error."""
+    return "total request size" in str(exc).lower()
+
+
+def _gdal_merge_tiles(tile_paths: list, output_path: str) -> None:
+    """Merge tile GeoTIFFs into *output_path* using a GDAL VRT → Translate pipeline."""
+    import os
+    from osgeo import gdal
+    gdal.UseExceptions()
+    vrt_path = output_path + ".tmp.vrt"
+    try:
+        vrt_ds = gdal.BuildVRT(vrt_path, tile_paths)
+        if vrt_ds is None:
+            raise RuntimeError("GDAL BuildVRT returned None — check tile paths")
+        vrt_ds = None  # flush / close before Translate reads it
+        out_ds = gdal.Translate(
+            output_path,
+            vrt_path,
+            format="GTiff",
+            creationOptions=["COMPRESS=DEFLATE", "TILED=YES"],
+        )
+        if out_ds is None:
+            raise RuntimeError("GDAL Translate returned None")
+        out_ds = None
+    finally:
+        try:
+            os.unlink(vrt_path)
+        except OSError:
+            pass
 
 
 class GEEBackend(PWTTBackend):
@@ -287,6 +320,79 @@ class GEEBackend(PWTTBackend):
             },
         )
 
+    def _run_tiled(
+        self,
+        ee,
+        gee_pwtt,
+        bbox: tuple,
+        output_path: str,
+        progress_callback,
+        detect_kwargs: dict,
+    ) -> None:
+        """Split the AOI into sub-tiles, download each, and merge into output_path.
+
+        Called automatically from run() when getDownloadURL returns a size error.
+        Progress is reported in the 60–89 % band so the caller can append
+        timeseries (92 %) and Done (95 %) after this returns.
+        """
+        import os
+        import tempfile
+        from . import aoi_splitter
+
+        west, south, east, north = bbox
+        sub_tiles = aoi_splitter.split_bbox(
+            [west, south, east, north], "gee", overlap_deg=0.01
+        )
+        n = len(sub_tiles)
+        if progress_callback:
+            progress_callback(60, f"AOI too large — splitting into {n} sub-tile(s)…")
+
+        tile_paths: list = []
+        try:
+            for i, tile_bbox in enumerate(sub_tiles):
+                tw, ts, te, tn = tile_bbox
+                pct = 60 + int(28 * i / n)
+                if progress_callback:
+                    progress_callback(pct, f"Downloading sub-tile {i + 1}/{n}…")
+
+                tile_geom = ee.Geometry.Rectangle([tw, ts, te, tn])
+                tile_aoi = ee.FeatureCollection([ee.Feature(tile_geom)])
+                tile_image = gee_pwtt.detect_damage(tile_aoi, **detect_kwargs)
+
+                try:
+                    url = tile_image.getDownloadURL(
+                        {
+                            "region": tile_geom,
+                            "scale": 10,
+                            "format": "GEO_TIFF",
+                            "bands": ["T_statistic", "damage", "p_value"],
+                        }
+                    )
+                except Exception as e:
+                    raise RuntimeError(
+                        f"GEE getDownloadURL failed for sub-tile {i + 1}/{n}: {e}"
+                    ) from e
+
+                fd, tmp_path = tempfile.mkstemp(suffix=".tif", prefix="pwtt_tile_")
+                os.close(fd)
+                r = requests.get(url, stream=True, timeout=300)
+                r.raise_for_status()
+                with open(tmp_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=65536):
+                        if chunk:
+                            f.write(chunk)
+                tile_paths.append(tmp_path)
+
+            if progress_callback:
+                progress_callback(89, f"Merging {n} sub-tile(s)…")
+            _gdal_merge_tiles(tile_paths, output_path)
+        finally:
+            for tp in tile_paths:
+                try:
+                    os.unlink(tp)
+                except OSError:
+                    pass
+
     def run(
         self,
         aoi_wkt: str,
@@ -355,6 +461,7 @@ class GEEBackend(PWTTBackend):
 
         if progress_callback:
             progress_callback(60, "Requesting download URL…")
+        _tiled = False
         try:
             url = image.getDownloadURL(
                 {
@@ -365,16 +472,43 @@ class GEEBackend(PWTTBackend):
                 }
             )
         except Exception as e:
-            raise RuntimeError(f"GEE getDownloadURL failed (AOI may be too large): {e}") from e
+            if _is_gee_size_error(e):
+                _tiled = True
+                self._run_tiled(
+                    ee=ee,
+                    gee_pwtt=gee_pwtt,
+                    bbox=(west, south, east, north),
+                    output_path=output_path,
+                    progress_callback=progress_callback,
+                    detect_kwargs=dict(
+                        inference_start=inference_start,
+                        war_start=war_start,
+                        pre_interval=pre_interval,
+                        post_interval=post_interval,
+                        viz=False,
+                        export=False,
+                        damage_threshold=damage_threshold,
+                        method=method,
+                        ttest_type=ttest_type,
+                        smoothing=smoothing,
+                        mask_before_smooth=mask_before_smooth,
+                        lee_mode=lee_mode,
+                    ),
+                )
+            else:
+                raise RuntimeError(
+                    f"GEE getDownloadURL failed (AOI may be too large): {e}"
+                ) from e
 
-        if progress_callback:
-            progress_callback(80, "Downloading…")
-        r = requests.get(url, stream=True, timeout=300)
-        r.raise_for_status()
-        with open(output_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=65536):
-                if chunk:
-                    f.write(chunk)
+        if not _tiled:
+            if progress_callback:
+                progress_callback(80, "Downloading…")
+            r = requests.get(url, stream=True, timeout=300)
+            r.raise_for_status()
+            with open(output_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=65536):
+                    if chunk:
+                        f.write(chunk)
         if save_timeseries:
             if progress_callback:
                 progress_callback(92, "Computing per-image time series…")
