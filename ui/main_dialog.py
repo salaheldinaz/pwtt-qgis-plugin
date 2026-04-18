@@ -800,7 +800,7 @@ class PWTTControlsDock(QDockWidget):
         self.war_start = QDateEdit()
         self.war_start.setCalendarPopup(True)
         self.war_start.setDate(QDate(2023, 10, 7))
-        params_layout.addRow("War start date:", self.war_start)
+        params_layout.addRow("War/Event start date:", self.war_start)
         params_layout.addRow(self._hint(
             "When hostilities began. Imagery before this date becomes the undamaged baseline."
         ))
@@ -810,25 +810,25 @@ class PWTTControlsDock(QDockWidget):
         self.inference_start.setDate(QDate(2024, 7, 1))
         params_layout.addRow("Inference start date:", self.inference_start)
         params_layout.addRow(self._hint(
-            "Start of the window to assess damage in. Must be on or after war start. "
+            "Start of the window to assess damage in. Must be on or after war/event start. "
             "Move this forward to assess damage at a later point in the conflict."
         ))
 
         self.pre_interval = QSpinBox()
         self.pre_interval.setRange(1, 60)
         self.pre_interval.setValue(12)
-        params_layout.addRow("Pre-war interval (months):", self.pre_interval)
+        params_layout.addRow("Pre-war/event interval (months):", self.pre_interval)
         params_layout.addRow(self._hint(
-            "How many months before war start to collect baseline imagery. "
-            "12 months gives a stable reference; use fewer if pre-war data is scarce."
+            "How many months before war/event start to collect baseline imagery. "
+            "12 months gives a stable reference; use fewer if pre-war/event data is scarce."
         ))
 
         self.post_interval = QSpinBox()
         self.post_interval.setRange(1, 24)
         self.post_interval.setValue(2)
-        params_layout.addRow("Post-war interval (months):", self.post_interval)
+        params_layout.addRow("Post-war/event interval (months):", self.post_interval)
         params_layout.addRow(self._hint(
-            "How many months of post-war imagery to collect from inference start. "
+            "How many months of post-war/event imagery to collect from inference start. "
             "1\u20132 months is typical; longer windows capture more passes but may mix damage events."
         ))
 
@@ -843,7 +843,7 @@ class PWTTControlsDock(QDockWidget):
         _fp_opts_layout.setSpacing(2)
         self.fp_current_osm = QCheckBox("Current OSM buildings")
         self.fp_current_osm.setChecked(True)
-        self.fp_historical_war_start = QCheckBox("Historical OSM at war start date")
+        self.fp_historical_war_start = QCheckBox("Historical OSM at war/event start date")
         self.fp_historical_war_start.setChecked(False)
         self.fp_historical_inference_start = QCheckBox("Historical OSM at inference start date")
         self.fp_historical_inference_start.setChecked(False)
@@ -1010,7 +1010,7 @@ class PWTTControlsDock(QDockWidget):
             "Original PWTT behavior."
         ),
         "ztest": (
-            "Compares the single most-recent post-war image to the pre-war baseline. "
+            "Compares the single most-recent post-war/event image to the pre-war/event baseline. "
             "Useful for near-real-time monitoring."
         ),
         "hotelling": (
@@ -2177,13 +2177,13 @@ class PWTTControlsDock(QDockWidget):
         wsd = self.war_start.date()
         insd = self.inference_start.date()
         lines.append(
-            f"War start: {format_ymd_display(wsd.year(), wsd.month(), wsd.day())}"
+            f"War/event start: {format_ymd_display(wsd.year(), wsd.month(), wsd.day())}"
         )
         lines.append(
             f"Inference start: {format_ymd_display(insd.year(), insd.month(), insd.day())}"
         )
-        lines.append(f"Pre-war interval: {self.pre_interval.value()} month(s)")
-        lines.append(f"Post-war interval: {self.post_interval.value()} month(s)")
+        lines.append(f"Pre-war/event interval: {self.pre_interval.value()} month(s)")
+        lines.append(f"Post-war/event interval: {self.post_interval.value()} month(s)")
         lines.append(
             f"Damage mask cutoff: T-statistic > {self.damage_threshold_spin.value():.2f}"
         )
@@ -2193,7 +2193,7 @@ class PWTTControlsDock(QDockWidget):
             if self.fp_current_osm.isChecked():
                 fp_labels.append("current OSM buildings")
             if self.fp_historical_war_start.isChecked():
-                fp_labels.append("historical OSM at war start")
+                fp_labels.append("historical OSM at war/event start")
             if self.fp_historical_inference_start.isChecked():
                 fp_labels.append("historical OSM at inference start")
             if not fp_labels:
@@ -2233,7 +2233,7 @@ class PWTTControlsDock(QDockWidget):
         if inf < war:
             QMessageBox.warning(
                 self, "PWTT",
-                "Inference start date should be on or after war start date.",
+                "Inference start date should be on or after war/event start date.",
             )
             return
 

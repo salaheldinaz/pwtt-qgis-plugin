@@ -243,7 +243,7 @@ def ttest(s1, inference_start, war_start, pre_interval, post_interval, ttest_typ
 
 
 def ztest(s1, inference_start, war_start, pre_interval):
-    """Z-test: compare the single latest post-event image to the pre-war baseline.
+    """Z-test: compare the single latest post-war/event image to the pre-war/event baseline.
     z = |x_latest - mean_pre| / sd_pre, per pixel.
     """
     inference_start = ee.Date(inference_start)
@@ -385,7 +385,7 @@ def compute_orbit_normalized_timeseries(
     """Per-acquisition orbit-normalized z-score time series over the AOI.
 
     For each Sentinel-1 image in [war_start - pre_interval, inference_start + post_interval]
-    covering the AOI, z-normalize against its own orbit's pre-war baseline (mean/std in
+    covering the AOI, z-normalize against its own orbit's pre-war/event baseline (mean/std in
     log-backscatter space) and reduce to the AOI mean. Produces the same series as the
     Earth Engine Code Editor 'orbit-normalized z-scores' chart.
 
@@ -499,7 +499,7 @@ def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interva
         if inf < war:
             warnings.warn(
                 f"inference_start ({inference_start}) is before war_start ({war_start}). "
-                "The post-war period will use pre-war imagery."
+                "The post-war/event period will use pre-war/event imagery."
             )
 
     inference_start = ee.Date(inference_start)
@@ -543,7 +543,7 @@ def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interva
 
     if method in ('hotelling', 'mahalanobis'):
         # Normalize per orbit, pool across orbits, then Hotelling T² once.
-        # Step 1: For each orbit, z-score all images by that orbit's pre-war stats
+        # Step 1: For each orbit, z-score all images by that orbit's pre-war/event stats
         def normalize_orbit_images(orbit):
             s1 = make_orbit_s1(orbit)
             pre = s1.filterDate(
@@ -642,7 +642,7 @@ def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interva
         n_pre = pre_n.rename('n_pre')
         n_post = post_n.rename('n_post')
 
-        # Z-test on latest post-war image (data is already z-normalized per orbit)
+        # Z-test on latest post-war/event image (data is already z-normalized per orbit)
         latest_post = all_normalized.filterDate(
             inference_start, inference_start.advance(post_interval, 'month')
         ).sort('system:time_start', False).mosaic()

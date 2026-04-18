@@ -8,7 +8,7 @@ QGIS plugin implementing the **Pixel-Wise T-Test (PWTT)** algorithm for building
 
 **SAR (Sentinel‑1)** is radar from space: the satellite measures microwave **backscatter** from the ground. Built structures affect that signal. The plugin uses two polarisations, **VV** and **VH**, as complementary views of the same place. You do not get a tidy daily photo—only **individual overpasses** when Sentinel‑1 covers your area.
 
-**PWTT (Pixel‑Wise T‑Test)** asks: *did backscatter change a lot between a **baseline** period and a **later** period, in a way that fits damage mapping?* In short: (1) summarise SAR over months **before** your **war / event** date, (2) summarise SAR over months **after** your **inference start** date, (3) compare them per pixel and polarisation to get a **change score** (exported mainly as **`T_statistic`** on band 1), (4) mark **damage** where that score is **above** your cutoff (default **3.3**). It is era‑to‑era comparison, not “damage from a single scene.”
+**PWTT (Pixel‑Wise T‑Test)** asks: *did backscatter change a lot between a **baseline** period and a **later** period, in a way that fits damage mapping?* In short: (1) summarise SAR over months **before** your **war/event** date, (2) summarise SAR over months **after** your **inference start** date, (3) compare them per pixel and polarisation to get a **change score** (exported mainly as **`T_statistic`** on band 1), (4) mark **damage** where that score is **above** your cutoff (default **3.3**). It is era‑to‑era comparison, not “damage from a single scene.”
 
 **This QGIS plugin** is the front door: draw an **AOI**, set **dates** and **pre/post month spans**, pick a **backend** (openEO, Google Earth Engine, or local download + NumPy), run in the background, then get a **GeoTIFF** on disk and on the map—plus `job_info.json`, optional footprint layers, and (for GEE/Local) per-acquisition **TimeSeries sidecars**. The main raster product has three bands: `T_statistic`, `damage`, `p_value`; the TimeSeries chart in the Jobs dock shows per-acquisition, orbit-normalized z-scores when a sidecar was written.
 
@@ -73,10 +73,10 @@ The plugin installs missing **pip** packages into **`PWTT/deps/`** under your [Q
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| War start date | *(example: 2023-10-07)* | Start of the conflict or event; the pre-war window ends at this date. |
-| Inference start date | *(example: 2024-07-01)* | Start of the post-event assessment window; must be ≥ war start. |
-| Pre-war interval | 12 months | Length of the pre-event reference period before war start. |
-| Post-war interval | 2 months | Length of the post-event assessment window after inference start. |
+| War/Event start date | *(example: 2023-10-07)* | Start of the conflict or event; the pre-war/event window ends at this date. |
+| Inference start date | *(example: 2024-07-01)* | Start of the post-event assessment window; must be ≥ war/event start. |
+| Pre-war/event interval | 12 months | Length of the pre-event reference period before war/event start. |
+| Post-war/event interval | 2 months | Length of the post-event assessment window after inference start. |
 | T-statistic cutoff | 3.3 | Binary **damage** (band 2) where **`T_statistic` > cutoff** on all backends. Higher → stricter (fewer pixels flagged); not a probability. |
 | GEE detection method | Stouffer | **GEE only.** Stouffer (default), Max, Z-test, Hotelling T², or Mahalanobis — how per-orbit tests are combined. |
 | GEE advanced options | (see UI) | **GEE only.** Welch vs pooled *t*-test; default vs focal-only smoothing; urban mask before/after focal median; Lee per-image vs composite. Stored on jobs and **Rerun**. |
@@ -85,9 +85,9 @@ The plugin installs missing **pip** packages into **`PWTT/deps/`** under your [Q
 1. Open **PWTT — Damage Detection** from the **PWTT** toolbar or **Plugins → PWTT**. Other PWTT docks (toggle from the toolbar): **Jobs**, **Job log**, **openEO Jobs**, **GRD staging** (CDSE offline ordering).
 2. Select a **processing backend** and enter its credentials. If imports fail, use **Install Dependencies** in this panel.
 3. Define the **AOI**: **Draw rectangle on map**, or enter bounds and **Set AOI from coordinates**. **Hide on map** / **Show on map** only toggles the orange overlay; the stored rectangle is unchanged.
-4. Set **War start date** and **Inference start date** (inference ≥ war start).
-5. Set **Pre-war interval** and **Post-war interval** (months).
-6. Optionally enable **Include building footprints** and choose one or more snapshot types: current OSM, historical at war start, and/or historical at inference start ([Overpass API](https://overpass-api.de/)). Each selection becomes a separate GeoPackage layer.
+4. Set **War/Event start date** and **Inference start date** (inference ≥ war/event start).
+5. Set **Pre-war/event interval** and **Post-war/event interval** (months).
+6. Optionally enable **Include building footprints** and choose one or more snapshot types: current OSM, historical at war/event start, and/or historical at inference start ([Overpass API](https://overpass-api.de/)). Each selection becomes a separate GeoPackage layer.
 7. Set **Damage mask (T-statistic cutoff)** if you want something other than the default **3.3**. Higher values flag **fewer** pixels (stricter); this is a **test-statistic** cutoff, not a probability. Binary **damage** (band 2) is **`T_statistic` > cutoff** on the exported raster for every backend; **GEE** still builds **`T_statistic`** differently from openEO/Local — see [HOW_IT_WORKS.md](HOW_IT_WORKS.md#gee-vs-openeo-vs-local-why-results-differ-for-the-same-aoi).
 8. For **Google Earth Engine** only: choose **Detection method (GEE only)** (default **Stouffer**); expand **Advanced options** for **T-test type**, **Smoothing**, **Mask urban pixels before focal median**, and **Lee filter mode**.
 9. For **Google Earth Engine** only, you can check **Open interactive map in browser** (needs **geemap** in the QGIS Python environment) for a quick HTML preview before the GeoTIFF downloads.

@@ -544,7 +544,7 @@ class GEEBackend(PWTTBackend):
                         inference_start=inference_start,
                         pre_interval_months=pre_interval,
                         post_interval_months=post_interval,
-                        normalization="per-orbit z-score vs pre-war baseline (mean/std, log-backscatter)",
+                        normalization="per-orbit z-score vs pre-war/event baseline (mean/std, log-backscatter)",
                         series=series,
                     )
                     timeseries_sidecar.write_sidecars(output_path, payload)

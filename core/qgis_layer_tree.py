@@ -56,7 +56,7 @@ def pwtt_damage_layer_name(
 
 _FOOTPRINT_SOURCE_LABELS = {
     "current_osm": "OSM",
-    "historical_war_start": "OSM @ war start",
+    "historical_war_start": "OSM @ war/event start",
     "historical_inference_start": "OSM @ inference start",
 }
 
