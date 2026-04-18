@@ -10,4 +10,5 @@ __pycache__/
 .cursor/
 .pytest_cache/
 .worktrees/
-docs/
+docs/superpowers/
+docs/blog/
