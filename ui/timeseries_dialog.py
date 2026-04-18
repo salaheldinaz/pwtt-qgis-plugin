@@ -312,7 +312,7 @@ class _TimeSeriesChart(QWidget):
         px = self._x_to_px(self._war_start, rect)
         painter.drawLine(QPointF(px, rect.top()), QPointF(px, rect.bottom()))
         fm = QFontMetrics(painter.font())
-        label = f"war start {self._war_start.strftime('%Y-%m-%d')}"
+        label = f"war/event start {self._war_start.strftime('%Y-%m-%d')}"
         painter.drawText(QPointF(px + 4, rect.top() + fm.ascent()), label)
 
     def _draw_points(self, painter: QPainter, rect: QRectF):
@@ -455,7 +455,7 @@ class PWTTTimeSeriesDialog(QDialog):
         if backend == "openeo":
             msg = (
                 "Per-image time series is not available for openEO jobs.\n\n"
-                "The openEO backend pools pre- and post-war images into composites, "
+                "The openEO backend pools pre- and post-war/event images into composites, "
                 "so there is no per-acquisition signal to chart."
             )
         else:

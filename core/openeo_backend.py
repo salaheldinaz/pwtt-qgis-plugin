@@ -257,11 +257,11 @@ class OpenEOBackend(PWTTBackend):
 
         # --- Load and compute t-values per polarisation ---
         if progress_callback:
-            progress_callback(5, f"Loading pre-war collection ({pre_start} to {war_start})…")
+            progress_callback(5, f"Loading pre-war/event collection ({pre_start} to {war_start})…")
         t_vv = _load_and_ttest("VV")
 
         if progress_callback:
-            progress_callback(12, f"Loading post-war collection ({inference_start} to {post_end})…")
+            progress_callback(12, f"Loading post-war/event collection ({inference_start} to {post_end})…")
         t_vh = _load_and_ttest("VH")
 
         # --- Combine polarisations: max(t_VV, t_VH) ---

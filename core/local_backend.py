@@ -504,7 +504,7 @@ class LocalBackend(PWTTBackend):
             "local_max_scenes_per_period": max_per_period,
         }
 
-        emit(5, "Searching pre-war products…")
+        emit(5, "Searching pre-war/event products…")
 
         if source == LOCAL_SOURCE_CDSE:
             pre_products = search_s1_grd(
@@ -515,7 +515,7 @@ class LocalBackend(PWTTBackend):
                 max_results=80,
                 log=job_log,
             )
-            emit(10, "Searching post-war products…")
+            emit(10, "Searching post-war/event products…")
             post_products = search_s1_grd(
                 self._token,
                 aoi_wkt,
@@ -527,7 +527,7 @@ class LocalBackend(PWTTBackend):
         elif source == LOCAL_SOURCE_ASF:
             from .asf_downloader import search_s1_grd_asf
 
-            emit(5, "Searching pre-war products…")
+            emit(5, "Searching pre-war/event products…")
             pre_products = search_s1_grd_asf(
                 self._asf_session,
                 aoi_wkt,
@@ -536,7 +536,7 @@ class LocalBackend(PWTTBackend):
                 max_results=80,
                 log=job_log,
             )
-            emit(10, "Searching post-war products…")
+            emit(10, "Searching post-war/event products…")
             post_products = search_s1_grd_asf(
                 self._asf_session,
                 aoi_wkt,
@@ -548,7 +548,7 @@ class LocalBackend(PWTTBackend):
         else:
             from .pc_downloader import search_s1_grd_pc
 
-            emit(5, "Searching pre-war products…")
+            emit(5, "Searching pre-war/event products…")
             pre_products = search_s1_grd_pc(
                 self._pc_client,
                 aoi_wkt,
@@ -557,7 +557,7 @@ class LocalBackend(PWTTBackend):
                 max_results=80,
                 log=job_log,
             )
-            emit(10, "Searching post-war products…")
+            emit(10, "Searching post-war/event products…")
             post_products = search_s1_grd_pc(
                 self._pc_client,
                 aoi_wkt,
@@ -795,7 +795,7 @@ class LocalBackend(PWTTBackend):
                     f"[{loaded}/{max_per_period}]"
                 )
 
-        emit(12, "Downloading pre- and post-war scenes…")
+        emit(12, "Downloading pre- and post-war/event scenes…")
 
         loader = load_products_pc if source == LOCAL_SOURCE_PC else load_products_safe
 
@@ -970,7 +970,7 @@ class LocalBackend(PWTTBackend):
         post_interval: int,
         job_id: str,
     ) -> None:
-        """Pool pre-war means, compute VV/VH z-scores per scene, write sidecars.
+        """Pool pre-war/event means, compute VV/VH z-scores per scene, write sidecars.
 
         Local backend pools all orbits into one composite, so normalization here
         is pooled (not per-orbit) — the JSON records this explicitly.
@@ -1043,7 +1043,7 @@ class LocalBackend(PWTTBackend):
             pre_interval_months=pre_interval,
             post_interval_months=post_interval,
             normalization=(
-                "pooled z-score vs pre-war baseline (Local backend pools orbits; "
+                "pooled z-score vs pre-war/event baseline (Local backend pools orbits; "
                 "mean/std over σ⁰ AOI means)"
             ),
             series=series,
