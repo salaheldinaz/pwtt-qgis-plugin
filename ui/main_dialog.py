@@ -1408,7 +1408,12 @@ class PWTTControlsDock(QDockWidget):
         }
         self._add_to_queue(aoi_entry)
 
-    def _add_tile_aoi_to_queue(self, tile_bbox: list, tile_index: int) -> None:
+    def _add_tile_aoi_to_queue(
+        self,
+        tile_bbox: list,
+        tile_index: int,
+        name_prefix: str = "Tile",
+    ) -> None:
         """Create a tmp_ AOI entry from a tile bbox and add it to the queue."""
         import uuid as _uuid
         west, south, east, north = tile_bbox
@@ -1416,15 +1421,82 @@ class PWTTControlsDock(QDockWidget):
         geom = QgsGeometry.fromRect(rect)
         wkt = geom.asWkt()
         aoi_id = "tmp_" + _uuid.uuid4().hex[:8]
+        prefix = name_prefix if name_prefix else "Tile"
         aoi_entry = {
             "id": aoi_id,
-            "name": f"Tile {tile_index}",
+            "name": f"{prefix} {tile_index}",
             "wkt": wkt,
             "bbox": list(tile_bbox),
             "tag": "drawn",
             "checked": True,
         }
         self._add_to_queue(aoi_entry)
+
+    @staticmethod
+    def _wkt_smaller_than_bbox(wkt: str, bbox: list, tol: float = 0.01) -> bool:
+        """True if the polygon covers noticeably less area than its bbox.
+
+        Used to warn when tile-splitting will process area outside the source
+        polygon (drawn AOIs are always rectangles; saved/imported AOIs can be
+        arbitrary polygons).
+        """
+        if not wkt or not bbox or len(bbox) < 4:
+            return False
+        try:
+            geom = QgsGeometry.fromWkt(wkt)
+            if geom is None or geom.isEmpty():
+                return False
+            west, south, east, north = bbox
+            bbox_area = max(0.0, (east - west) * (north - south))
+            if bbox_area <= 0:
+                return False
+            return (geom.area() / bbox_area) < (1.0 - tol)
+        except Exception:
+            return False
+
+    def _enqueue_with_split_check(self, aoi_entry: dict) -> None:
+        """Add aoi_entry to the queue, prompting for tile split if it exceeds
+        the current backend's per-job size limit.
+
+        Used when loading saved AOIs from the library (or any pre-existing
+        AOI) so the behaviour matches freshly-drawn AOIs.
+        """
+        bbox = aoi_entry.get("bbox")
+        if not bbox or len(bbox) < 4:
+            self._add_to_queue(aoi_entry)
+            return
+
+        backend_id = self.backend_combo.currentData()
+        from ..core import aoi_splitter
+        if not aoi_splitter.needs_split(bbox, backend_id):
+            self._add_to_queue(aoi_entry)
+            return
+
+        dlg = _AoiSplitDialog(self, list(bbox), backend_id, self.iface.mapCanvas())
+        action = dlg.exec()
+        if action == "cancel":
+            # Skip this AOI; other loads in the batch continue.
+            return
+        if action == "single":
+            self._add_to_queue(aoi_entry)
+            return
+        # "tiles"
+        if self._wkt_smaller_than_bbox(aoi_entry.get("wkt"), bbox):
+            name = aoi_entry.get("name") or "AOI"
+            confirm = QMessageBox.question(
+                self,
+                "PWTT",
+                f"'{name}' is a non-rectangular polygon.\n\n"
+                "Tiles are based on its bounding box, so they will include area "
+                "outside the original polygon. Proceed with tile split?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if confirm != QMessageBox.Yes:
+                return
+        prefix = aoi_entry.get("name") or "Tile"
+        for i, tile_bbox in enumerate(dlg.confirmed_tiles(), start=1):
+            self._add_tile_aoi_to_queue(tile_bbox, i, name_prefix=f"{prefix} / Tile")
 
     def _queue_save_aoi(self, aoi_id: str):
         """Prompt for name and project, save to library, update queue row tag."""
@@ -1582,7 +1654,7 @@ class PWTTControlsDock(QDockWidget):
                 "tag": "saved",
                 "checked": True,
             }
-            self._add_to_queue(entry)
+            self._enqueue_with_split_check(entry)
 
     def _lib_rename_selected(self):
         from ..core import aoi_store
@@ -1921,7 +1993,7 @@ class PWTTControlsDock(QDockWidget):
                     "tag": "drawn",
                     "checked": True,
                 }
-                self._add_to_queue(aoi_entry)
+                self._enqueue_with_split_check(aoi_entry)
 
                 # Zoom to AOI
                 rect = QgsRectangle(west, south, east, north)
