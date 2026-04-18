@@ -56,10 +56,13 @@ tar -C "$ROOT" -cf - \
     --exclude='.claude' \
     --exclude='.venv' \
     --exclude='.pytest_cache' \
+    --exclude='.worktrees' \
     --exclude='__pycache__' \
     --exclude='build' \
     --exclude='scripts' \
     --exclude='data' \
+    --exclude='releases' \
+    --exclude='docs/superpowers' \
     --exclude='*.pyc' \
     --exclude='.DS_Store' \
     . | tar -C "$STAGING" -xf -
