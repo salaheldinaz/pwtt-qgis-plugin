@@ -308,6 +308,160 @@ def test_import_flat_array_creates_auto_project(tmp_path):
     assert any(p["id"] == pid for p in projects)
 
 
+def test_import_geojson_feature_collection(tmp_path):
+    _fresh()
+    path = str(tmp_path / "zones.geojson")
+    fc = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"name": "Alpha", "id": "A1"},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]],
+                },
+            },
+            {
+                "type": "Feature",
+                "properties": {"id": "B-only"},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[2, 2], [3, 2], [3, 3], [2, 3], [2, 2]]],
+                },
+            },
+        ],
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(fc, f)
+    result = aoi_store.import_aois_from_file(path)
+    assert result["added"] == 2
+    assert result["skipped_invalid"] == 0
+    aois = {a["name"]: a for a in aoi_store.load_aois()}
+    assert "Alpha" in aois
+    assert "B-only" in aois
+    assert aois["Alpha"]["bbox"] == [0.0, 0.0, 1.0, 1.0]
+    assert "Polygon" in aois["Alpha"]["wkt"]
+
+
+def test_import_geojson_single_feature(tmp_path):
+    _fresh()
+    path = str(tmp_path / "one.json")
+    feat = {
+        "type": "Feature",
+        "properties": {"name": "Solo"},
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[10, 20], [11, 20], [11, 21], [10, 21], [10, 20]]],
+        },
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(feat, f)
+    result = aoi_store.import_aois_from_file(path)
+    assert result["added"] == 1
+    assert aoi_store.load_aois()[0]["name"] == "Solo"
+
+
+def test_import_geojson_multipolygon(tmp_path):
+    _fresh()
+    path = str(tmp_path / "multi.json")
+    fc = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"name": "MP"},
+                "geometry": {
+                    "type": "MultiPolygon",
+                    "coordinates": [
+                        [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]],
+                        [[[2, 0], [3, 0], [3, 1], [2, 1], [2, 0]]],
+                    ],
+                },
+            }
+        ],
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(fc, f)
+    result = aoi_store.import_aois_from_file(path)
+    assert result["added"] == 1
+    wkt = aoi_store.load_aois()[0]["wkt"]
+    assert wkt.startswith("MultiPolygon")
+    assert aoi_store.load_aois()[0]["bbox"] == [0.0, 0.0, 3.0, 1.0]
+
+
+def test_import_geojson_skips_and_counts(tmp_path):
+    _fresh()
+    path = str(tmp_path / "mixed.json")
+    fc = {
+        "type": "FeatureCollection",
+        "features": [
+            {"type": "Feature", "geometry": None, "properties": {}},
+            {
+                "type": "Feature",
+                "properties": {"name": "Ok"},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[0, 0], [1, 0], [0, 1], [0, 0]]],
+                },
+            },
+            {"type": "Feature", "geometry": {"type": "Point", "coordinates": [0, 0]}, "properties": {}},
+        ],
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(fc, f)
+    result = aoi_store.import_aois_from_file(path)
+    assert result["added"] == 1
+    assert result["skipped_invalid"] == 2
+    assert aoi_store.load_aois()[0]["name"] == "Ok"
+
+
+def test_import_geojson_all_invalid_no_new_project(tmp_path):
+    _fresh()
+    proj = aoi_store.make_project("Existing")
+    aoi_store.save_project(proj)
+    path = str(tmp_path / "bad_fc.json")
+    fc = {
+        "type": "FeatureCollection",
+        "features": [
+            {"type": "Feature", "geometry": None, "properties": {}},
+        ],
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(fc, f)
+    result = aoi_store.import_aois_from_file(path)
+    assert result["added"] == 0
+    assert result["skipped_invalid"] == 1
+    assert len(aoi_store.load_projects()) == 1
+
+
+def test_import_geojson_into_target_project(tmp_path):
+    _fresh()
+    proj = aoi_store.make_project("Dest")
+    aoi_store.save_project(proj)
+    path = str(tmp_path / "fc.json")
+    fc = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"name": "InDest"},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]],
+                },
+            },
+        ],
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(fc, f)
+    result = aoi_store.import_aois_from_file(path, target_project_id=proj["id"])
+    assert result["added"] == 1
+    loaded = aoi_store.load_aois(project_id=proj["id"])
+    assert len(loaded) == 1
+    assert loaded[0]["name"] == "InDest"
+
+
 def test_import_into_target_project(tmp_path):
     _fresh()
     proj = aoi_store.make_project("Existing")

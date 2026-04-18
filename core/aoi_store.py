@@ -6,10 +6,146 @@ import json
 import os
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 AOI_EXPORT_FORMAT = "pwtt_aois_export"
 AOI_EXPORT_VERSION = 2
+
+
+def _geojson_feature_name(feature: dict, index: int) -> str:
+    props = feature.get("properties")
+    if isinstance(props, dict):
+        name = props.get("name")
+        if name is not None and str(name).strip():
+            return str(name).strip()
+        pid = props.get("id")
+        if pid is not None and str(pid).strip():
+            return str(pid).strip()
+    fid = feature.get("id")
+    if fid is not None and str(fid).strip():
+        return str(fid).strip()
+    return f"Feature {index + 1}"
+
+
+def _ring_wkt_coords(ring: List) -> Optional[str]:
+    if not ring or len(ring) < 3:
+        return None
+    parts = []
+    for p in ring:
+        if not isinstance(p, (list, tuple)) or len(p) < 2:
+            continue
+        parts.append(f"{float(p[0])} {float(p[1])}")
+    if len(parts) < 3:
+        return None
+    return ", ".join(parts)
+
+
+def _polygon_wkt_from_geojson(coords: Any) -> Optional[str]:
+    """GeoJSON Polygon coordinates: list of linear rings (exterior, then holes)."""
+    if not isinstance(coords, list):
+        return None
+    ring_segments = []
+    for ring in coords:
+        if not isinstance(ring, list):
+            continue
+        seg = _ring_wkt_coords(ring)
+        if seg is not None:
+            ring_segments.append(f"({seg})")
+    if not ring_segments:
+        return None
+    return "Polygon (" + ", ".join(ring_segments) + ")"
+
+
+def _bbox_from_geojson_polygon_coords(coords: Any) -> Optional[List[float]]:
+    if not isinstance(coords, list):
+        return None
+    xs: List[float] = []
+    ys: List[float] = []
+    for ring in coords:
+        if not isinstance(ring, list):
+            continue
+        for p in ring:
+            if isinstance(p, (list, tuple)) and len(p) >= 2:
+                xs.append(float(p[0]))
+                ys.append(float(p[1]))
+    if not xs:
+        return None
+    return [min(xs), min(ys), max(xs), max(ys)]
+
+
+def _multipolygon_wkt_from_geojson(coords: Any) -> Optional[str]:
+    if not isinstance(coords, list):
+        return None
+    polys = []
+    for poly in coords:
+        if not isinstance(poly, list):
+            continue
+        ring_segments = []
+        for ring in poly:
+            if not isinstance(ring, list):
+                continue
+            seg = _ring_wkt_coords(ring)
+            if seg is not None:
+                ring_segments.append(f"({seg})")
+        if ring_segments:
+            polys.append("(" + ", ".join(ring_segments) + ")")
+    if not polys:
+        return None
+    return "MultiPolygon (" + ", ".join(polys) + ")"
+
+
+def _bbox_from_geojson_multipolygon_coords(coords: Any) -> Optional[List[float]]:
+    if not isinstance(coords, list):
+        return None
+    xs: List[float] = []
+    ys: List[float] = []
+    for poly in coords:
+        if not isinstance(poly, list):
+            continue
+        b = _bbox_from_geojson_polygon_coords(poly)
+        if b:
+            xs.extend([b[0], b[2]])
+            ys.extend([b[1], b[3]])
+    if not xs:
+        return None
+    return [min(xs), min(ys), max(xs), max(ys)]
+
+
+def _geojson_geometry_to_wkt_and_bbox(geom: dict) -> Tuple[Optional[str], Optional[List[float]]]:
+    if not isinstance(geom, dict):
+        return None, None
+    gtype = geom.get("type")
+    coords = geom.get("coordinates")
+    if gtype == "Polygon" and isinstance(coords, list):
+        wkt = _polygon_wkt_from_geojson(coords)
+        bbox = _bbox_from_geojson_polygon_coords(coords) if wkt else None
+        return wkt, bbox
+    if gtype == "MultiPolygon" and isinstance(coords, list):
+        wkt = _multipolygon_wkt_from_geojson(coords)
+        bbox = _bbox_from_geojson_multipolygon_coords(coords) if wkt else None
+        return wkt, bbox
+    return None, None
+
+
+def _geojson_features_to_aois(features: List[Any]) -> tuple[List[dict], int]:
+    """Build AOI dicts from GeoJSON Feature list. Returns (aois, skipped_invalid_count)."""
+    out: List[dict] = []
+    skipped = 0
+    for i, feat in enumerate(features):
+        if not isinstance(feat, dict) or feat.get("type") != "Feature":
+            skipped += 1
+            continue
+        geom = feat.get("geometry")
+        if not isinstance(geom, dict) or not geom.get("coordinates"):
+            skipped += 1
+            continue
+        wkt, bbox = _geojson_geometry_to_wkt_and_bbox(geom)
+        if not wkt or not bbox:
+            skipped += 1
+            continue
+        name = _geojson_feature_name(feat, i)
+        out.append(make_aoi(name, wkt, bbox))
+    return out, skipped
 
 
 def _aois_path() -> str:
@@ -217,7 +353,8 @@ def export_project_to_file(project_id: str, path: str) -> int:
 
 def import_aois_from_file(path: str, target_project_id: str = None) -> Dict[str, int]:
     """Merge AOIs from file into the library. Handles v1 flat arrays, v2 full exports,
-    and single-project exports. target_project_id overrides project assignment."""
+    single-project exports, and GeoJSON FeatureCollection / Feature (Polygon, MultiPolygon).
+    target_project_id overrides project assignment."""
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
 
@@ -228,6 +365,7 @@ def import_aois_from_file(path: str, target_project_id: str = None) -> Dict[str,
     incoming_aois: List[dict] = []
     incoming_project = None   # single-project export
     incoming_projects: List[dict] = []  # multi-project export
+    pre_skipped_invalid = 0
 
     if isinstance(data, list):
         incoming_aois = [x for x in data if isinstance(x, dict)]
@@ -238,13 +376,23 @@ def import_aois_from_file(path: str, target_project_id: str = None) -> Dict[str,
                 incoming_project = data["project"]
             elif "projects" in data and isinstance(data["projects"], list):
                 incoming_projects = [x for x in data["projects"] if isinstance(x, dict)]
+        elif data.get("type") == "FeatureCollection":
+            feats = data.get("features")
+            if not isinstance(feats, list):
+                raise ValueError("GeoJSON FeatureCollection must have a 'features' array.")
+            incoming_aois, pre_skipped_invalid = _geojson_features_to_aois(feats)
+        elif data.get("type") == "Feature":
+            incoming_aois, pre_skipped_invalid = _geojson_features_to_aois([data])
         else:
-            raise ValueError("Unrecognized AOI file (expected PWTT AOI export or a JSON array).")
+            raise ValueError(
+                "Unrecognized AOI file (expected PWTT AOI export, GeoJSON FeatureCollection, "
+                "or a JSON array of AOI objects)."
+            )
     else:
         raise ValueError("Unrecognized AOI file format.")
 
     added = 0
-    skipped_invalid = 0
+    skipped_invalid = pre_skipped_invalid
     ids_rewritten = 0
 
     project_id_map: Dict[str, str] = {}

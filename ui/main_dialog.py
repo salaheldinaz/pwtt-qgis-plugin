@@ -1740,7 +1740,7 @@ class PWTTControlsDock(QDockWidget):
         from ..core import aoi_store
         import json as _json
         path, _ = QFileDialog.getOpenFileName(
-            self, "Import AOIs", "", "JSON files (*.json)"
+            self, "Import AOIs", "", "JSON / GeoJSON (*.json)"
         )
         if not path:
             return
