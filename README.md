@@ -156,6 +156,6 @@ Version is read from `metadata.txt` at the repo root (same file inside the `pwtt
 ---
 ## License
 
-This plugin is licensed under the **GNU General Public License v2.0 or later** — see [`LICENSE`](LICENSE). That matches QGIS (GPL), which this code extends.
+Released under the [MIT License](LICENSE) (`SPDX-License-Identifier: MIT`).
 
-The PWTT methodology and GEE reference logic credit **Oliver Ballinger**’s [`oballinger/PWTT`](https://github.com/oballinger/PWTT) (arXiv:2405.06323); see the header in `core/gee_pwtt.py` and the notice at the top of `LICENSE`.
+PWTT methodology / GEE reference: **Oliver Ballinger**’s [`oballinger/PWTT`](https://github.com/oballinger/PWTT) (arXiv:2405.06323); see `core/gee_pwtt.py`.
