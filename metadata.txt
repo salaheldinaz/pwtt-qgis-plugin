@@ -11,6 +11,7 @@ tags=sar,sentinel-1,damage,conflict,remote sensing,openeo,earth engine
 homepage=https://github.com/Salaheldinaz/PWTT-QGIS-Plugin
 tracker=https://github.com/Salaheldinaz/PWTT-QGIS-Plugin/issues
 repository=https://github.com/Salaheldinaz/PWTT-QGIS-Plugin
+license=https://github.com/Salaheldinaz/PWTT-QGIS-Plugin/blob/HEAD/LICENSE
 experimental=True
 deprecated=False
 category=Raster
