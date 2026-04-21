@@ -13,3 +13,4 @@ __pycache__/
 docs/superpowers/
 docs/blog/
 docs/pwtt-publish.txt
+.flake8

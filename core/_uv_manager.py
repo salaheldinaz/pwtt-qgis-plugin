@@ -203,7 +203,7 @@ def _download_via_urllib(url, dest_path, progress_callback):
         progress_callback(5, "Downloading (urllib)…")
     try:
         req = urllib.request.Request(url)
-        with urllib.request.urlopen(req) as resp, open(dest_path, "wb") as f:  # noqa: S310
+        with urllib.request.urlopen(req) as resp, open(dest_path, "wb") as f:  # nosec B310  # noqa: S310
             shutil.copyfileobj(resp, f)
     except Exception as e:
         return False, f"Download failed: {e}"

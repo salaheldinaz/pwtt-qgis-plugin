@@ -52,6 +52,7 @@ mkdir -p "$STAGING"
 tar -C "$ROOT" -cf - \
     --exclude='.git' \
     --exclude='.github' \
+    --exclude='.flake8' \
     --exclude='.cursor' \
     --exclude='.claude' \
     --exclude='.venv' \
