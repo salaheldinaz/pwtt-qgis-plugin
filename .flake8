@@ -1,0 +1,12 @@
+[flake8]
+max-line-length = 120
+exclude =
+    build,
+    releases,
+    __pycache__,
+    resources_rc.py,
+    .git,
+    docs
+# E203: whitespace before ':' conflicts with PEP 8 for numpy slicing (Black-compatible)
+# W503: line break before binary operator (Black-compatible)
+extend-ignore = E203, W503

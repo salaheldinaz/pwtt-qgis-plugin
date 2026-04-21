@@ -924,8 +924,12 @@ class PWTTJobsDock(QDockWidget):
         from ..core import job_store
         job = self._get_selected_job()
         if not job:
-            for btn in (self.load_btn, self.open_output_btn, self.view_logs_btn, self.view_timeseries_btn, self.load_local_btn, self.apply_style_btn, self.footprints_btn, self.resume_btn, self.stop_btn,
-                         self.cancel_btn, self.rerun_btn, self.delete_btn, self.export_job_btn):
+            for btn in (
+                self.load_btn, self.open_output_btn, self.view_logs_btn,
+                self.view_timeseries_btn, self.load_local_btn, self.apply_style_btn,
+                self.footprints_btn, self.resume_btn, self.stop_btn,
+                self.cancel_btn, self.rerun_btn, self.delete_btn, self.export_job_btn,
+            ):
                 btn.setEnabled(False)
             self.log_text.clear()
             self.progress_bar.setValue(0)
@@ -2107,4 +2111,3 @@ class PWTTJobsDock(QDockWidget):
 
     def cleanup(self):
         self._order_timer.stop()
-

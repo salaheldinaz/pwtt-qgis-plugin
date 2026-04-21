@@ -18,7 +18,6 @@ from qgis.PyQt.QtWidgets import (
     QSpinBox,
     QDoubleSpinBox,
     QCheckBox,
-    QProgressBar,
     QGroupBox,
     QFormLayout,
     QMessageBox,
@@ -166,15 +165,15 @@ class _AoiSplitDialog:
     confirmed_tiles() returns list of [west, south, east, north] bboxes.
     """
 
-    TILES  = "tiles"
+    TILES = "tiles"
     SINGLE = "single"
     CANCEL = "cancel"
 
     def __init__(self, parent, bbox: list, backend_id: str, canvas):
         from .dock_common import BACKENDS
-        self._bbox       = bbox
+        self._bbox = bbox
         self._backend_id = backend_id
-        self._canvas     = canvas
+        self._canvas = canvas
         self._preview_bands: list = []
         self._confirmed_tiles: list = []
         self._action = self.CANCEL
@@ -268,11 +267,11 @@ class _AoiSplitDialog:
 
     def _refresh_labels(self):
         from ..core import aoi_splitter
-        tiles      = self._current_tiles()
-        n          = len(tiles)
+        tiles = self._current_tiles()
+        n = len(tiles)
         cols, rows = aoi_splitter.tile_grid_dims(self._bbox, self._backend_id)
         west, south, east, north = self._bbox
-        width  = east - west
+        width = east - west
         height = north - south
 
         self._info_label.setText(
@@ -282,15 +281,15 @@ class _AoiSplitDialog:
         self._add_tiles_btn.setText(f"Add {n} tiles to queue")
 
         if self._backend_id == "gee" and tiles:
-            per_mb  = aoi_splitter.estimate_gee_bytes(tiles[0]) / (1024 * 1024)
+            per_mb = aoi_splitter.estimate_gee_bytes(tiles[0]) / (1024 * 1024)
             safe_mb = aoi_splitter.GEE_GETDOWNLOAD_EFFECTIVE_MAX_BYTES / (1024 * 1024)
-            cap_mb  = aoi_splitter.GEE_GETDOWNLOAD_MAX_BYTES / (1024 * 1024)
+            cap_mb = aoi_splitter.GEE_GETDOWNLOAD_MAX_BYTES / (1024 * 1024)
             self._quota_label.setText(
                 f"Estimated per tile: ~{per_mb:.0f} MiB  "
                 f"(budget ~{safe_mb:.0f} MiB; EE hard cap ~{cap_mb:.0f} MiB)"
             )
         elif self._backend_id == "openeo" and tiles:
-            per_pu   = aoi_splitter.estimate_openeo_pu(tiles[0])
+            per_pu = aoi_splitter.estimate_openeo_pu(tiles[0])
             total_pu = per_pu * n
             self._quota_label.setText(
                 f"Estimated per tile: ~{per_pu:.0f} PU  |  Total: ~{total_pu:.0f} PU"
@@ -301,13 +300,13 @@ class _AoiSplitDialog:
     def _draw_preview(self):
         self._clear_preview()
         colours = [
-            (255, 100,   0),
-            ( 30, 120, 255),
-            ( 50, 180,  50),
-            (180,  50, 180),
-            (220, 180,   0),
+            (255, 100, 0),
+            (30, 120, 255),
+            (50, 180, 50),
+            (180, 50, 180),
+            (220, 180, 0),
         ]
-        src_crs    = QgsCoordinateReferenceSystem("EPSG:4326")
+        src_crs = QgsCoordinateReferenceSystem("EPSG:4326")
         canvas_crs = self._canvas.mapSettings().destinationCrs()
         for i, tile_bbox in enumerate(self._current_tiles()):
             west, south, east, north = tile_bbox
@@ -494,11 +493,11 @@ class PWTTControlsDock(QDockWidget):
         return lbl
 
     _AOI_COLOURS = [
-        (255, 100,   0),   # orange (first drawn AOI)
-        ( 30, 120, 255),   # blue
-        ( 50, 180,  50),   # green
-        (180,  50, 180),   # purple
-        (220, 180,   0),   # amber
+        (255, 100, 0),     # orange (first drawn AOI)
+        (30, 120, 255),    # blue
+        (50, 180, 50),     # green
+        (180, 50, 180),    # purple
+        (220, 180, 0),     # amber
     ]
 
     def _build_ui(self):

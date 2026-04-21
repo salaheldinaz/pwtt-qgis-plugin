@@ -18,7 +18,6 @@ from qgis.PyQt.QtCore import QPoint, QPointF, QRectF, Qt
 from qgis.PyQt.QtGui import (
     QBrush,
     QColor,
-    QFont,
     QFontMetrics,
     QPainter,
     QPen,

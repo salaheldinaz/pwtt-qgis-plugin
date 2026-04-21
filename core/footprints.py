@@ -131,7 +131,7 @@ def _run_overpass_query(query: str, limit: int = 50000) -> str:
                     continue
                 try:
                     data = json.loads(raw)
-                except ValueError as e:
+                except ValueError:
                     # Server returned non-JSON (XML error page, HTML, etc.)
                     last_err = RuntimeError(
                         f"Non-JSON response from {endpoint}: {raw[:300]!r}"
@@ -242,7 +242,8 @@ def compute_footprints(
         pass
 
     if zonal_stats is None or not callable(zonal_stats):
-        import importlib, sys
+        import importlib
+        import sys
         from .deps import (
             _deps_dir,
             _find_real_rasterstats_dir,

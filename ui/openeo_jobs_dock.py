@@ -25,6 +25,7 @@ from .backend_auth import create_and_auth_backend, ensure_footprint_dependencies
 
 from ..core.utils import format_iso_datetime_display
 
+
 class PWTTOpenEOJobsDock(QDockWidget):
     """List openEO batch jobs from the server and download/add results."""
 
@@ -531,5 +532,3 @@ class PWTTOpenEOJobsDock(QDockWidget):
         except Exception as e:
             self.log_text.append(f"Delete failed: {e}")
             QMessageBox.warning(self, "PWTT", f"Failed to delete: {e}")
-
-

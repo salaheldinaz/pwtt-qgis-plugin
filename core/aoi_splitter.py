@@ -8,9 +8,9 @@ from typing import List, Tuple
 
 from .gee_backend import (
     GEE_GETDOWNLOAD_EFFECTIVE_MAX_BYTES,
-    GEE_GETDOWNLOAD_MAX_BYTES,
     estimate_gee_getdownload_request_bytes,
 )
+from .gee_backend import GEE_GETDOWNLOAD_MAX_BYTES  # noqa: F401  re-exported for UI
 
 # openEO/CDSE: tested to ~100×100 km; conservative for free-tier 10,000 PU/month
 _OPENEO_MAX_DEG: float = 0.5
@@ -88,10 +88,10 @@ def split_bbox(
     for r in range(rows - 1, -1, -1):   # top-to-bottom (north first)
         for c in range(cols):            # left-to-right
             tiles.append([
-                max(-180.0, west  + c * cell_w - overlap_deg),
-                max( -90.0, south + r * cell_h - overlap_deg),
-                min( 180.0, west  + (c + 1) * cell_w + overlap_deg),
-                min(  90.0, south + (r + 1) * cell_h + overlap_deg),
+                max(-180.0, west + c * cell_w - overlap_deg),
+                max(-90.0, south + r * cell_h - overlap_deg),
+                min(180.0, west + (c + 1) * cell_w + overlap_deg),
+                min(90.0, south + (r + 1) * cell_h + overlap_deg),
             ])
     return tiles
 
@@ -113,9 +113,9 @@ def estimate_openeo_pu(bbox: List[float]) -> float:
     """Estimated PU for an openEO batch job (S1/S2, 10 m, 3 bands, float32)."""
     west, south, east, north = bbox
     mid_lat = (south + north) / 2.0
-    width_m  = (east - west)   * _m_per_deg_lon(mid_lat)
+    width_m = (east - west) * _m_per_deg_lon(mid_lat)
     height_m = (north - south) * _m_per_deg_lat()
-    width_px  = math.ceil(width_m  / _OPENEO_SCALE_M)
+    width_px = math.ceil(width_m / _OPENEO_SCALE_M)
     height_px = math.ceil(height_m / _OPENEO_SCALE_M)
     px_factor = (width_px * height_px) / _OPENEO_BASELINE_PX
     return px_factor * _OPENEO_BANDS * _OPENEO_FLOAT32_MULT

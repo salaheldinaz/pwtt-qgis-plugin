@@ -1,4 +1,3 @@
-import math
 import sys
 import types
 import importlib
@@ -23,27 +22,33 @@ gee_backend_mod.estimate_gee_getdownload_request_bytes = (
 )
 sys.modules["core.gee_backend"] = gee_backend_mod
 
-import core.aoi_splitter as splitter
+import core.aoi_splitter as splitter  # noqa: E402
 importlib.reload(splitter)
 
 
 # ── needs_split ───────────────────────────────────────────────────────────────
 
+
 def test_needs_split_openeo_large():
     assert splitter.needs_split([0.0, 0.0, 1.0, 1.0], "openeo") is True
+
 
 def test_needs_split_openeo_small():
     assert splitter.needs_split([0.0, 0.0, 0.3, 0.3], "openeo") is False
 
+
 def test_needs_split_local_large():
     assert splitter.needs_split([0.0, 0.0, 2.0, 2.0], "local") is True
+
 
 def test_needs_split_local_small():
     assert splitter.needs_split([0.0, 0.0, 0.5, 0.5], "local") is False
 
+
 def test_needs_split_gee_small():
     # stub returns 10 MiB which is below 48 MiB cap
     assert splitter.needs_split([0.0, 0.0, 0.1, 0.1], "gee") is False
+
 
 def test_needs_split_gee_large(monkeypatch):
     monkeypatch.setattr(
@@ -63,25 +68,30 @@ def test_needs_split_gee_large(monkeypatch):
 
 # ── tile_grid_dims ────────────────────────────────────────────────────────────
 
+
 def test_tile_grid_dims_openeo_2x2():
     cols, rows = splitter.tile_grid_dims([0.0, 0.0, 1.0, 1.0], "openeo")
     assert cols == 2
     assert rows == 2
+
 
 def test_tile_grid_dims_openeo_exact():
     cols, rows = splitter.tile_grid_dims([0.0, 0.0, 0.5, 0.5], "openeo")
     assert cols == 1
     assert rows == 1
 
+
 def test_tile_grid_dims_openeo_3x2():
     cols, rows = splitter.tile_grid_dims([0.0, 0.0, 1.4, 0.9], "openeo")
     assert cols == 3
     assert rows == 2
 
+
 def test_tile_grid_dims_local():
     cols, rows = splitter.tile_grid_dims([0.0, 0.0, 2.5, 1.5], "local")
     assert cols == 3
     assert rows == 2
+
 
 def test_tile_grid_dims_minimum_1():
     cols, rows = splitter.tile_grid_dims([0.0, 0.0, 0.01, 0.01], "openeo")
@@ -90,6 +100,7 @@ def test_tile_grid_dims_minimum_1():
 
 
 # ── split_bbox ────────────────────────────────────────────────────────────────
+
 
 def test_split_bbox_count():
     # 1° × 1° openEO → 2×2 = 4 tiles
@@ -100,19 +111,19 @@ def test_split_bbox_count():
 def test_split_bbox_no_overlap_union():
     # With no overlap, tiles exactly tile the bbox (no gaps, no duplicates)
     tiles = splitter.split_bbox([0.0, 0.0, 1.0, 1.0], "openeo", overlap_deg=0.0)
-    wests  = [t[0] for t in tiles]
-    easts  = [t[2] for t in tiles]
+    wests = [t[0] for t in tiles]
+    easts = [t[2] for t in tiles]
     souths = [t[1] for t in tiles]
     norths = [t[3] for t in tiles]
-    assert min(wests)  == pytest.approx(0.0)
-    assert max(easts)  == pytest.approx(1.0)
+    assert min(wests) == pytest.approx(0.0)
+    assert max(easts) == pytest.approx(1.0)
     assert min(souths) == pytest.approx(0.0)
     assert max(norths) == pytest.approx(1.0)
 
 
 def test_split_bbox_overlap_expands_tiles():
-    tiles    = splitter.split_bbox([0.0, 0.0, 1.0, 1.0], "openeo", overlap_deg=0.05)
-    no_ov    = splitter.split_bbox([0.0, 0.0, 1.0, 1.0], "openeo", overlap_deg=0.0)
+    tiles = splitter.split_bbox([0.0, 0.0, 1.0, 1.0], "openeo", overlap_deg=0.05)
+    no_ov = splitter.split_bbox([0.0, 0.0, 1.0, 1.0], "openeo", overlap_deg=0.0)
     for t, b in zip(tiles, no_ov):
         assert (t[2] - t[0]) > (b[2] - b[0])
 
@@ -126,8 +137,8 @@ def test_split_bbox_order_top_to_bottom_left_to_right():
 
 
 def test_split_bbox_uniform_cells():
-    tiles   = splitter.split_bbox([0.0, 0.0, 1.5, 1.0], "openeo", overlap_deg=0.0)
-    widths  = [t[2] - t[0] for t in tiles]
+    tiles = splitter.split_bbox([0.0, 0.0, 1.5, 1.0], "openeo", overlap_deg=0.0)
+    widths = [t[2] - t[0] for t in tiles]
     heights = [t[3] - t[1] for t in tiles]
     for w in widths[1:]:
         assert w == pytest.approx(widths[0])
@@ -155,6 +166,7 @@ def test_split_bbox_clamped_near_pole():
 
 # ── estimate_gee_bytes ────────────────────────────────────────────────────────
 
+
 def test_estimate_gee_bytes_returns_int():
     result = splitter.estimate_gee_bytes([0.0, 0.0, 0.2, 0.2])
     assert isinstance(result, int)
@@ -168,6 +180,7 @@ def test_estimate_gee_bytes_delegates_to_backend():
 
 
 # ── estimate_openeo_pu ────────────────────────────────────────────────────────
+
 
 def test_estimate_openeo_pu_positive():
     pu = splitter.estimate_openeo_pu([0.0, 0.0, 0.5, 0.5])

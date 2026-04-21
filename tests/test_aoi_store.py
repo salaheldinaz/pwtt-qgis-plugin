@@ -10,18 +10,22 @@ _tmpdir = tempfile.mkdtemp(prefix="pwtt_test_")
 
 # Stub out qgis.core so aoi_store can be imported without a running QGIS instance
 qgis_core = types.ModuleType("qgis.core")
+
+
 class _FakeApp:
     @staticmethod
     def qgisSettingsDirPath():
         return _tmpdir
+
+
 qgis_core.QgsApplication = _FakeApp
 sys.modules.setdefault("qgis", types.ModuleType("qgis"))
 sys.modules["qgis.core"] = qgis_core
 
 # Now import
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-import importlib
-import core.aoi_store as aoi_store
+import importlib  # noqa: E402
+import core.aoi_store as aoi_store  # noqa: E402
 importlib.reload(aoi_store)  # pick up the patched path
 
 
@@ -108,7 +112,8 @@ def test_make_aoi_has_required_fields():
 def test_migration_v1_to_v2(tmp_path):
     """A bare JSON array (v1) is migrated to v2 on first read."""
     _fresh()
-    import importlib, json
+    import importlib
+    import json
     # Write a v1 file directly
     p = os.path.join(_tmpdir, "PWTT", "saved_aois.json")
     os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -188,7 +193,7 @@ def test_delete_project_cascade():
     proj2 = aoi_store.make_project("Keep")
     aoi_store.save_project(proj2)
     aoi = aoi_store.make_aoi("An AOI", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
-                              [0, 0, 1, 1], project_id=proj["id"])
+                             [0, 0, 1, 1], project_id=proj["id"])
     aoi_store.save_aoi(aoi)
     aoi_store.delete_project(proj["id"], cascade=True)
     assert all(p["id"] != proj["id"] for p in aoi_store.load_projects())
@@ -213,7 +218,7 @@ def test_load_projects_sorted_by_name():
 
 def test_make_aoi_includes_project_id():
     aoi = aoi_store.make_aoi("X", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
-                              [0, 0, 1, 1], project_id="proj1")
+                             [0, 0, 1, 1], project_id="proj1")
     assert aoi["project_id"] == "proj1"
 
 
@@ -224,9 +229,9 @@ def test_load_aois_filtered_by_project():
     aoi_store.save_project(p1)
     aoi_store.save_project(p2)
     a1 = aoi_store.make_aoi("A1", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
-                             [0, 0, 1, 1], project_id=p1["id"])
+                            [0, 0, 1, 1], project_id=p1["id"])
     a2 = aoi_store.make_aoi("A2", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
-                             [0, 0, 1, 1], project_id=p2["id"])
+                            [0, 0, 1, 1], project_id=p2["id"])
     aoi_store.save_aoi(a1)
     aoi_store.save_aoi(a2)
     assert len(aoi_store.load_aois(project_id=p1["id"])) == 1
@@ -241,7 +246,7 @@ def test_move_aoi():
     aoi_store.save_project(p1)
     aoi_store.save_project(p2)
     aoi = aoi_store.make_aoi("M", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
-                              [0, 0, 1, 1], project_id=p1["id"])
+                             [0, 0, 1, 1], project_id=p1["id"])
     aoi_store.save_aoi(aoi)
     aoi_store.move_aoi(aoi["id"], p2["id"])
     loaded = aoi_store.load_aois()
@@ -262,7 +267,7 @@ def test_move_aoi_invalid_project_raises():
     proj = aoi_store.make_project("P")
     aoi_store.save_project(proj)
     aoi = aoi_store.make_aoi("A", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
-                              [0, 0, 1, 1], project_id=proj["id"])
+                             [0, 0, 1, 1], project_id=proj["id"])
     aoi_store.save_aoi(aoi)
     with pytest.raises(ValueError, match="not found"):
         aoi_store.move_aoi(aoi["id"], "bad_project_id")
@@ -273,7 +278,7 @@ def test_export_project_round_trip(tmp_path):
     proj = aoi_store.make_project("Kyiv")
     aoi_store.save_project(proj)
     aoi = aoi_store.make_aoi("City center", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
-                              [0, 0, 1, 1], project_id=proj["id"])
+                             [0, 0, 1, 1], project_id=proj["id"])
     aoi_store.save_aoi(aoi)
     path = str(tmp_path / "kyiv.json")
     count = aoi_store.export_project_to_file(proj["id"], path)
@@ -468,7 +473,7 @@ def test_import_into_target_project(tmp_path):
     proj2 = aoi_store.make_project("FromFile")
     aoi_store.save_project(proj2)
     aoi = aoi_store.make_aoi("A", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
-                              [0, 0, 1, 1], project_id=proj2["id"])
+                             [0, 0, 1, 1], project_id=proj2["id"])
     aoi_store.save_aoi(aoi)
     path = str(tmp_path / "proj2.json")
     aoi_store.export_project_to_file(proj2["id"], path)
@@ -488,9 +493,9 @@ def test_import_full_export_multi_project(tmp_path):
     aoi_store.save_project(p1)
     aoi_store.save_project(p2)
     a1 = aoi_store.make_aoi("AOI-A", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
-                             [0, 0, 1, 1], project_id=p1["id"])
+                            [0, 0, 1, 1], project_id=p1["id"])
     a2 = aoi_store.make_aoi("AOI-B", "Polygon ((0 0, 1 0, 1 1, 0 1, 0 0))",
-                             [0, 0, 1, 1], project_id=p2["id"])
+                            [0, 0, 1, 1], project_id=p2["id"])
     aoi_store.save_aoi(a1)
     aoi_store.save_aoi(a2)
     path = str(tmp_path / "full.json")

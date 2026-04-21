@@ -312,17 +312,17 @@ def hotelling_t2(s1, inference_start, war_start, pre_interval, post_interval, tt
     post_var_vh = post_sd.select('VH_stdDev').pow(2)
 
     # Per-pixel cross-covariance: cov(VV, VH) = E[(VV-mu_VV)(VH-mu_VH)]
-    pre_cov = pre.map(lambda img:
-        img.select('VV').subtract(pre_mean.select('VV'))
-        .multiply(img.select('VH').subtract(pre_mean.select('VH')))
-        .rename('cov')
-    ).mean().multiply(pre_n).divide(pre_n.subtract(1))  # Bessel correction
+    def _cov(img, mean_img):
+        return (
+            img.select('VV').subtract(mean_img.select('VV'))
+            .multiply(img.select('VH').subtract(mean_img.select('VH')))
+            .rename('cov')
+        )
 
-    post_cov = post.map(lambda img:
-        img.select('VV').subtract(post_mean.select('VV'))
-        .multiply(img.select('VH').subtract(post_mean.select('VH')))
-        .rename('cov')
-    ).mean().multiply(post_n).divide(post_n.subtract(1))  # Bessel correction
+    pre_cov = pre.map(lambda img: _cov(img, pre_mean)) \
+        .mean().multiply(pre_n).divide(pre_n.subtract(1))  # Bessel correction
+    post_cov = post.map(lambda img: _cov(img, post_mean)) \
+        .mean().multiply(post_n).divide(post_n.subtract(1))  # Bessel correction
 
     # Pooled covariance matrix elements: S_pooled = ((n1-1)*S1 + (n2-1)*S2) / (n1+n2-2)
     denom_pool = pre_n.add(post_n).subtract(2)
@@ -486,7 +486,16 @@ def compute_orbit_normalized_timeseries(
     return results
 
 
-def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interval=2, footprints=None, viz=False, viz_return_map=False, export=False, export_dir='PWTT_Export', export_name=None, export_scale=10, grid_scale=500, export_grid=False, clip=True, method='stouffer', damage_threshold=DEFAULT_DAMAGE_THRESHOLD, ttest_type='welch', smoothing='default', mask_before_smooth=True, lee_mode='per_image'):
+def detect_damage(
+    aoi, inference_start, war_start,
+    pre_interval=12, post_interval=2, footprints=None,
+    viz=False, viz_return_map=False,
+    export=False, export_dir='PWTT_Export', export_name=None,
+    export_scale=10, grid_scale=500, export_grid=False, clip=True,
+    method='stouffer', damage_threshold=DEFAULT_DAMAGE_THRESHOLD,
+    ttest_type='welch', smoothing='default', mask_before_smooth=True,
+    lee_mode='per_image',
+):
     import warnings
 
     if (export or export_grid) and export_name is None:
@@ -552,11 +561,15 @@ def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interva
                 ee.Reducer.max(), aoi, 1000).values().get(0)
             pre_mean = pre.mean()
             pre_sd = pre.reduce(ee.Reducer.stdDev()).rename(['VV', 'VH'])
+
             # z-normalize all images (pre and post) in this orbit
-            normalized = s1.map(lambda img:
-                img.subtract(pre_mean).divide(pre_sd.max(ee.Image.constant(1e-10)))
-                .copyProperties(img, ['system:time_start'])
-            ).toList(500)
+            def _normalize(img):
+                return (
+                    img.subtract(pre_mean)
+                    .divide(pre_sd.max(ee.Image.constant(1e-10)))
+                    .copyProperties(img, ['system:time_start'])
+                )
+            normalized = s1.map(_normalize).toList(500)
             return ee.Algorithms.If(ee.Number(has_pre).gt(0), normalized, ee.List([]))
 
         # Step 2: Pool normalized images from all orbits into one collection
@@ -576,7 +589,8 @@ def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interva
         post_mean_raw = post_norm.mean()
         if lee_mode == 'composite':
             # Apply Lee filter to composites only (saves ~37% EECU)
-            _add_angle = lambda img: img.addBands(ee.Image.constant(0).rename('angle'))
+            def _add_angle(img):
+                return img.addBands(ee.Image.constant(0).rename('angle'))
             pre_mean = lee_filter(_add_angle(pre_mean_raw)).select(['VV', 'VH'])
             post_mean = lee_filter(_add_angle(post_mean_raw)).select(['VV', 'VH'])
         else:
@@ -594,17 +608,17 @@ def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interva
         post_var_vh = post_sd.select('VH_stdDev').pow(2)
 
         # Per-pixel cross-covariance (from unfiltered means for consistency)
-        pre_cov = pre_norm.map(lambda img:
-            img.select('VV').subtract(pre_mean_raw.select('VV'))
-            .multiply(img.select('VH').subtract(pre_mean_raw.select('VH')))
-            .rename('cov')
-        ).mean().multiply(pre_n).divide(pre_n.subtract(1))
+        def _cov_norm(img, mean_img):
+            return (
+                img.select('VV').subtract(mean_img.select('VV'))
+                .multiply(img.select('VH').subtract(mean_img.select('VH')))
+                .rename('cov')
+            )
 
-        post_cov = post_norm.map(lambda img:
-            img.select('VV').subtract(post_mean_raw.select('VV'))
-            .multiply(img.select('VH').subtract(post_mean_raw.select('VH')))
-            .rename('cov')
-        ).mean().multiply(post_n).divide(post_n.subtract(1))
+        pre_cov = pre_norm.map(lambda img: _cov_norm(img, pre_mean_raw)) \
+            .mean().multiply(pre_n).divide(pre_n.subtract(1))
+        post_cov = post_norm.map(lambda img: _cov_norm(img, post_mean_raw)) \
+            .mean().multiply(post_n).divide(post_n.subtract(1))
 
         # Pooled covariance matrix (2x2)
         denom_pool = pre_n.add(post_n).subtract(2)
@@ -694,7 +708,9 @@ def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interva
             p_value = p_value.multiply(n_orbits).min(ee.Image.constant(1)).rename('p_value')
 
         else:
-            raise ValueError(f"method must be 'stouffer', 'max', 'ztest', 'hotelling', or 'mahalanobis', got '{method}'")
+            raise ValueError(
+                f"method must be 'stouffer', 'max', 'ztest', 'hotelling', or 'mahalanobis', got '{method}'"
+            )
 
     # Build a fully-masked empty image as fallback for areas with no S1 coverage
     empty_bands = ['T_statistic', 'damage', 'p_value', 'n_pre', 'n_post']
@@ -826,12 +842,15 @@ def detect_damage(aoi, inference_start, war_start, pre_interval=12, post_interva
     return image
 
 
-def terrain_flattening(collection, TERRAIN_FLATTENING_MODEL, DEM, TERRAIN_FLATTENING_ADDITIONAL_LAYOVER_SHADOW_BUFFER):
+def terrain_flattening(
+    collection, TERRAIN_FLATTENING_MODEL, DEM, TERRAIN_FLATTENING_ADDITIONAL_LAYOVER_SHADOW_BUFFER
+):
     '''
     Terrain Flattening
 
-    Vollrath, A., Mullissa, A., & Reiche, J. (2020). Angular-Based Radiometric Slope Correction for Sentinel-1 on Google Earth Engine.
-    Remote Sensing, 12(11), [1867]. https://doi.org/10.3390/rs12111867
+    Vollrath, A., Mullissa, A., & Reiche, J. (2020). Angular-Based Radiometric
+    Slope Correction for Sentinel-1 on Google Earth Engine. Remote Sensing,
+    12(11), [1867]. https://doi.org/10.3390/rs12111867
     '''
     ninetyRad = ee.Image.constant(90).multiply(3.14159265359 / 180)
 
@@ -887,8 +906,6 @@ def terrain_flattening(collection, TERRAIN_FLATTENING_MODEL, DEM, TERRAIN_FLATTE
         phi_rRad = phi_iRad.subtract(phi_sRad)
         alpha_rRad = (alpha_sRad.tan().multiply(phi_rRad.cos())).atan()
         alpha_azRad = (alpha_sRad.tan().multiply(phi_rRad.sin())).atan()
-        theta_liaRad = (alpha_azRad.cos().multiply((theta_iRad.subtract(alpha_rRad)).cos())).acos()
-        theta_liaDeg = theta_liaRad.multiply(180 / 3.14159265359)
 
         gamma0 = image.divide(theta_iRad.cos())
 

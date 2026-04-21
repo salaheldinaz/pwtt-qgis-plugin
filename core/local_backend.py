@@ -65,6 +65,7 @@ def _parse_relative_orbit_from_name(name: str) -> Optional[int]:
         return ((abs_orbit - 27) % 175) + 1
     return None
 
+
 # Default ground-range pixel spacing for AOI warp (~Sentinel-1 GRD IW).
 _AOI_RESOLUTION_M = 10.0
 # Expand AOI in projected metres so edge pixels are not clipped by reprojection.
@@ -213,7 +214,7 @@ def _gdal_warp_band_fallback(
     resampling,
 ) -> np.ndarray:
     """Last-resort warp using ``osgeo.gdal.Warp`` — works on every GDAL build."""
-    from osgeo import gdal, osr
+    from osgeo import gdal
 
     gdal.UseExceptions()
 
@@ -225,7 +226,6 @@ def _gdal_warp_band_fallback(
         5: gdal.GRA_Average,
     }
     try:
-        from rasterio.enums import Resampling as _R
         gra = _RESAMP_MAP.get(int(resampling), gdal.GRA_Bilinear)
     except Exception:
         gra = gdal.GRA_Bilinear

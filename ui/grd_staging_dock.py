@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """GRD staging dock: local CDSE jobs waiting on offline GRD."""
 
-import os
 import threading
 
 from qgis.PyQt.QtWidgets import (
@@ -24,6 +23,7 @@ from qgis.core import QgsSettings
 from .dock_common import dock_title, offline_grd_catalog_rows
 
 from ..core.utils import format_iso_datetime_display
+
 
 class PWTTGrdStagingDock(QDockWidget):
     """Panel: Local jobs with Sentinel-1 GRD products staging from CDSE cold storage."""
@@ -295,4 +295,3 @@ class PWTTGrdStagingDock(QDockWidget):
         if not jid or not self.jobs_dock:
             return
         self.jobs_dock.focus_job(jid)
-

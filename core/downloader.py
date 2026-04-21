@@ -68,7 +68,9 @@ def search_s1_grd(
     end_odata = end_date.replace(" ", "T") + "T23:59:59.999Z" if "T" not in end_date else end_date
     filt = (
         f"Collection/Name eq 'SENTINEL-1' "
-        f"and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'productType' and att/OData.CSC.StringAttribute/Value eq 'IW_GRDH_1S') "
+        f"and Attributes/OData.CSC.StringAttribute/any("
+        f"att:att/Name eq 'productType' "
+        f"and att/OData.CSC.StringAttribute/Value eq 'IW_GRDH_1S') "
         f"and OData.CSC.Intersects(area=geography'{geom}') "
         f"and ContentDate/Start gt {start_odata} and ContentDate/Start lt {end_odata}"
     )
