@@ -193,10 +193,18 @@ def _download_via_qgis(url, dest_path, progress_callback):
 def _download_via_urllib(url, dest_path, progress_callback):
     """Fallback download with stdlib urllib."""
     import urllib.request
+    from urllib.parse import urlparse
+
+    scheme = urlparse(url).scheme.lower()
+    if scheme not in ("http", "https"):
+        return False, f"Download failed: unsupported URL scheme '{scheme}'"
+
     if progress_callback:
         progress_callback(5, "Downloading (urllib)…")
     try:
-        urllib.request.urlretrieve(url, dest_path)
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req) as resp, open(dest_path, "wb") as f:  # noqa: S310
+            shutil.copyfileobj(resp, f)
     except Exception as e:
         return False, f"Download failed: {e}"
     return True, ""

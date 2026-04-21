@@ -1,23 +1,22 @@
 import json
 import os
 import sys
+import tempfile
 import types
 import pytest
+
+# Point the store at a temp directory created via tempfile
+_tmpdir = tempfile.mkdtemp(prefix="pwtt_test_")
 
 # Stub out qgis.core so aoi_store can be imported without a running QGIS instance
 qgis_core = types.ModuleType("qgis.core")
 class _FakeApp:
     @staticmethod
     def qgisSettingsDirPath():
-        return "/tmp/fake_qgis"
+        return _tmpdir
 qgis_core.QgsApplication = _FakeApp
 sys.modules.setdefault("qgis", types.ModuleType("qgis"))
 sys.modules["qgis.core"] = qgis_core
-
-# Point the store at a temp directory
-import tempfile
-_tmpdir = tempfile.mkdtemp()
-qgis_core.QgsApplication.qgisSettingsDirPath = staticmethod(lambda: _tmpdir)
 
 # Now import
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))

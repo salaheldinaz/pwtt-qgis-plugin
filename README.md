@@ -6,10 +6,9 @@
 
 -  🧪 **Method / reference implementation:** [oballinger/PWTT](https://github.com/oballinger/PWTT)
 - **Paper:** [arXiv:2405.06323](https://arxiv.org/pdf/2405.06323)
-- **Full technical reference:** [WIKI.md](docs/WIKI.md)
+- **🔧 Full technical reference:** [WIKI.md](docs/WIKI.md)
 - **📝 User guide (blog):** [Link](https://salaheldinaz.com/blog/pwtt-qgis-plugin/)
 - **📰 Case study (blog):**  [Link](https://salaheldinaz.com/blog/pwtt-qgis-plugin/)
-- 🔧 **[WIKI.md](WIKI.md)** — full pipeline details: backends, temporal windows, GEE vs openEO vs Local, output bands, jobs, code map.
 
 ---
 
@@ -168,17 +167,13 @@ QGIS often opens the GeoTIFF as **multiband color** (band 1 → red, band 2 → 
 
 For an intuitive reading of **band 1**, use **singleband pseudocolor**. The plugin's default ramp matches the reference PWTT Earth Engine preview (`core/viz_constants.py`, `core/qgis_output_style.py`):
 
-- 🟡 **Yellow** at stretch **minimum** (default **3.0**)
-- 🔴 **Red** at the **midpoint** (~4)
-- 🟣 **Purple** at the **maximum** (default **5.0**)
-
-So **higher** `T_statistic` in the window is **more purple**, **lower** is **more yellow**. Symbology min/max (or percentile stretch) controls which numeric range maps to those hues — change the ramp there if you want another metaphor.
-
 | Color | Meaning (default 3 → 5 ramp) |
 |-------|-------------------------------|
 | 🟣 **Purple** | Near stretch **max** — strongest change signal within the display window. |
 | 🔴 **Red** | Mid stretch — strong change. |
 | 🟡 **Yellow** | Near stretch **min** — elevated signal, but the low end of this ramp. |
+
+So **higher** `T_statistic` in the window is **more purple**, **lower** is **more yellow**. Symbology min/max (or percentile stretch) controls which numeric range maps to those hues — change the ramp there if you want another metaphor.
 
 **After the layer is added:** Symbology changes the picture, **not** the raster values. Narrowing `max` (e.g. 5 → 4) makes strong change *look* more vivid without editing the file. **Band 2** is fixed to the cutoff used when the job ran — for a different mask, **re‑run** with another cutoff or use **Raster Calculator** on band 1.
 
