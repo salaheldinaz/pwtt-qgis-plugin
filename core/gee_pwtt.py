@@ -285,6 +285,14 @@ def ztest(s1, inference_start, war_start, pre_interval):
         .addBands(df_vv).addBands(df_vh)
 
 
+def _per_pixel_vv_vh_cov(img, mean_img):
+    return (
+        img.select('VV').subtract(mean_img.select('VV'))
+        .multiply(img.select('VH').subtract(mean_img.select('VH')))
+        .rename('cov')
+    )
+
+
 def hotelling_t2(s1, inference_start, war_start, pre_interval, post_interval, ttest_type='welch'):
     """Hotelling's T-squared: joint multivariate test on VV and VH.
     Uses closed-form 2x2 inverse of pooled covariance matrix.
@@ -312,16 +320,9 @@ def hotelling_t2(s1, inference_start, war_start, pre_interval, post_interval, tt
     post_var_vh = post_sd.select('VH_stdDev').pow(2)
 
     # Per-pixel cross-covariance: cov(VV, VH) = E[(VV-mu_VV)(VH-mu_VH)]
-    def _cov(img, mean_img):
-        return (
-            img.select('VV').subtract(mean_img.select('VV'))
-            .multiply(img.select('VH').subtract(mean_img.select('VH')))
-            .rename('cov')
-        )
-
-    pre_cov = pre.map(lambda img: _cov(img, pre_mean)) \
+    pre_cov = pre.map(lambda img: _per_pixel_vv_vh_cov(img, pre_mean)) \
         .mean().multiply(pre_n).divide(pre_n.subtract(1))  # Bessel correction
-    post_cov = post.map(lambda img: _cov(img, post_mean)) \
+    post_cov = post.map(lambda img: _per_pixel_vv_vh_cov(img, post_mean)) \
         .mean().multiply(post_n).divide(post_n.subtract(1))  # Bessel correction
 
     # Pooled covariance matrix elements: S_pooled = ((n1-1)*S1 + (n2-1)*S2) / (n1+n2-2)
@@ -608,16 +609,9 @@ def detect_damage(
         post_var_vh = post_sd.select('VH_stdDev').pow(2)
 
         # Per-pixel cross-covariance (from unfiltered means for consistency)
-        def _cov_norm(img, mean_img):
-            return (
-                img.select('VV').subtract(mean_img.select('VV'))
-                .multiply(img.select('VH').subtract(mean_img.select('VH')))
-                .rename('cov')
-            )
-
-        pre_cov = pre_norm.map(lambda img: _cov_norm(img, pre_mean_raw)) \
+        pre_cov = pre_norm.map(lambda img: _per_pixel_vv_vh_cov(img, pre_mean_raw)) \
             .mean().multiply(pre_n).divide(pre_n.subtract(1))
-        post_cov = post_norm.map(lambda img: _cov_norm(img, post_mean_raw)) \
+        post_cov = post_norm.map(lambda img: _per_pixel_vv_vh_cov(img, post_mean_raw)) \
             .mean().multiply(post_n).divide(post_n.subtract(1))
 
         # Pooled covariance matrix (2x2)

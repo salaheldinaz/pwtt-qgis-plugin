@@ -8,9 +8,15 @@ from typing import List, Tuple
 
 from .gee_backend import (
     GEE_GETDOWNLOAD_EFFECTIVE_MAX_BYTES,
+    GEE_GETDOWNLOAD_MAX_BYTES,
     estimate_gee_getdownload_request_bytes,
 )
-from .gee_backend import GEE_GETDOWNLOAD_MAX_BYTES  # noqa: F401  re-exported for UI
+
+__all__ = [
+    "GEE_GETDOWNLOAD_EFFECTIVE_MAX_BYTES",
+    "GEE_GETDOWNLOAD_MAX_BYTES",
+    "estimate_gee_getdownload_request_bytes",
+]
 
 # openEO/CDSE: tested to ~100×100 km; conservative for free-tier 10,000 PU/month
 _OPENEO_MAX_DEG: float = 0.5
